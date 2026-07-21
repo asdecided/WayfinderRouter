@@ -4,6 +4,7 @@ import SwiftUI
 public struct AccountsSettingsView: View {
     @ObservedObject private var accountState: CodexAccountSettingsState
     @State private var confirmSignOut = false
+    @State private var copiedSetup = false
 
     public init(accountState: CodexAccountSettingsState) {
         self.accountState = accountState
@@ -67,6 +68,8 @@ public struct AccountsSettingsView: View {
                 symbol: "person.crop.circle.badge.clock",
                 showsProgress: true
             )
+        case .setupRequired:
+            setupRequiredContent
         case .signedOut:
             signedOutContent
         case .awaitingBrowser(let login):
@@ -81,6 +84,64 @@ public struct AccountsSettingsView: View {
             unavailableContent(detail: detail)
         case .failed(let message):
             failedContent(message: message)
+        }
+    }
+
+    private var setupRequiredContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            statusRow(
+                title: "Add ChatGPT to Wayfinder",
+                detail: "ChatGPT account access is optional and has not been added to this gateway yet.",
+                symbol: "person.crop.circle.badge.plus",
+                tint: WayfinderTheme.local
+            )
+
+            VStack(alignment: .leading, spacing: 8) {
+                setupStep(1, "Copy the configuration below.")
+                setupStep(2, "Open your gateway config and paste it at the end.")
+                setupStep(3, "Restart the gateway, then check again to sign in.")
+            }
+
+            Text(Self.chatGPTConfiguration)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.background.opacity(0.58), in: RoundedRectangle(cornerRadius: 8))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(WayfinderTheme.hairline, lineWidth: 1)
+                }
+
+            HStack(spacing: 8) {
+                Button(copiedSetup ? "Copied" : "Copy Configuration") {
+                    copy(Self.chatGPTConfiguration)
+                    copiedSetup = true
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button("Open Config") {
+                    openGatewayConfig()
+                }
+
+                Button("Gateway Settings") {
+                    NotificationCenter.default.post(
+                        name: .wayfinderOpenSettings,
+                        object: SettingsSection.gateway
+                    )
+                }
+
+                Spacer()
+
+                Button("Check Again") {
+                    Task { await accountState.refresh() }
+                }
+                .disabled(accountState.isPerformingAction)
+            }
+
+            Text("Signing in will not change Automatic routing. You choose ChatGPT explicitly from Chat after setup.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -294,6 +355,18 @@ public struct AccountsSettingsView: View {
         .accessibilityElement(children: .combine)
     }
 
+    private func setupStep(_ number: Int, _ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text("\(number)")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.white)
+                .frame(width: 18, height: 18)
+                .background(WayfinderTheme.local, in: Circle())
+            Text(text)
+                .font(.callout)
+        }
+    }
+
     private func accountValueRow(label: String, value: String) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(label)
@@ -339,4 +412,16 @@ public struct AccountsSettingsView: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
     }
+
+    private func openGatewayConfig() {
+        let url = URL(fileURLWithPath: GatewayServiceController.defaultConfigPath())
+        NSWorkspace.shared.open(url)
+    }
+
+    private static let chatGPTConfiguration = """
+    [gateway.models.chatgpt-sol]
+    provider = "codex-app-server"
+    model = "gpt-5.6-sol"
+    context_window = 1050000
+    """
 }

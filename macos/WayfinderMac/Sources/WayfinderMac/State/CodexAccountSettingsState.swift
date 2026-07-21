@@ -2,6 +2,7 @@ import Foundation
 
 public enum CodexAccountViewState: Equatable, Sendable {
     case checking
+    case setupRequired
     case signedOut
     case awaitingBrowser(CodexPendingLogin)
     case awaitingDeviceCode(CodexPendingLogin)
@@ -67,7 +68,7 @@ public final class CodexAccountSettingsState: ObservableObject {
             let snapshot = try await client.account()
             await apply(snapshot, startPolling: true)
         } catch {
-            state = .failed(message: Self.message(for: error))
+            applyFailure(error)
         }
     }
 
@@ -86,7 +87,7 @@ public final class CodexAccountSettingsState: ObservableObject {
             }
             return nil
         } catch {
-            state = .failed(message: Self.message(for: error))
+            applyFailure(error)
             return nil
         }
     }
@@ -101,7 +102,7 @@ public final class CodexAccountSettingsState: ObservableObject {
             let snapshot = try await client.cancelLogin(id: login.id)
             await apply(snapshot, startPolling: false)
         } catch {
-            state = .failed(message: Self.message(for: error))
+            applyFailure(error)
         }
     }
 
@@ -115,7 +116,7 @@ public final class CodexAccountSettingsState: ObservableObject {
             let snapshot = try await client.logout()
             await apply(snapshot, startPolling: false)
         } catch {
-            state = .failed(message: Self.message(for: error))
+            applyFailure(error)
         }
     }
 
@@ -161,7 +162,7 @@ public final class CodexAccountSettingsState: ObservableObject {
                 } catch is CancellationError {
                     return
                 } catch {
-                    self.state = .failed(message: Self.message(for: error))
+                    self.applyFailure(error)
                     return
                 }
             }
@@ -174,5 +175,14 @@ public final class CodexAccountSettingsState: ObservableObject {
     private static func message(for error: Error) -> String {
         (error as? LocalizedError)?.errorDescription
             ?? "The ChatGPT account request could not be completed."
+    }
+
+    private func applyFailure(_ error: Error) {
+        if let clientError = error as? CodexAccountClientError,
+           clientError == .gatewayStatus(404) {
+            state = .setupRequired
+        } else {
+            state = .failed(message: Self.message(for: error))
+        }
     }
 }

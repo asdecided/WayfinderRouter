@@ -81,6 +81,17 @@ final class CodexAccountSettingsStateTests: XCTestCase {
     }
 
     @MainActor
+    func testMissingChatGPTRouteBecomesGuidedSetupInsteadOfFailure() async {
+        let client = ScriptedCodexAccountClient(accountResponse: .signedOut)
+        await client.failAccountRequests(with: .gatewayStatus(404))
+        let state = CodexAccountSettingsState(client: client, automaticallyPollLogin: false)
+
+        await state.refresh()
+
+        XCTAssertEqual(state.state, .setupRequired)
+    }
+
+    @MainActor
     func testConnectedAccountSurvivesModelCatalogFailure() async {
         let profile = CodexAccountProfile(email: nil, plan: "Team")
         let client = ScriptedCodexAccountClient(
@@ -119,7 +130,7 @@ private actor ScriptedCodexAccountClient: CodexAccountClient {
     private let loginResponse: CodexAccountSnapshot
     private let cancelResponse: CodexAccountSnapshot
     private let logoutResponse: CodexAccountSnapshot
-    private var accountRequestsFail = false
+    private var accountError: CodexAccountClientError?
     private var cancelledLoginID: String?
 
     init(
@@ -137,7 +148,7 @@ private actor ScriptedCodexAccountClient: CodexAccountClient {
     }
 
     func account() async throws -> CodexAccountSnapshot {
-        if accountRequestsFail { throw CodexAccountClientError.gatewayStatus(503) }
+        if let accountError { throw accountError }
         return accountResponse
     }
 
@@ -161,11 +172,11 @@ private actor ScriptedCodexAccountClient: CodexAccountClient {
 
     func setAccountResponse(_ response: CodexAccountSnapshot) {
         accountResponse = response
-        accountRequestsFail = false
+        accountError = nil
     }
 
-    func failAccountRequests() {
-        accountRequestsFail = true
+    func failAccountRequests(with error: CodexAccountClientError = .gatewayStatus(503)) {
+        accountError = error
     }
 
     func lastCancelledLoginID() -> String? {
