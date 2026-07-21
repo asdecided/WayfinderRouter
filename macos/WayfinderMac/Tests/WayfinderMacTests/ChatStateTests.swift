@@ -26,6 +26,56 @@ final class ChatStateTests: XCTestCase {
         XCTAssertEqual(state.routingStats.totalTurns, 0)
     }
 
+    func testNewChatRetainsPreviousConversationForSelection() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let store = ChatConversationStore(
+            fileURL: directory.appendingPathComponent("chat-history.json")
+        )
+        let previous = ChatConversation(messages: [
+            ChatMessage(role: .user, text: "Keep this conversation"),
+            ChatMessage(role: .assistant, text: "It will remain available.")
+        ])
+        store.save([previous])
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let state = AppState(
+            client: MockWayfinderClient(),
+            chatConversationStore: store
+        )
+
+        XCTAssertEqual(state.chatMessages, previous.messages)
+        state.startNewChat()
+        XCTAssertTrue(state.chatMessages.isEmpty)
+        XCTAssertEqual(state.chatConversations.map(\.id), [previous.id])
+
+        state.selectChatConversation(previous.id)
+        XCTAssertEqual(state.activeChatConversationID, previous.id)
+        XCTAssertEqual(state.chatMessages, previous.messages)
+    }
+
+    func testConversationStorePersistsNewestFirst() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let store = ChatConversationStore(
+            fileURL: directory.appendingPathComponent("chat-history.json")
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let older = ChatConversation(
+            messages: [ChatMessage(role: .user, text: "Older")],
+            updatedAt: Date(timeIntervalSince1970: 1)
+        )
+        let newer = ChatConversation(
+            messages: [ChatMessage(role: .user, text: "Newer")],
+            updatedAt: Date(timeIntervalSince1970: 2)
+        )
+
+        store.save([older, newer])
+
+        XCTAssertEqual(store.load().map(\.id), [newer.id, older.id])
+        XCTAssertEqual(store.load().map(\.title), ["Newer", "Older"])
+    }
+
     func testFailedResponseRemainsDistinctFromPendingTurn() {
         let prompt = ChatMessage(role: .user, text: "Route this")
         let failure = ChatMessage(role: .assistant, text: "Gateway unavailable", state: .failed)

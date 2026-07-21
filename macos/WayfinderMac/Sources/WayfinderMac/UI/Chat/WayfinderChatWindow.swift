@@ -3,7 +3,6 @@ import SwiftUI
 public struct WayfinderChatWindow: View {
     @EnvironmentObject private var appState: AppState
     @State private var selectedTurnID: UUID?
-    @State private var routeFilter: ChatRouteFilter = .all
     @State private var searchText = ""
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var followsLatestTurn = true
@@ -13,22 +12,19 @@ public struct WayfinderChatWindow: View {
 
     public var body: some View {
         let turns = ChatTurn.make(from: appState.chatMessages)
-        let workspace = ChatWorkspaceContent(
-            turns: turns,
-            routeFilter: routeFilter,
-            searchText: searchText
-        )
-        let visibleTurns = workspace.navigatorTurns
-
         NavigationSplitView(columnVisibility: $columnVisibility) {
             ChatSidebarView(
-                turns: turns,
-                visibleTurns: visibleTurns,
-                selectedTurnID: $selectedTurnID,
-                routeFilter: $routeFilter,
+                conversations: appState.chatConversations,
+                activeConversationID: appState.activeChatConversationID,
                 searchText: $searchText,
                 searchFocusRequest: searchFocusRequest,
-                onNewChat: appState.clearChat
+                isSending: appState.isSendingMessage,
+                onNewChat: appState.startNewChat,
+                onSelectConversation: { id in
+                    appState.selectChatConversation(id)
+                    selectedTurnID = nil
+                    followsLatestTurn = true
+                }
             )
             .navigationSplitViewColumnWidth(
                 min: ChatWorkspaceChrome.sidebarMinimumWidth,
@@ -45,11 +41,11 @@ public struct WayfinderChatWindow: View {
                     canRetry: appState.canRetryChat,
                     canClear: appState.canClearChat,
                     onRetry: retryLastTurn,
-                    onClear: appState.clearChat
+                    onClear: appState.startNewChat
                 )
                 Divider()
                 ChatConversationView(
-                    turns: workspace.transcriptTurns,
+                    turns: turns,
                     selectedTurnID: $selectedTurnID,
                     canRetry: appState.canRetryChat,
                     onRetry: retryLastTurn
@@ -76,7 +72,7 @@ public struct WayfinderChatWindow: View {
         )
         .background(ChatWorkspaceChrome.canvas)
         .onAppear {
-            selectedTurnID = selectedTurnID ?? visibleTurns.last?.id
+            selectedTurnID = selectedTurnID ?? turns.last?.id
         }
         .onChange(of: turns.map(\.id)) {
             if turns.isEmpty {
@@ -117,7 +113,6 @@ public struct WayfinderChatWindow: View {
 
     private func resetWorkspace() {
         selectedTurnID = nil
-        routeFilter = .all
         searchText = ""
         followsLatestTurn = true
     }

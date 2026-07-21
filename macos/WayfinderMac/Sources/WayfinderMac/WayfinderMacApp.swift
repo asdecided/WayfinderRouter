@@ -20,7 +20,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         openChatOnLaunch: Bool = false,
         gatewayReplacementReconciler: GatewayReplacementReconciler = GatewayReplacementReconciler()
     ) {
-        self.appState = AppState(client: client)
+        self.appState = AppState(
+            client: client,
+            chatConversationStore: .applicationSupport()
+        )
         self.featurePolicy = featurePolicy
         self.openChatOnLaunch = openChatOnLaunch
         self.gatewayReplacementReconciler = gatewayReplacementReconciler

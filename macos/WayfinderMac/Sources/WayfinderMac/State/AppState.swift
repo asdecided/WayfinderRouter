@@ -12,24 +12,37 @@ public final class AppState: ObservableObject {
     @Published public var chatDestination: ChatDestination = .automatic
     @Published public private(set) var chatDestinations: [ChatDestination] = [.automatic]
     @Published public private(set) var chatMessages: [ChatMessage]
+    @Published public private(set) var chatConversations: [ChatConversation]
+    @Published public private(set) var activeChatConversationID: UUID
     @Published public private(set) var isSendingMessage = false
     @Published public private(set) var setupAssessment: SetupAssessment = .checking
 
     public let chatDestinationNameStore: ChatDestinationNameStore
 
     private let client: any WayfinderClient
+    private let chatConversationStore: ChatConversationStore
     private let setupService = SetupService()
     private var chatTask: Task<Void, Never>?
 
     public init(
         client: any WayfinderClient,
-        chatDestinationNameStore: ChatDestinationNameStore? = nil
+        chatDestinationNameStore: ChatDestinationNameStore? = nil,
+        chatConversationStore: ChatConversationStore = ChatConversationStore()
     ) {
         self.client = client
         self.chatDestinationNameStore = chatDestinationNameStore ?? ChatDestinationNameStore()
+        self.chatConversationStore = chatConversationStore
         self.routingStats = .empty
         self.gatewayOverview = .checking
-        self.chatMessages = []
+        let storedConversations = chatConversationStore.load()
+        self.chatConversations = storedConversations
+        if let mostRecent = storedConversations.first {
+            self.activeChatConversationID = mostRecent.id
+            self.chatMessages = mostRecent.messages
+        } else {
+            self.activeChatConversationID = UUID()
+            self.chatMessages = []
+        }
     }
 
     public var canAnalyse: Bool {
@@ -139,6 +152,7 @@ public final class AppState: ObservableObject {
             text: "",
             state: .streaming
         ))
+        saveActiveConversation()
 
         chatTask = Task {
             do {
@@ -178,6 +192,7 @@ public final class AppState: ObservableObject {
                 }
                 self.isSendingMessage = false
                 self.chatTask = nil
+                self.saveActiveConversation()
                 self.refreshStats()
             } catch {
                 if Task.isCancelled || error is CancellationError {
@@ -200,11 +215,25 @@ public final class AppState: ObservableObject {
         chatTask?.cancel()
     }
 
-    public func clearChat() {
+    public func startNewChat() {
         guard canClearChat else {
             return
         }
-        chatMessages.removeAll()
+        saveActiveConversation()
+        activeChatConversationID = UUID()
+        chatMessages = []
+        chatDraft = ""
+    }
+
+    public func selectChatConversation(_ id: UUID) {
+        guard !isSendingMessage, id != activeChatConversationID,
+              let conversation = chatConversations.first(where: { $0.id == id }) else {
+            return
+        }
+        saveActiveConversation()
+        activeChatConversationID = conversation.id
+        chatMessages = conversation.messages
+        chatDraft = ""
     }
 
     public func retryLastChatTurn() {
@@ -318,6 +347,7 @@ public final class AppState: ObservableObject {
         }
         isSendingMessage = false
         chatTask = nil
+        saveActiveConversation()
     }
 
     private func finishFailedChatMessage(
@@ -332,7 +362,26 @@ public final class AppState: ObservableObject {
         }
         isSendingMessage = false
         chatTask = nil
+        saveActiveConversation()
         refreshStats()
+    }
+
+    private func saveActiveConversation() {
+        guard !chatMessages.isEmpty else { return }
+        let now = Date()
+        if let index = chatConversations.firstIndex(where: { $0.id == activeChatConversationID }) {
+            chatConversations[index].messages = chatMessages
+            chatConversations[index].updatedAt = now
+        } else {
+            chatConversations.append(ChatConversation(
+                id: activeChatConversationID,
+                messages: chatMessages,
+                createdAt: chatMessages.first?.createdAt ?? now,
+                updatedAt: now
+            ))
+        }
+        chatConversations.sort { $0.updatedAt > $1.updatedAt }
+        chatConversationStore.save(chatConversations)
     }
 }
 

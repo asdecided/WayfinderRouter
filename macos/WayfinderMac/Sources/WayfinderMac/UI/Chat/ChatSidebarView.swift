@@ -1,33 +1,30 @@
 import SwiftUI
 
 public struct ChatSidebarView: View {
-    let turns: [ChatTurn]
-    let visibleTurns: [ChatTurn]
-    @Binding var selectedTurnID: UUID?
-    @Binding var routeFilter: ChatRouteFilter
+    let conversations: [ChatConversation]
+    let activeConversationID: UUID
     @Binding var searchText: String
     let searchFocusRequest: Int
+    let isSending: Bool
     let onNewChat: () -> Void
-    let onSelectTurn: () -> Void
+    let onSelectConversation: (UUID) -> Void
 
     public init(
-        turns: [ChatTurn],
-        visibleTurns: [ChatTurn],
-        selectedTurnID: Binding<UUID?>,
-        routeFilter: Binding<ChatRouteFilter>,
+        conversations: [ChatConversation],
+        activeConversationID: UUID,
         searchText: Binding<String>,
         searchFocusRequest: Int = 0,
+        isSending: Bool = false,
         onNewChat: @escaping () -> Void = {},
-        onSelectTurn: @escaping () -> Void = {}
+        onSelectConversation: @escaping (UUID) -> Void = { _ in }
     ) {
-        self.turns = turns
-        self.visibleTurns = visibleTurns
-        self._selectedTurnID = selectedTurnID
-        self._routeFilter = routeFilter
+        self.conversations = conversations
+        self.activeConversationID = activeConversationID
         self._searchText = searchText
         self.searchFocusRequest = searchFocusRequest
+        self.isSending = isSending
         self.onNewChat = onNewChat
-        self.onSelectTurn = onSelectTurn
+        self.onSelectConversation = onSelectConversation
     }
 
     public var body: some View {
@@ -45,54 +42,60 @@ public struct ChatSidebarView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityHint("Clears the current in-memory conversation.")
+            .disabled(isSending)
+            .accessibilityHint("Starts a new conversation and keeps existing chats in history.")
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
 
-            HStack {
-                Text("This chat")
-                    .font(.caption2.weight(.semibold))
-                    .textCase(.uppercase)
-                    .tracking(0.7)
-                    .foregroundStyle(ChatWorkspaceChrome.tertiaryText)
-                Spacer()
-                RouteFilterMenu(selected: $routeFilter, turns: turns)
-            }
-            .padding(.horizontal, 14)
-            .padding(.bottom, 8)
+            Text("Chats")
+                .font(.caption2.weight(.semibold))
+                .textCase(.uppercase)
+                .tracking(0.7)
+                .foregroundStyle(ChatWorkspaceChrome.tertiaryText)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 8)
 
-            if visibleTurns.isEmpty {
-                SidebarEmptyState(hasHistory: !turns.isEmpty)
+            if visibleConversations.isEmpty {
+                SidebarEmptyState(hasHistory: !conversations.isEmpty)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     .padding(.top, 24)
             } else {
-                List(selection: turnSelection) {
-                    ForEach(visibleTurns) { turn in
-                        SidebarTurnRow(
-                            turn: turn,
-                            isSelected: turn.id == selectedTurnID
+                List(selection: conversationSelection) {
+                    ForEach(visibleConversations) { conversation in
+                        SidebarConversationRow(
+                            conversation: conversation,
+                            isSelected: conversation.id == activeConversationID
                         )
-                            .tag(turn.id)
+                        .tag(conversation.id)
                     }
                 }
                 .listStyle(.sidebar)
                 .scrollContentBackground(.hidden)
             }
 
-            SidebarStatusFooter(turns: turns)
+            SidebarStatusFooter(conversationCount: conversations.count)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(ChatWorkspaceChrome.sidebar)
     }
 
-    private var turnSelection: Binding<UUID?> {
-        Binding(
-            get: { selectedTurnID },
-            set: { turnID in
-                selectedTurnID = turnID
-                if turnID != nil {
-                    onSelectTurn()
+    private var visibleConversations: [ChatConversation] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return conversations }
+        return conversations.filter { conversation in
+            conversation.title.localizedCaseInsensitiveContains(query)
+                || conversation.messages.contains {
+                    $0.text.localizedCaseInsensitiveContains(query)
                 }
+        }
+    }
+
+    private var conversationSelection: Binding<UUID?> {
+        Binding(
+            get: { activeConversationID },
+            set: { id in
+                guard let id else { return }
+                onSelectConversation(id)
             }
         )
     }
@@ -109,7 +112,7 @@ private struct SidebarHeader: View {
                     .foregroundStyle(WayfinderTheme.local)
                     .font(.system(size: 14, weight: .semibold))
             }
-            Text("Current chat")
+            Text("Conversation history")
                 .font(.caption)
                 .foregroundStyle(ChatWorkspaceChrome.secondaryText)
         }
@@ -117,7 +120,6 @@ private struct SidebarHeader: View {
         .padding(.top, 15)
         .padding(.bottom, 14)
     }
-
 }
 
 private struct SearchField: View {
@@ -130,11 +132,11 @@ private struct SearchField: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(ChatWorkspaceChrome.tertiaryText)
                 .accessibilityHidden(true)
-            TextField("Search turns", text: $text)
+            TextField("Search chats", text: $text)
                 .textFieldStyle(.plain)
                 .font(.caption)
                 .focused($focused)
-                .accessibilityLabel("Search conversation turns")
+                .accessibilityLabel("Search conversations")
             if !text.isEmpty {
                 Button {
                     text = ""
@@ -159,124 +161,50 @@ private struct SearchField: View {
     }
 }
 
-private struct RouteFilterMenu: View {
-    @Binding var selected: ChatRouteFilter
-    let turns: [ChatTurn]
-
-    var body: some View {
-        Menu {
-            ForEach(ChatRouteFilter.allCases) { filter in
-                Button {
-                    selected = filter
-                } label: {
-                    Text("\(filter.rawValue) (\(count(for: filter)))")
-                }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Text(selected.rawValue)
-                Text("\(count(for: selected))")
-                    .monospacedDigit()
-            }
-            .font(.caption2)
-            .foregroundStyle(ChatWorkspaceChrome.secondaryText)
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .accessibilityLabel("Route filter")
-        .accessibilityValue(selected.rawValue)
-    }
-
-    private func count(for filter: ChatRouteFilter) -> Int {
-        turns.filter { filter.includes($0) }.count
-    }
-}
-
 private struct SidebarStatusFooter: View {
-    let turns: [ChatTurn]
+    let conversationCount: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            Divider()
-                .overlay(ChatWorkspaceChrome.border)
+            Divider().overlay(ChatWorkspaceChrome.border)
             HStack {
-                Label("In memory", systemImage: "memorychip")
+                Label("On this Mac", systemImage: "internaldrive")
                     .font(.caption2)
                 Spacer()
-                Text(turnCountText)
+                Text(conversationCount == 1 ? "1 chat" : "\(conversationCount) chats")
                     .font(.caption2.monospacedDigit())
             }
         }
         .foregroundStyle(ChatWorkspaceChrome.secondaryText)
         .padding(18)
     }
-
-    private var turnCountText: String {
-        turns.count == 1 ? "1 turn" : "\(turns.count) turns"
-    }
-
 }
 
-private struct SidebarTurnRow: View {
-    let turn: ChatTurn
+private struct SidebarConversationRow: View {
+    let conversation: ChatConversation
     let isSelected: Bool
 
     var body: some View {
-        HStack(spacing: 9) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 7, height: 7)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(turn.prompt.text)
-                    .lineLimit(1)
-                    .foregroundStyle(.primary)
-                Text(subtitle)
-                    .font(.caption2)
-                    .foregroundStyle(ChatWorkspaceChrome.secondaryText)
-                    .lineLimit(1)
-            }
-
-            Spacer(minLength: 4)
+        VStack(alignment: .leading, spacing: 3) {
+            Text(conversation.title)
+                .lineLimit(1)
+                .foregroundStyle(.primary)
+            Text(subtitle)
+                .font(.caption2)
+                .foregroundStyle(ChatWorkspaceChrome.secondaryText)
+                .lineLimit(1)
         }
         .font(.caption)
         .padding(.vertical, 3)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(turn.prompt.text), \(subtitle)")
+        .accessibilityLabel("\(conversation.title), \(subtitle)")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     private var subtitle: String {
-        let time = turn.prompt.createdAt.formatted(date: .omitted, time: .shortened)
-        guard let response = turn.response else {
-            return "Waiting for route · \(time)"
-        }
-
-        switch response.state {
-        case .streaming:
-            return "Routing · \(time)"
-        case .failed:
-            return "Failed · \(time)"
-        case .stopped:
-            return "Stopped · \(time)"
-        case .complete:
-            return response.decision == nil ? "No route data · \(time)" : time
-        }
-    }
-
-    private var statusColor: Color {
-        switch turn.response?.state {
-        case .failed:
-            return .red
-        case .stopped:
-            return ChatWorkspaceChrome.secondaryText
-        case .streaming, .none:
-            return WayfinderTheme.local
-        case .complete:
-            return turn.response?.decision == nil
-                ? ChatWorkspaceChrome.tertiaryText
-                : ChatWorkspaceChrome.secondaryText
-        }
+        let date = conversation.updatedAt.formatted(date: .abbreviated, time: .shortened)
+        let turns = conversation.turnCount == 1 ? "1 turn" : "\(conversation.turnCount) turns"
+        return "\(turns) · \(date)"
     }
 }
 
@@ -290,10 +218,10 @@ private struct SidebarEmptyState: View {
                     .font(.callout)
                     .foregroundStyle(ChatWorkspaceChrome.tertiaryText)
             }
-            Text(hasHistory ? "No turns found" : "No turns yet")
+            Text(hasHistory ? "No chats found" : "No chats yet")
                 .font(.caption.weight(.medium))
             if hasHistory {
-                Text("Try another search or filter.")
+                Text("Try another search.")
                     .font(.caption2)
                     .foregroundStyle(ChatWorkspaceChrome.tertiaryText)
             }
