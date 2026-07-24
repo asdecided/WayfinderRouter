@@ -210,6 +210,13 @@ iPad; lifecycle, restoration, cancellation UI, and accessibility tests pass.
 
 ## Phase 3 — Keychain and direct API providers
 
+Implementation note: the first Phase 3 slice adds the `CredentialStore` actor
+boundary, Security framework backend, device-only non-synchronizing Keychain
+policy, and native add/replace/remove UI for OpenAI Platform, Moonshot/Kimi
+Platform, and OpenRouter keys. App-visible state contains readiness only.
+Adding or removing a key does not publish a destination or mutate routing.
+Live provider execution remains in the next review boundary.
+
 - implement `CredentialStore`;
 - API-key lifecycle UI;
 - generic OpenAI-compatible direct provider;
