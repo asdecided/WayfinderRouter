@@ -32,6 +32,7 @@ struct WayfinderIOSApp: App {
         .tint(WayfinderTheme.accent)
         .task {
           await appModel.restoreConversations()
+          await appModel.restoreCredentialStatuses()
         }
     }
   }

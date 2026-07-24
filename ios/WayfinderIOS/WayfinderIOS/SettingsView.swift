@@ -10,6 +10,17 @@ struct SettingsView: View {
     @Bindable var appModel = appModel
 
     Form {
+      Section("Connections") {
+        NavigationLink {
+          APIKeysView()
+        } label: {
+          LabeledContent(
+            "API Keys",
+            value: credentialSummary
+          )
+        }
+      }
+
       Section("Privacy") {
         Picker("Maximum execution boundary", selection: $appModel.privacyPosture) {
           ForEach(PrivacyPostureOption.allCases) { posture in
@@ -24,7 +35,7 @@ struct SettingsView: View {
 
       Section("Runtime") {
         LabeledContent("Router", value: "Embedded Rust core")
-        LabeledContent("Provider execution", value: "Not in this build slice")
+        LabeledContent("Provider execution", value: "Deterministic preview")
         LabeledContent("Mac required", value: "No")
       }
 
@@ -87,6 +98,23 @@ struct SettingsView: View {
     } message: {
       Text("This permanently removes saved threads and the current draft.")
     }
+    .alert(
+      "Keychain",
+      isPresented: Binding(
+        get: { appModel.credentialNotice != nil },
+        set: { isPresented in
+          if !isPresented {
+            appModel.credentialNotice = nil
+          }
+        }
+      )
+    ) {
+      Button("OK") {
+        appModel.credentialNotice = nil
+      }
+    } message: {
+      Text(appModel.credentialNotice ?? "")
+    }
   }
 
   private var retentionBinding: Binding<ConversationRetentionPolicy> {
@@ -99,5 +127,13 @@ struct SettingsView: View {
         }
       }
     )
+  }
+
+  private var credentialSummary: String {
+    switch appModel.configuredCredentialCount {
+    case 0: "None saved"
+    case 1: "1 saved"
+    default: "\(appModel.configuredCredentialCount) saved"
+    }
   }
 }
