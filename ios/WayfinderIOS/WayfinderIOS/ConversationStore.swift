@@ -9,6 +9,7 @@ enum ConversationMessageRole: String, Codable, Sendable {
 
 enum ConversationMessageStatus: String, Codable, Sendable {
   case pending
+  case streaming
   case completed
   case stopped
   case interrupted

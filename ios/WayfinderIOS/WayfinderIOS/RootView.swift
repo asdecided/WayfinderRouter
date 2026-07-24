@@ -42,32 +42,11 @@ struct RootView: View {
   }
 
   private var compactWidthLayout: some View {
-    @Bindable var appModel = appModel
-
-    return GeometryReader { proxy in
+    GeometryReader { proxy in
       ZStack(alignment: .leading) {
-        TabView(selection: $appModel.selectedTab) {
-          ChatTabView(openSidebar: openSidebar)
-            .tag(AppTab.chat)
-
-          NavigationStack {
-            ThreadsView(openSidebar: openSidebar)
-          }
-          .tag(AppTab.threads)
-
-          NavigationStack {
-            DestinationsView(openSidebar: openSidebar)
-          }
-          .tag(AppTab.destinations)
-
-          NavigationStack {
-            SettingsView(openSidebar: openSidebar)
-          }
-          .tag(AppTab.settings)
-        }
-        .toolbar(.hidden, for: .tabBar)
-        .allowsHitTesting(!showsSidebar)
-        .accessibilityHidden(showsSidebar)
+        compactSelectedDetail
+          .allowsHitTesting(!showsSidebar)
+          .accessibilityHidden(showsSidebar)
 
         if showsSidebar {
           Color.black.opacity(0.28)
@@ -84,6 +63,26 @@ struct RootView: View {
       }
     }
     .animation(.snappy(duration: 0.28), value: showsSidebar)
+  }
+
+  @ViewBuilder
+  private var compactSelectedDetail: some View {
+    switch appModel.selectedTab {
+    case .chat:
+      ChatTabView(openSidebar: openSidebar)
+    case .threads:
+      NavigationStack {
+        ThreadsView(openSidebar: openSidebar)
+      }
+    case .destinations:
+      NavigationStack {
+        DestinationsView(openSidebar: openSidebar)
+      }
+    case .settings:
+      NavigationStack {
+        SettingsView(openSidebar: openSidebar)
+      }
+    }
   }
 
   private var regularWidthLayout: some View {
@@ -152,6 +151,7 @@ private struct AppSidebarView: View {
           }
           .buttonStyle(.plain)
           .font(.body.weight(.medium))
+          .disabled(appModel.executionPhase.isActive)
           .accessibilityHint("Starts a new conversation")
 
           VStack(alignment: .leading, spacing: 8) {

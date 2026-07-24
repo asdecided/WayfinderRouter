@@ -75,6 +75,28 @@ enum RoutePreviewState: Equatable {
   case unavailable(String)
 }
 
+enum ChatExecutionPhase: Equatable {
+  case idle
+  case routing(UUID)
+  case streaming(UUID)
+  case stopping(UUID)
+
+  var requestID: UUID? {
+    switch self {
+    case .idle:
+      nil
+    case .routing(let requestID),
+      .streaming(let requestID),
+      .stopping(let requestID):
+      requestID
+    }
+  }
+
+  var isActive: Bool {
+    requestID != nil
+  }
+}
+
 enum ConversationRetentionPolicy: String, CaseIterable, Identifiable {
   case thirtyDays
   case ninetyDays
@@ -120,6 +142,7 @@ final class AppModel {
   var persistenceNotice: String?
   var isRestoringConversations = false
   var retentionPolicy: ConversationRetentionPolicy = .forever
+  var executionPhase: ChatExecutionPhase = .idle
 
   let destinations: [PreviewDestination] = [
     PreviewDestination(
@@ -142,16 +165,19 @@ final class AppModel {
 
   private let routingEngine: RoutingEngine
   private let conversationStore: any ConversationStore
+  private let providerExecutor: any ProviderExecutor
   private let now: () -> Date
   private var hasRestoredConversations = false
   private var draftSaveTask: Task<Void, Never>?
 
   init(
     conversationStore: any ConversationStore = InMemoryConversationStore(),
+    providerExecutor: any ProviderExecutor = DeterministicMockProvider(),
     initialPersistenceNotice: String? = nil,
     now: @escaping () -> Date = Date.init
   ) {
     self.conversationStore = conversationStore
+    self.providerExecutor = providerExecutor
     self.persistenceNotice = initialPersistenceNotice
     self.now = now
 
@@ -169,8 +195,9 @@ final class AppModel {
     }
   }
 
-  var canPreviewRoute: Bool {
-    !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  var canSendMessage: Bool {
+    !executionPhase.isActive
+      && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
   var activeThread: ConversationThreadSnapshot? {
@@ -206,29 +233,32 @@ final class AppModel {
       }
 
       await applyRetentionPolicy()
+      await interruptPendingMessages()
     } catch {
       persistenceNotice =
         "Wayfinder could not restore saved conversations. New chats remain available."
     }
   }
 
-  func previewRoute() async {
+  func sendMessage() async {
     let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !executionPhase.isActive else {
+      return
+    }
     guard !prompt.isEmpty else {
-      routePreviewState = .unavailable("Enter a message to preview its route.")
+      routePreviewState = .unavailable("Enter a message to send.")
       return
     }
 
+    let requestID = UUID()
+    executionPhase = .routing(requestID)
     submittedPrompt = prompt
-
-    var storedReceipt: StoredRouteReceipt?
-    var messageStatus = ConversationMessageStatus.completed
 
     do {
       let plan = try routingEngine.plan(
         request: RoutingRequest(
           schemaVersion: 1,
-          requestId: UUID().uuidString,
+          requestId: requestID.uuidString,
           prompt: prompt,
           privacyPosture: privacyPosture.bridgeValue,
           requirements: RoutingRequirements(
@@ -246,44 +276,131 @@ final class AppModel {
         let destination = destinations.first(where: { $0.id == selectedID })
       else {
         routePreviewState = .unavailable(
-          "No preview destination is eligible under \(privacyPosture.title)."
+          "No destination is eligible under \(privacyPosture.title)."
         )
-        await persistTurn(
+        await persistFailedTurn(
           prompt: prompt,
-          status: .failed,
-          receipt: nil
+          message: "No eligible destination is available under \(privacyPosture.title)."
         )
+        executionPhase = .idle
         return
       }
 
-      routePreviewState = .routed(
-        RoutePreview(
-          destinationID: destination.id,
-          destinationName: destination.displayName,
-          score: plan.score,
-          recommendation: plan.recommendation,
-          executionSummary: destination.boundaryLabel
-        )
-      )
-      storedReceipt = StoredRouteReceipt(
+      let preview = RoutePreview(
         destinationID: destination.id,
         destinationName: destination.displayName,
         score: plan.score,
         recommendation: plan.recommendation,
         executionSummary: destination.boundaryLabel
       )
+      routePreviewState = .routed(preview)
+      let receipt = StoredRouteReceipt(
+        destinationID: destination.id,
+        destinationName: destination.displayName,
+        score: plan.score,
+        recommendation: plan.recommendation,
+        executionSummary: destination.boundaryLabel
+      )
+      let assistantMessageID = await beginTurn(
+        prompt: prompt,
+        receipt: receipt
+      )
+
+      if executionPhase == .stopping(requestID) {
+        await finishMessage(id: assistantMessageID, status: .stopped)
+        executionPhase = .idle
+        return
+      }
+
+      executionPhase = .streaming(requestID)
+      let stream = await providerExecutor.stream(
+        ProviderExecutionRequest(
+          id: requestID,
+          prompt: prompt,
+          destinationID: destination.id
+        )
+      )
+      var reachedTerminalEvent = false
+
+      do {
+        for try await event in stream {
+          guard executionPhase == .streaming(requestID) else {
+            break
+          }
+
+          switch event {
+          case .delta(let delta):
+            await appendDelta(delta, to: assistantMessageID)
+          case .completed:
+            reachedTerminalEvent = true
+            await finishMessage(
+              id: assistantMessageID,
+              status: .completed
+            )
+          }
+        }
+
+        if !reachedTerminalEvent {
+          let status: ConversationMessageStatus =
+            executionPhase == .stopping(requestID) ? .stopped : .interrupted
+          await finishMessage(id: assistantMessageID, status: status)
+        }
+      } catch is CancellationError {
+        let status: ConversationMessageStatus =
+          executionPhase == .stopping(requestID) ? .stopped : .interrupted
+        await finishMessage(id: assistantMessageID, status: status)
+      } catch {
+        await failMessage(
+          id: assistantMessageID,
+          message: userFacingExecutionError(error)
+        )
+      }
     } catch {
       routePreviewState = .unavailable(
         "Wayfinder could not calculate this route. Try a shorter message."
       )
-      messageStatus = .failed
+      await persistFailedTurn(
+        prompt: prompt,
+        message: "Wayfinder could not calculate a route for this message."
+      )
     }
 
-    await persistTurn(
-      prompt: prompt,
-      status: messageStatus,
-      receipt: storedReceipt
-    )
+    if executionPhase.requestID == requestID {
+      executionPhase = .idle
+    }
+  }
+
+  func previewRoute() async {
+    await sendMessage()
+  }
+
+  func stopGenerating() async {
+    guard let requestID = executionPhase.requestID else {
+      return
+    }
+
+    executionPhase = .stopping(requestID)
+    await providerExecutor.cancel(requestID: requestID)
+  }
+
+  func retry(messageID: UUID) async {
+    guard
+      !executionPhase.isActive,
+      let thread = activeThread,
+      let failedIndex = thread.messages.firstIndex(where: {
+        $0.id == messageID
+          && $0.role == .assistant
+          && [.failed, .interrupted, .stopped].contains($0.status)
+      }),
+      let prompt = thread.messages[..<failedIndex].last(where: {
+        $0.role == .user
+      })?.content
+    else {
+      return
+    }
+
+    draft = prompt
+    await sendMessage()
   }
 
   func clearPreview() {
@@ -291,6 +408,10 @@ final class AppModel {
   }
 
   func startNewChat() async {
+    guard !executionPhase.isActive else {
+      return
+    }
+
     await persistActiveDraft()
     draft = ""
     submittedPrompt = nil
@@ -301,6 +422,10 @@ final class AppModel {
   }
 
   func selectThread(id: UUID) async {
+    guard !executionPhase.isActive else {
+      return
+    }
+
     guard id != activeThreadID else {
       selectedTab = .chat
       return
@@ -390,18 +515,25 @@ final class AppModel {
     }
   }
 
-  private func persistTurn(
+  private func beginTurn(
     prompt: String,
-    status: ConversationMessageStatus,
-    receipt: StoredRouteReceipt?
-  ) async {
+    receipt: StoredRouteReceipt
+  ) async -> UUID {
     let timestamp = now()
-    let message = ConversationMessageSnapshot(
+    let userMessage = ConversationMessageSnapshot(
       id: UUID(),
       role: .user,
       content: prompt,
       createdAt: timestamp,
-      status: status,
+      status: .completed,
+      routeReceipt: nil
+    )
+    let assistantMessage = ConversationMessageSnapshot(
+      id: UUID(),
+      role: .assistant,
+      content: "",
+      createdAt: timestamp,
+      status: .pending,
       routeReceipt: receipt
     )
 
@@ -409,7 +541,7 @@ final class AppModel {
     if let activeThread {
       thread = activeThread
       thread.updatedAt = timestamp
-      thread.messages.append(message)
+      thread.messages.append(contentsOf: [userMessage, assistantMessage])
       thread.draft = ""
     } else {
       thread = ConversationThreadSnapshot(
@@ -417,7 +549,7 @@ final class AppModel {
         title: ConversationThreadSnapshot.title(for: prompt),
         createdAt: timestamp,
         updatedAt: timestamp,
-        messages: [message],
+        messages: [userMessage, assistantMessage],
         draft: ""
       )
       activeThreadID = thread.id
@@ -434,6 +566,173 @@ final class AppModel {
         "This turn is visible now, but Wayfinder could not save it."
       upsertInMemory(thread)
     }
+
+    return assistantMessage.id
+  }
+
+  private func persistFailedTurn(
+    prompt: String,
+    message: String
+  ) async {
+    let timestamp = now()
+    let userMessage = ConversationMessageSnapshot(
+      id: UUID(),
+      role: .user,
+      content: prompt,
+      createdAt: timestamp,
+      status: .completed,
+      routeReceipt: nil
+    )
+    let assistantMessage = ConversationMessageSnapshot(
+      id: UUID(),
+      role: .assistant,
+      content: message,
+      createdAt: timestamp,
+      status: .failed,
+      routeReceipt: nil
+    )
+
+    var thread: ConversationThreadSnapshot
+    if let activeThread {
+      thread = activeThread
+      thread.updatedAt = timestamp
+      thread.messages.append(contentsOf: [userMessage, assistantMessage])
+      thread.draft = ""
+    } else {
+      thread = ConversationThreadSnapshot(
+        id: UUID(),
+        title: ConversationThreadSnapshot.title(for: prompt),
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        messages: [userMessage, assistantMessage],
+        draft: ""
+      )
+      activeThreadID = thread.id
+    }
+
+    draft = ""
+    await saveUpdatedThread(thread)
+  }
+
+  private func appendDelta(
+    _ delta: String,
+    to messageID: UUID
+  ) async {
+    guard !delta.isEmpty, var thread = activeThread,
+      let index = thread.messages.firstIndex(where: { $0.id == messageID })
+    else {
+      return
+    }
+
+    let message = thread.messages[index]
+    thread.messages[index] = ConversationMessageSnapshot(
+      id: message.id,
+      role: message.role,
+      content: message.content + delta,
+      createdAt: message.createdAt,
+      status: .streaming,
+      routeReceipt: message.routeReceipt
+    )
+    thread.updatedAt = now()
+    await saveUpdatedThread(thread)
+  }
+
+  private func finishMessage(
+    id messageID: UUID,
+    status: ConversationMessageStatus
+  ) async {
+    guard var thread = activeThread,
+      let index = thread.messages.firstIndex(where: { $0.id == messageID })
+    else {
+      return
+    }
+
+    let message = thread.messages[index]
+    guard message.status == .pending || message.status == .streaming else {
+      return
+    }
+
+    thread.messages[index] = ConversationMessageSnapshot(
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      createdAt: message.createdAt,
+      status: status,
+      routeReceipt: message.routeReceipt
+    )
+    thread.updatedAt = now()
+    await saveUpdatedThread(thread)
+  }
+
+  private func failMessage(
+    id messageID: UUID,
+    message failureMessage: String
+  ) async {
+    guard var thread = activeThread,
+      let index = thread.messages.firstIndex(where: { $0.id == messageID })
+    else {
+      return
+    }
+
+    let message = thread.messages[index]
+    thread.messages[index] = ConversationMessageSnapshot(
+      id: message.id,
+      role: message.role,
+      content: message.content.isEmpty ? failureMessage : message.content,
+      createdAt: message.createdAt,
+      status: .failed,
+      routeReceipt: message.routeReceipt
+    )
+    thread.updatedAt = now()
+    await saveUpdatedThread(thread)
+  }
+
+  private func saveUpdatedThread(
+    _ thread: ConversationThreadSnapshot
+  ) async {
+    upsertInMemory(thread)
+
+    do {
+      try await conversationStore.save(thread: thread)
+      await persistWorkspace()
+    } catch {
+      persistenceNotice =
+        "This turn is visible now, but Wayfinder could not save it."
+    }
+  }
+
+  private func interruptPendingMessages() async {
+    for var thread in threads {
+      var changed = false
+      thread.messages = thread.messages.map { message in
+        guard message.status == .pending || message.status == .streaming else {
+          return message
+        }
+        changed = true
+        return ConversationMessageSnapshot(
+          id: message.id,
+          role: message.role,
+          content: message.content,
+          createdAt: message.createdAt,
+          status: .interrupted,
+          routeReceipt: message.routeReceipt
+        )
+      }
+
+      if changed {
+        thread.updatedAt = now()
+        await saveUpdatedThread(thread)
+      }
+    }
+  }
+
+  private func userFacingExecutionError(_ error: Error) -> String {
+    if let providerError = error as? ProviderExecutionError,
+      let description = providerError.errorDescription
+    {
+      return description
+    }
+    return "The preview provider could not finish this reply."
   }
 
   private func persistActiveDraft() async {
@@ -514,15 +813,19 @@ final class AppModel {
   }
 
   private func restorePreview(from thread: ConversationThreadSnapshot) {
-    guard let message = thread.messages.last else {
+    guard let userMessage = thread.messages.last(where: { $0.role == .user })
+    else {
       submittedPrompt = nil
       routePreviewState = .idle
       return
     }
 
-    submittedPrompt = message.content
+    submittedPrompt = userMessage.content
+    let assistantMessage = thread.messages.last(where: {
+      $0.role == .assistant
+    })
 
-    if let receipt = message.routeReceipt {
+    if let receipt = assistantMessage?.routeReceipt {
       routePreviewState = .routed(
         RoutePreview(
           destinationID: receipt.destinationID,
@@ -532,7 +835,7 @@ final class AppModel {
           executionSummary: receipt.executionSummary
         )
       )
-    } else if message.status == .failed {
+    } else if assistantMessage?.status == .failed {
       routePreviewState = .unavailable(
         "Wayfinder could not calculate a route for this message."
       )

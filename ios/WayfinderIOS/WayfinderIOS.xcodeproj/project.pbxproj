@@ -11,6 +11,7 @@
 		165C905840F4DCF56C27BF8F /* ConversationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D89C6EA7388FA2CCF9F5865E /* ConversationStore.swift */; };
 		17923336D4226B2F812CF7CA /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE0BB131143C117BDF129E06 /* SettingsView.swift */; };
 		2663961FFDA2EEAEF58529A8 /* ConversationStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8A79F801F4849CBD50C8A61 /* ConversationStoreTests.swift */; };
+		2FDE760EEAA633A74BF8B379 /* ChatExecution.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E92E195F328A16C8A4C9159 /* ChatExecution.swift */; };
 		383CBBDE76DCB1296EE2B2FF /* ChatTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25109E76A4BFCC3FD9297E97 /* ChatTabView.swift */; };
 		5289F042BE903630416D2DC7 /* ThreadsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DA6AA772008E2B7C904EA80 /* ThreadsView.swift */; };
 		A7AFF77BAFD88E83930B3DC6 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D3D621AD229ED0AF9703D04 /* AppModel.swift */; };
@@ -41,6 +42,7 @@
 		5F6D147CFBC7918BCCD92B9E /* WayfinderIOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = WayfinderIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		910171253EA965875F0C979A /* WayfinderIOSTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = WayfinderIOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9B27149D56F517F17D1F971B /* WayfinderTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WayfinderTheme.swift; sourceTree = "<group>"; };
+		9E92E195F328A16C8A4C9159 /* ChatExecution.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatExecution.swift; sourceTree = "<group>"; };
 		A28A0256D98D907F1BAF7A34 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		BE0BB131143C117BDF129E06 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		C17D8ECF221517590115EA9F /* AppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelTests.swift; sourceTree = "<group>"; };
@@ -64,6 +66,7 @@
 			isa = PBXGroup;
 			children = (
 				0D3D621AD229ED0AF9703D04 /* AppModel.swift */,
+				9E92E195F328A16C8A4C9159 /* ChatExecution.swift */,
 				25109E76A4BFCC3FD9297E97 /* ChatTabView.swift */,
 				D89C6EA7388FA2CCF9F5865E /* ConversationStore.swift */,
 				375A787B3245E247D326C13E /* DestinationsView.swift */,
@@ -204,6 +207,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A7AFF77BAFD88E83930B3DC6 /* AppModel.swift in Sources */,
+				2FDE760EEAA633A74BF8B379 /* ChatExecution.swift in Sources */,
 				383CBBDE76DCB1296EE2B2FF /* ChatTabView.swift in Sources */,
 				165C905840F4DCF56C27BF8F /* ConversationStore.swift in Sources */,
 				C04837E936D39B59FC3DAEDE /* DestinationsView.swift in Sources */,
