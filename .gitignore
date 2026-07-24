@@ -30,3 +30,7 @@ apple/.build/
 apple/Packages/WayfinderRoutingBridge/.build/
 apple/Packages/WayfinderRoutingBridge/Artifacts/
 apple/Packages/WayfinderRoutingBridge/Sources/WayfinderRoutingBridge/Generated/
+
+# Per-user SwiftPM and Xcode workspace state
+**/.swiftpm/
+**/xcuserdata/
