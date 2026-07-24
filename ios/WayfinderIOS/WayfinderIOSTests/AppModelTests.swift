@@ -4,6 +4,51 @@ import XCTest
 
 @MainActor
 final class AppModelTests: XCTestCase {
+  func testCredentialSnapshotNeverContainsSavedSecret() async {
+    let store = InMemoryCredentialStore()
+    let model = AppModel(credentialStore: store)
+    let provider = APIKeyProviderDescriptor.supported[0]
+    let secret = "do-not-expose-this-key"
+
+    let saved = await model.saveAPIKey(secret, for: provider)
+
+    XCTAssertTrue(saved)
+    XCTAssertTrue(model.isCredentialConfigured(provider.id))
+    XCTAssertEqual(model.configuredCredentialCount, 1)
+    XCTAssertFalse(
+      String(reflecting: model.credentialStatuses).contains(secret)
+    )
+    let export = await model.exportConversations()
+    XCTAssertFalse(
+      export.map { String(decoding: $0, as: UTF8.self).contains(secret) }
+        ?? true
+    )
+  }
+
+  func testRemovingCredentialUpdatesOnlyReadinessSnapshot() async {
+    let store = InMemoryCredentialStore()
+    let model = AppModel(credentialStore: store)
+    let provider = APIKeyProviderDescriptor.supported[0]
+    model.privacyPosture = .onDeviceOnly
+    _ = await model.saveAPIKey("temporary-key", for: provider)
+
+    await model.removeAPIKey(for: provider)
+
+    XCTAssertFalse(model.isCredentialConfigured(provider.id))
+    XCTAssertEqual(model.configuredCredentialCount, 0)
+    XCTAssertEqual(model.privacyPosture, .onDeviceOnly)
+  }
+
+  func testSupportedAPIKeyProvidersKeepPlatformAndAccountAccessDistinct() {
+    XCTAssertEqual(
+      APIKeyProviderDescriptor.supported.map(\.displayName),
+      ["OpenAI Platform", "Moonshot / Kimi Platform", "OpenRouter"]
+    )
+    XCTAssertFalse(
+      APIKeyProviderDescriptor.supported.map(\.displayName).contains("ChatGPT")
+    )
+  }
+
   func testSimplePromptRoutesToOnDeviceCandidate() async {
     let model = AppModel()
     model.draft = "Hello"
