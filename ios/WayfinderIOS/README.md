@@ -9,8 +9,11 @@ Chat lifecycle through a deterministic network-free provider. Ordered deltas,
 stop, interruption recovery, failure, retry, threads, drafts, terminal message
 states, and compact route receipts persist locally through the
 `ConversationStore` boundary and a versioned SwiftData implementation.
-Credentials, live providers, Apple Foundation Models, and optional Mac pairing
-land in later review boundaries.
+API keys can be added, replaced, and removed through the native Settings flow.
+Secrets remain in the device-only iOS Keychain; app-visible state contains only
+configured/not-configured snapshots. Adding a key does not publish a
+destination or change Automatic routing. Live providers, Apple Foundation
+Models, and optional Mac pairing land in later review boundaries.
 
 ## Build
 
