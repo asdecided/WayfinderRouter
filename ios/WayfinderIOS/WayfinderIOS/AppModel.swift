@@ -140,9 +140,11 @@ final class AppModel {
   var threads: [ConversationThreadSnapshot] = []
   var activeThreadID: UUID?
   var persistenceNotice: String?
+  var credentialNotice: String?
   var isRestoringConversations = false
   var retentionPolicy: ConversationRetentionPolicy = .forever
   var executionPhase: ChatExecutionPhase = .idle
+  var credentialStatuses: [ProviderCredentialStatus] = []
 
   let destinations: [PreviewDestination] = [
     PreviewDestination(
@@ -165,18 +167,22 @@ final class AppModel {
 
   private let routingEngine: RoutingEngine
   private let conversationStore: any ConversationStore
+  private let credentialStore: any CredentialStore
   private let providerExecutor: any ProviderExecutor
   private let now: () -> Date
   private var hasRestoredConversations = false
+  private var hasRestoredCredentialStatuses = false
   private var draftSaveTask: Task<Void, Never>?
 
   init(
     conversationStore: any ConversationStore = InMemoryConversationStore(),
+    credentialStore: any CredentialStore = KeychainCredentialStore(),
     providerExecutor: any ProviderExecutor = DeterministicMockProvider(),
     initialPersistenceNotice: String? = nil,
     now: @escaping () -> Date = Date.init
   ) {
     self.conversationStore = conversationStore
+    self.credentialStore = credentialStore
     self.providerExecutor = providerExecutor
     self.persistenceNotice = initialPersistenceNotice
     self.now = now
@@ -205,6 +211,52 @@ final class AppModel {
       return nil
     }
     return threads.first { $0.id == activeThreadID }
+  }
+
+  var configuredCredentialCount: Int {
+    credentialStatuses.count(where: \.isConfigured)
+  }
+
+  func isCredentialConfigured(_ id: CredentialID) -> Bool {
+    credentialStatuses.first(where: { $0.id == id })?.isConfigured ?? false
+  }
+
+  func restoreCredentialStatuses() async {
+    guard !hasRestoredCredentialStatuses else {
+      return
+    }
+    hasRestoredCredentialStatuses = await refreshCredentialStatuses()
+  }
+
+  func saveAPIKey(
+    _ key: String,
+    for provider: APIKeyProviderDescriptor
+  ) async -> Bool {
+    let normalized = key.trimmingCharacters(in: .whitespacesAndNewlines)
+    do {
+      try await credentialStore.save(secret: normalized, for: provider.id)
+      credentialNotice = nil
+      _ = await refreshCredentialStatuses()
+      return true
+    } catch {
+      credentialNotice = userFacingCredentialError(error)
+      return false
+    }
+  }
+
+  func removeAPIKey(for provider: APIKeyProviderDescriptor) async {
+    do {
+      try await credentialStore.delete(provider.id)
+      let remainsConfigured = try await credentialStore.contains(provider.id)
+      guard !remainsConfigured else {
+        credentialNotice = "Wayfinder could not remove that API key."
+        return
+      }
+      credentialNotice = nil
+      _ = await refreshCredentialStatuses()
+    } catch {
+      credentialNotice = userFacingCredentialError(error)
+    }
   }
 
   func restoreConversations() async {
@@ -733,6 +785,35 @@ final class AppModel {
       return description
     }
     return "The preview provider could not finish this reply."
+  }
+
+  private func refreshCredentialStatuses() async -> Bool {
+    do {
+      var statuses: [ProviderCredentialStatus] = []
+      for provider in APIKeyProviderDescriptor.supported {
+        statuses.append(
+          ProviderCredentialStatus(
+            id: provider.id,
+            isConfigured: try await credentialStore.contains(provider.id)
+          )
+        )
+      }
+      credentialStatuses = statuses
+      credentialNotice = nil
+      return true
+    } catch {
+      credentialNotice = userFacingCredentialError(error)
+      return false
+    }
+  }
+
+  private func userFacingCredentialError(_ error: Error) -> String {
+    if let credentialError = error as? CredentialStoreError,
+      let description = credentialError.errorDescription
+    {
+      return description
+    }
+    return "Wayfinder could not update the iOS Keychain."
   }
 
   private func persistActiveDraft() async {
