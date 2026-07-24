@@ -189,10 +189,13 @@ build.
 
 Implementation note: the native shell has universal iPhone/iPad targets, root
 Observation state, adaptive drawer/split navigation, and an honest
-routing-preview flow backed by the generated Rust bridge. The second Phase 2
-slice adds the `ConversationStore` boundary, versioned SwiftData model actor,
-thread and draft restoration, retention, deterministic export, deletion, and
-bounded storage failure recovery. It intentionally does not execute a
+routing flow backed by the generated Rust bridge. The persistence slice adds
+the `ConversationStore` boundary, versioned SwiftData model actor, thread and
+draft restoration, retention, deterministic export, deletion, and bounded
+storage failure recovery. The final Phase 2 slice adds a deterministic,
+network-free provider contract and the complete Chat lifecycle: ordered
+deltas, one terminal assistant message, cancellation, interruption recovery,
+failure, and retry. It intentionally does not add credentials or a live
 provider.
 
 - create iPhone/iPad Xcode targets;

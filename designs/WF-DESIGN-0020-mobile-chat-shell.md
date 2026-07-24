@@ -72,9 +72,11 @@ The detail presentation owns destination, execution boundary, routing tier,
 score, reason codes, fallback truth, and bounded error recovery. The transcript
 never reserves a permanent dashboard for those fields.
 
-The current shell slice uses deterministic route previews only. It must say
-that no provider was contacted and must not render a fabricated assistant
-answer.
+The initial shell slice used deterministic route previews only. The final
+Phase 2 slice replaces the fabricated-response prohibition with a visibly
+bounded deterministic provider: it may exercise ordered streaming,
+cancellation, failure, interruption, and retry, but its copy and receipt must
+state that no network request or live provider was used.
 
 ## Composer
 
@@ -85,9 +87,9 @@ The composer contains:
 3. an on-demand privacy-posture menu;
 4. an enabled send control only when the trimmed draft is non-empty.
 
-The send action is currently labelled `Preview route` for accessibility because
-provider execution is outside this slice. That label changes to `Send message`
-when real execution lands.
+The send action is labelled `Send message`. While a deterministic or live
+provider is active, that control becomes `Stop response`, and the composer
+cannot submit a second concurrent request.
 
 The composer uses system materials and semantic colours. A strong permanent
 green outline is prohibited; the accent belongs on active actions and routing
@@ -105,9 +107,10 @@ identity.
 - Starting a new chat clears only transient conversation state and returns to
   Chat.
 
-## Out of scope
+## Out of scope for the shell design
 
-- provider execution or streaming;
+- live provider execution;
+- credentials and provider authentication;
 - durable thread storage;
 - account or credential setup;
 - Apple Foundation Models execution;
@@ -123,7 +126,8 @@ This shell is accepted when:
 2. the drawer reaches every existing section and dismisses by selection or
    scrim;
 3. iPad exposes the same hierarchy through a native split view;
-4. composer, suggestions, new chat, privacy selection, route preview, and
+4. composer, suggestions, new chat, privacy selection, deterministic
+   execution, and
    receipt detail are functional;
-5. preview copy never implies a provider responded;
+5. deterministic-provider copy never implies a live provider responded;
 6. source compiles for iOS and remote simulator checks pass.
