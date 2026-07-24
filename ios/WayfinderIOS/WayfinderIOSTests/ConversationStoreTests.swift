@@ -48,6 +48,28 @@ final class ConversationStoreTests: XCTestCase {
     XCTAssertEqual(threads.map(\.id), [newer.id, older.id])
   }
 
+  func testStreamingAssistantStateRoundTrips() async throws {
+    let store = try makeStore()
+    let timestamp = Date(timeIntervalSince1970: 100)
+    var thread = makeThread(prompt: "Stream this", timestamp: timestamp)
+    thread.messages.append(
+      ConversationMessageSnapshot(
+        id: UUID(),
+        role: .assistant,
+        content: "Partial",
+        createdAt: timestamp,
+        status: .streaming,
+        routeReceipt: nil
+      )
+    )
+
+    try await store.save(thread: thread)
+
+    let restored = try await store.thread(id: thread.id)
+    XCTAssertEqual(restored?.messages.last?.status, .streaming)
+    XCTAssertEqual(restored?.messages.last?.content, "Partial")
+  }
+
   func testDeleteActiveThreadClearsWorkspace() async throws {
     let store = try makeStore()
     let thread = makeThread(prompt: "Delete me")
