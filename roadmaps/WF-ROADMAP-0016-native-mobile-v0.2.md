@@ -234,6 +234,14 @@ Credentials ready only their matching destinations; all three destinations
 remain explicit-only and do not enter Automatic. Dynamic model inventory stays
 in the following stacked review.
 
+The model-inventory slice uses authenticated, bounded `GET /v1/models`
+catalogs for Moonshot/Kimi Platform and OpenRouter. OpenAI Platform retains its
+compiled GPT-5.6 fallback because its general model list does not provide a
+reliable chat-capability filter. Discovered text models remain explicit-only,
+are searchable in Destinations, can be selected for Chat, and disappear when
+their provider key is removed. Refresh failures preserve existing destinations
+and expose only a sanitized provider-level notice.
+
 - implement `CredentialStore`;
 - API-key lifecycle UI;
 - generic OpenAI-compatible direct provider;
