@@ -205,9 +205,12 @@ paid model.
 ## Apple on-device provider
 
 The iOS adapter calls Foundation Models in-process behind an actor. It queries
-actual availability, context, languages, capabilities, and readiness. It
-distinguishes unsupported OS, ineligible device, Apple Intelligence disabled,
-model not ready, and unknown unavailability.
+actual availability and the framework's supported-language count. The
+normalized capability snapshot advertises only the exercised text and
+streaming contracts. The public framework does not expose a stable context
+window, so the destination leaves that value unspecified rather than
+fabricating one. The adapter distinguishes unsupported OS, ineligible device,
+Apple Intelligence disabled, model not ready, and unknown unavailability.
 
 The adapter streams ordered output, supports cancellation, persists no native
 session, and translates only parameters supported by the framework. Under
@@ -218,6 +221,11 @@ aggregated snapshots and emits only their ordered suffixes. It bounds message
 count, per-message bytes, total request bytes, instructions, and response
 bytes. Because the public framework does not expose a stable context-window
 value, the destination publishes no fabricated context limit.
+
+Default instructions and the synthetic physical-device evidence prompt belong
+to a versioned prompt contract. The device gate records only the version,
+availability, supported-language count, bounded byte/delta counts, and terminal
+completion; it does not retain generated content.
 
 Apple on-device is eligible for appropriate local/easy work when available; it
 is not injected into existing routes. Onboarding may recommend it only with

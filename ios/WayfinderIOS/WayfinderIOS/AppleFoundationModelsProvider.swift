@@ -56,6 +56,20 @@ enum AppleFoundationModelsNativeAvailability: Equatable, Sendable {
   case unknownUnavailable
 }
 
+struct AppleFoundationModelsCapabilitySnapshot: Equatable, Sendable {
+  let supportsText: Bool
+  let supportsStreaming: Bool
+  let supportedLanguageCount: Int
+  let contextWindow: Int?
+
+  static let unavailable = AppleFoundationModelsCapabilitySnapshot(
+    supportsText: false,
+    supportsStreaming: false,
+    supportedLanguageCount: 0,
+    contextWindow: nil
+  )
+}
+
 enum AppleFoundationModelsAvailabilityQuery {
   static func map(
     frameworkSupported: Bool,
@@ -81,10 +95,19 @@ enum AppleFoundationModelsAvailabilityQuery {
 
 protocol AppleFoundationModelsRuntime: Sendable {
   func availability() async -> AppleFoundationModelsAvailability
+  func capabilities() async -> AppleFoundationModelsCapabilitySnapshot
   func responseSnapshots(
     prompt: String,
     instructions: String
   ) async throws -> AsyncThrowingStream<String, Error>
+}
+
+enum AppleFoundationModelsPromptContract {
+  static let version = "apple-on-device-v1"
+  static let defaultInstructions = "Answer the user directly and accurately."
+
+  static let deviceEvidencePrompt =
+    "In one concise sentence, explain why an on-device model is useful when a phone has no internet connection."
 }
 
 actor NativeAppleFoundationModelsRuntime: AppleFoundationModelsRuntime {
@@ -98,6 +121,21 @@ actor NativeAppleFoundationModelsRuntime: AppleFoundationModelsRuntime {
     }
     #endif
     return .unsupported
+  }
+
+  func capabilities() -> AppleFoundationModelsCapabilitySnapshot {
+    #if canImport(FoundationModels)
+    if #available(iOS 26.0, *) {
+      let model = SystemLanguageModel.default
+      return AppleFoundationModelsCapabilitySnapshot(
+        supportsText: true,
+        supportsStreaming: true,
+        supportedLanguageCount: model.supportedLanguages.count,
+        contextWindow: nil
+      )
+    }
+    #endif
+    return .unavailable
   }
 
   func responseSnapshots(
@@ -165,6 +203,7 @@ actor NativeAppleFoundationModelsRuntime: AppleFoundationModelsRuntime {
 
 protocol AppleFoundationModelsProvider: ProviderExecutor {
   func availability() async -> AppleFoundationModelsAvailability
+  func capabilities() async -> AppleFoundationModelsCapabilitySnapshot
 }
 
 actor NativeAppleFoundationModelsProvider: AppleFoundationModelsProvider {
@@ -184,6 +223,10 @@ actor NativeAppleFoundationModelsProvider: AppleFoundationModelsProvider {
 
   func availability() async -> AppleFoundationModelsAvailability {
     await runtime.availability()
+  }
+
+  func capabilities() async -> AppleFoundationModelsCapabilitySnapshot {
+    await runtime.capabilities()
   }
 
   func stream(
@@ -295,7 +338,7 @@ actor NativeAppleFoundationModelsProvider: AppleFoundationModelsProvider {
 
     let instructionText =
       instructions.isEmpty
-      ? "Answer the user directly and accurately."
+      ? AppleFoundationModelsPromptContract.defaultInstructions
       : instructions.joined(separator: "\n\n")
     guard instructionText.utf8.count <= maximumInstructionsBytes else {
       throw ProviderExecutionError.requestTooLarge
@@ -330,6 +373,10 @@ actor UnavailableAppleFoundationModelsProvider: AppleFoundationModelsProvider {
 
   func availability() -> AppleFoundationModelsAvailability {
     state
+  }
+
+  func capabilities() -> AppleFoundationModelsCapabilitySnapshot {
+    .unavailable
   }
 
   func stream(
