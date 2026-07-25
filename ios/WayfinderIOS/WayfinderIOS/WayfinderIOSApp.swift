@@ -10,6 +10,10 @@ struct WayfinderIOSApp: App {
       configurations: OpenAICompatibleConfiguration.supported,
       credentialStore: credentialStore
     )
+    let providerModelCatalog = OpenAICompatibleModelCatalog(
+      configurations: OpenAICompatibleConfiguration.supported,
+      credentialStore: credentialStore
+    )
 
     do {
       let container = try SwiftDataConversationStore.makeContainer()
@@ -20,6 +24,7 @@ struct WayfinderIOSApp: App {
           ),
           credentialStore: credentialStore,
           providerExecutor: provider,
+          providerModelCatalog: providerModelCatalog,
           destinations: .liveDirectProviders
         )
       )
@@ -29,6 +34,7 @@ struct WayfinderIOSApp: App {
           conversationStore: InMemoryConversationStore(),
           credentialStore: credentialStore,
           providerExecutor: provider,
+          providerModelCatalog: providerModelCatalog,
           destinations: .liveDirectProviders,
           initialPersistenceNotice:
             "Saved conversations are unavailable. New chats will remain in memory until Wayfinder restarts."
