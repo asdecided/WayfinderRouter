@@ -78,6 +78,84 @@ final class OpenAICompatibleProviderTests: XCTestCase {
     )
   }
 
+  func testCompiledPresetsUseTheirOwnEndpointModelAndCredential() async {
+    let cases: [(OpenAICompatibleConfiguration, String)] = [
+      (.openAIPlatform, "openai-key"),
+      (.moonshotPlatform, "moonshot-key"),
+      (.openRouter, "openrouter-key"),
+    ]
+
+    for (configuration, key) in cases {
+      let store = InMemoryCredentialStore()
+      try? await store.save(secret: key, for: configuration.credentialID)
+      let client = StubHTTPStreamingClient(
+        statusCode: 200,
+        chunks: [Data("data: [DONE]\n\n".utf8)]
+      )
+      let provider = OpenAICompatibleProvider(
+        configurations: OpenAICompatibleConfiguration.supported,
+        credentialStore: store,
+        httpClient: client
+      )
+
+      let result = await collect(
+        from: await provider.stream(
+          ProviderExecutionRequest(
+            id: UUID(),
+            prompt: "Hello",
+            destinationID: configuration.destinationID
+          )
+        )
+      )
+
+      XCTAssertEqual(result.events, [.completed])
+      XCTAssertNil(result.error)
+      let request = await client.capturedRequest()
+      XCTAssertEqual(request?.url, configuration.endpoint)
+      XCTAssertEqual(
+        request?.value(forHTTPHeaderField: "Authorization"),
+        "Bearer \(key)"
+      )
+      let body = try? XCTUnwrap(request?.httpBody)
+      let object = body.flatMap {
+        try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+      }
+      XCTAssertEqual(object?["model"] as? String, configuration.modelID)
+    }
+  }
+
+  func testPresetCannotBorrowAnotherProvidersCredential() async {
+    let store = InMemoryCredentialStore()
+    try? await store.save(
+      secret: "openai-key",
+      for: OpenAICompatibleConfiguration.openAIPlatform.credentialID
+    )
+    let client = StubHTTPStreamingClient(statusCode: 200, chunks: [])
+    let provider = OpenAICompatibleProvider(
+      configurations: OpenAICompatibleConfiguration.supported,
+      credentialStore: store,
+      httpClient: client
+    )
+
+    let result = await collect(
+      from: await provider.stream(
+        ProviderExecutionRequest(
+          id: UUID(),
+          prompt: "Hello",
+          destinationID:
+            OpenAICompatibleConfiguration.moonshotPlatform.destinationID
+        )
+      )
+    )
+
+    XCTAssertEqual(
+      result.error as? ProviderExecutionError,
+      .authenticationRequired
+    )
+    let requestCount = await client.requestCount()
+    XCTAssertEqual(requestCount, 0)
+  }
+
   func testMissingCredentialFailsBeforeNetworkRequest() async {
     let client = StubHTTPStreamingClient(statusCode: 200, chunks: [])
     let provider = OpenAICompatibleProvider(
