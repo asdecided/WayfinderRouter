@@ -39,6 +39,84 @@ final class AppModelTests: XCTestCase {
     XCTAssertEqual(model.privacyPosture, .onDeviceOnly)
   }
 
+  func testDirectCredentialChangesReadinessWithoutChangingAutomatic() async {
+    let store = InMemoryCredentialStore()
+    let model = AppModel(
+      credentialStore: store,
+      destinations: .liveDirectProviders
+    )
+
+    _ = await model.saveAPIKey(
+      "temporary-key",
+      for: APIKeyProviderDescriptor.supported[0]
+    )
+
+    XCTAssertEqual(model.destinations.first?.readiness, .ready)
+    XCTAssertEqual(model.destinations.first?.automaticEligible, false)
+    XCTAssertNil(model.selectedDestinationID)
+  }
+
+  func testPinnedDirectDestinationRoutesOnlyAfterExplicitSelection() async {
+    let store = InMemoryCredentialStore()
+    let provider = DeterministicMockProvider(
+      configuration: .init(
+        outcome: .response(chunks: ["Direct reply"]),
+        delay: .zero
+      )
+    )
+    let model = AppModel(
+      credentialStore: store,
+      providerExecutor: provider,
+      destinations: .liveDirectProviders
+    )
+    _ = await model.saveAPIKey(
+      "temporary-key",
+      for: APIKeyProviderDescriptor.supported[0]
+    )
+    model.selectDestination(
+      OpenAICompatibleConfiguration.openAIPlatform.destinationID
+    )
+    model.draft = "Simple prompt"
+
+    await model.sendMessage()
+
+    XCTAssertEqual(
+      model.activeThread?.messages.last?.content,
+      "Direct reply"
+    )
+    XCTAssertEqual(
+      model.activeThread?.messages.last?.routeReceipt?.destinationID,
+      OpenAICompatibleConfiguration.openAIPlatform.destinationID
+    )
+    XCTAssertEqual(
+      model.activeThread?.messages.last?.routeReceipt?.recommendation,
+      "pinned"
+    )
+  }
+
+  func testAutomaticDoesNotUseNewlyConfiguredDirectDestination() async {
+    let store = InMemoryCredentialStore()
+    let model = AppModel(
+      credentialStore: store,
+      destinations: .liveDirectProviders
+    )
+    _ = await model.saveAPIKey(
+      "temporary-key",
+      for: APIKeyProviderDescriptor.supported[0]
+    )
+    model.draft = "Simple prompt"
+
+    await model.sendMessage()
+
+    XCTAssertNil(model.selectedDestinationID)
+    XCTAssertEqual(model.activeThread?.messages.last?.status, .failed)
+    XCTAssertTrue(
+      model.activeThread?.messages.last?.content.contains(
+        "No Automatic destination"
+      ) ?? false
+    )
+  }
+
   func testSupportedAPIKeyProvidersKeepPlatformAndAccountAccessDistinct() {
     XCTAssertEqual(
       APIKeyProviderDescriptor.supported.map(\.displayName),
@@ -161,6 +239,35 @@ final class AppModelTests: XCTestCase {
         .filter { $0.role == .user }
         .map(\.content),
       ["First turn", "Second turn"]
+    )
+  }
+
+  func testProviderReceivesOnlyCompletedHistoryBeforeNewPrompt() async {
+    let provider = CapturingProvider(
+      outcomes: [
+        .response("First reply"),
+        .failure(partial: "Partial reply"),
+        .response("Third reply"),
+      ]
+    )
+    let model = AppModel(providerExecutor: provider)
+    model.draft = "First question"
+    await model.sendMessage()
+    model.draft = "Failed question"
+    await model.sendMessage()
+    model.draft = "Third question"
+    await model.sendMessage()
+
+    let requests = await provider.capturedRequests()
+
+    XCTAssertEqual(requests.count, 3)
+    XCTAssertEqual(
+      requests[2].messages,
+      [
+        ProviderExecutionMessage(role: .user, content: "First question"),
+        ProviderExecutionMessage(role: .assistant, content: "First reply"),
+        ProviderExecutionMessage(role: .user, content: "Third question"),
+      ]
     )
   }
 
@@ -368,5 +475,47 @@ final class AppModelTests: XCTestCase {
     }
 
     XCTAssertTrue(condition(), "Timed out waiting for state transition")
+  }
+}
+
+private actor CapturingProvider: ProviderExecutor {
+  enum Outcome {
+    case response(String)
+    case failure(partial: String)
+  }
+
+  private var outcomes: [Outcome]
+  private var requests: [ProviderExecutionRequest] = []
+
+  init(outcomes: [Outcome]) {
+    self.outcomes = outcomes
+  }
+
+  func stream(
+    _ request: ProviderExecutionRequest
+  ) -> AsyncThrowingStream<ProviderExecutionEvent, Error> {
+    requests.append(request)
+    let outcome = outcomes.removeFirst()
+    let (stream, continuation) =
+      AsyncThrowingStream<ProviderExecutionEvent, Error>.makeStream()
+
+    switch outcome {
+    case .response(let content):
+      continuation.yield(.delta(content))
+      continuation.yield(.completed)
+      continuation.finish()
+    case .failure(let partial):
+      continuation.yield(.delta(partial))
+      continuation.finish(
+        throwing: ProviderExecutionError.rejected("Provider failed.")
+      )
+    }
+    return stream
+  }
+
+  func cancel(requestID: UUID) {}
+
+  func capturedRequests() -> [ProviderExecutionRequest] {
+    requests
   }
 }
