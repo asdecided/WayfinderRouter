@@ -227,6 +227,13 @@ in their own review boundaries. This compatibility slice uses the supported
 Chat Completions shape; an OpenAI-specific Responses API adapter remains a
 separate provider-preset decision.
 
+The provider-preset slice compiles Moonshot/Kimi Platform (`kimi-k2.6`) and
+OpenRouter (`openrouter/auto`) alongside OpenAI Platform. Each preset owns its
+documented HTTPS endpoint, model identifier, and Keychain credential ID.
+Credentials ready only their matching destinations; all three destinations
+remain explicit-only and do not enter Automatic. Dynamic model inventory stays
+in the following stacked review.
+
 - implement `CredentialStore`;
 - API-key lifecycle UI;
 - generic OpenAI-compatible direct provider;
