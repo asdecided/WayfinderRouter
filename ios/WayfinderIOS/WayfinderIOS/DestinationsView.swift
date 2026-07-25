@@ -2,6 +2,7 @@ import SwiftUI
 
 struct DestinationsView: View {
   @Environment(AppModel.self) private var appModel
+  @State private var searchText = ""
   var openSidebar: (() -> Void)?
 
   var body: some View {
@@ -12,6 +13,14 @@ struct DestinationsView: View {
         )
         .font(.footnote)
         .foregroundStyle(.secondary)
+      }
+
+      if let modelInventoryNotice = appModel.modelInventoryNotice {
+        Section {
+          Label(modelInventoryNotice, systemImage: "exclamationmark.triangle")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+        }
       }
 
       if !onDeviceDestinations.isEmpty {
@@ -31,9 +40,28 @@ struct DestinationsView: View {
       }
     }
     .navigationTitle("Destinations")
+    .searchable(text: $searchText, prompt: "Search models")
+    .refreshable {
+      await appModel.refreshModelInventory()
+    }
     .toolbar {
       if let openSidebar {
         SidebarToolbarButton(action: openSidebar)
+      }
+      ToolbarItem(placement: .topBarTrailing) {
+        Button {
+          Task {
+            await appModel.refreshModelInventory()
+          }
+        } label: {
+          if appModel.isRefreshingModelInventory {
+            ProgressView()
+          } else {
+            Image(systemName: "arrow.clockwise")
+          }
+        }
+        .disabled(appModel.isRefreshingModelInventory)
+        .accessibilityLabel("Refresh models")
       }
     }
   }
@@ -42,26 +70,45 @@ struct DestinationsView: View {
     _ destination: RoutingDestination,
     systemImage: String
   ) -> some View {
-    Label {
-      VStack(alignment: .leading, spacing: 3) {
-        Text(destination.displayName)
-        Text(destination.detail)
-          .font(.caption)
-          .foregroundStyle(.secondary)
+    Button {
+      appModel.selectDestination(destination.id)
+      appModel.selectedTab = .chat
+    } label: {
+      Label {
+        VStack(alignment: .leading, spacing: 3) {
+          Text(destination.displayName)
+          Text(destination.detail)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      } icon: {
+        Image(systemName: systemImage)
+          .foregroundStyle(WayfinderTheme.accent)
       }
-    } icon: {
-      Image(systemName: systemImage)
-        .foregroundStyle(WayfinderTheme.accent)
     }
+    .buttonStyle(.plain)
     .badge(readinessLabel(for: destination))
+    .disabled(destination.readiness != .ready)
   }
 
   private var onDeviceDestinations: [RoutingDestination] {
-    appModel.destinations.filter { $0.boundary == .onDevice }
+    filteredDestinations.filter { $0.boundary == .onDevice }
   }
 
   private var hostedDestinations: [RoutingDestination] {
-    appModel.destinations.filter { $0.boundary == .hosted }
+    filteredDestinations.filter { $0.boundary == .hosted }
+  }
+
+  private var filteredDestinations: [RoutingDestination] {
+    let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !query.isEmpty else {
+      return appModel.destinations
+    }
+    return appModel.destinations.filter {
+      $0.displayName.localizedStandardContains(query)
+        || $0.providerName.localizedStandardContains(query)
+        || $0.modelID.localizedStandardContains(query)
+    }
   }
 
   private func readinessLabel(

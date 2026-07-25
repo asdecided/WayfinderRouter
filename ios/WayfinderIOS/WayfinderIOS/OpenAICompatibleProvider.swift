@@ -8,6 +8,7 @@ struct OpenAICompatibleConfiguration: Equatable, Sendable {
     displayName: "GPT-5.6",
     modelID: "gpt-5.6",
     endpoint: URL(string: "https://api.openai.com/v1/chat/completions")!,
+    modelsEndpoint: nil,
     credentialID: CredentialID(rawValue: "openai-platform.api-key"),
     contextWindow: nil
   )
@@ -19,6 +20,7 @@ struct OpenAICompatibleConfiguration: Equatable, Sendable {
     displayName: "Kimi K2.6",
     modelID: "kimi-k2.6",
     endpoint: URL(string: "https://api.moonshot.ai/v1/chat/completions")!,
+    modelsEndpoint: URL(string: "https://api.moonshot.ai/v1/models")!,
     credentialID: CredentialID(rawValue: "moonshot-platform.api-key"),
     contextWindow: 262_144
   )
@@ -30,6 +32,10 @@ struct OpenAICompatibleConfiguration: Equatable, Sendable {
     displayName: "OpenRouter Auto",
     modelID: "openrouter/auto",
     endpoint: URL(string: "https://openrouter.ai/api/v1/chat/completions")!,
+    modelsEndpoint: URL(
+      string:
+        "https://openrouter.ai/api/v1/models/user?output_modalities=text"
+    )!,
     credentialID: CredentialID(rawValue: "openrouter.api-key"),
     contextWindow: nil
   )
@@ -46,6 +52,7 @@ struct OpenAICompatibleConfiguration: Equatable, Sendable {
   let displayName: String
   let modelID: String
   let endpoint: URL
+  let modelsEndpoint: URL?
   let credentialID: CredentialID
   let contextWindow: UInt64?
 }
@@ -307,7 +314,11 @@ actor OpenAICompatibleProvider: ProviderExecutor {
       Error
     >.Continuation
   ) async throws {
-    guard let configuration = configurations[request.destinationID] else {
+    guard
+      let (configuration, modelID) = executionTarget(
+        for: request.destinationID
+      )
+    else {
       throw ProviderExecutionError.rejected(
         "The selected destination is not available."
       )
@@ -323,6 +334,7 @@ actor OpenAICompatibleProvider: ProviderExecutor {
 
     let urlRequest = try makeRequest(
       configuration: configuration,
+      modelID: modelID,
       messages: request.messages,
       apiKey: apiKey
     )
@@ -372,12 +384,13 @@ actor OpenAICompatibleProvider: ProviderExecutor {
 
   private func makeRequest(
     configuration: OpenAICompatibleConfiguration,
+    modelID: String,
     messages: [ProviderExecutionMessage],
     apiKey: String
   ) throws -> URLRequest {
     let body = try JSONEncoder().encode(
       OpenAIChatRequest(
-        model: configuration.modelID,
+        model: modelID,
         messages: messages.map {
           OpenAIChatRequest.Message(
             role: $0.role.rawValue,
@@ -402,6 +415,32 @@ actor OpenAICompatibleProvider: ProviderExecutor {
       forHTTPHeaderField: "Authorization"
     )
     return request
+  }
+
+  private func executionTarget(
+    for destinationID: String
+  ) -> (OpenAICompatibleConfiguration, String)? {
+    if let configuration = configurations[destinationID] {
+      return (configuration, configuration.modelID)
+    }
+
+    for configuration in configurations.values
+    where configuration.modelsEndpoint != nil {
+      let prefix = "\(configuration.providerID):"
+      guard destinationID.hasPrefix(prefix) else {
+        continue
+      }
+      let modelID = String(destinationID.dropFirst(prefix.count))
+      guard
+        !modelID.isEmpty,
+        modelID.count
+          <= OpenAICompatibleModelCatalog.maximumIdentifierCharacters
+      else {
+        return nil
+      }
+      return (configuration, modelID)
+    }
+    return nil
   }
 
   private func validate(statusCode: Int) throws {

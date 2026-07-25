@@ -141,6 +141,8 @@ final class AppModel {
   var activeThreadID: UUID?
   var persistenceNotice: String?
   var credentialNotice: String?
+  var modelInventoryNotice: String?
+  var isRefreshingModelInventory = false
   var isRestoringConversations = false
   var retentionPolicy: ConversationRetentionPolicy = .forever
   var executionPhase: ChatExecutionPhase = .idle
@@ -152,7 +154,10 @@ final class AppModel {
   private let conversationStore: any ConversationStore
   private let credentialStore: any CredentialStore
   private let providerExecutor: any ProviderExecutor
+  private let providerModelCatalog: any ProviderModelCatalog
+  private let compiledDestinations: [RoutingDestination]
   private let now: () -> Date
+  private var discoveredModelsByProvider: [String: [DiscoveredProviderModel]] = [:]
   private var hasRestoredConversations = false
   private var hasRestoredCredentialStatuses = false
   private var draftSaveTask: Task<Void, Never>?
@@ -161,6 +166,7 @@ final class AppModel {
     conversationStore: any ConversationStore = InMemoryConversationStore(),
     credentialStore: any CredentialStore = KeychainCredentialStore(),
     providerExecutor: any ProviderExecutor = DeterministicMockProvider(),
+    providerModelCatalog: any ProviderModelCatalog = EmptyProviderModelCatalog(),
     destinations: [RoutingDestination] = .previewCandidates,
     initialPersistenceNotice: String? = nil,
     now: @escaping () -> Date = Date.init
@@ -168,6 +174,8 @@ final class AppModel {
     self.conversationStore = conversationStore
     self.credentialStore = credentialStore
     self.providerExecutor = providerExecutor
+    self.providerModelCatalog = providerModelCatalog
+    compiledDestinations = destinations
     self.destinations = destinations
     self.persistenceNotice = initialPersistenceNotice
     self.now = now
@@ -219,6 +227,9 @@ final class AppModel {
       return
     }
     hasRestoredCredentialStatuses = await refreshCredentialStatuses()
+    if hasRestoredCredentialStatuses {
+      await refreshModelInventory()
+    }
   }
 
   func saveAPIKey(
@@ -230,6 +241,7 @@ final class AppModel {
       try await credentialStore.save(secret: normalized, for: provider.id)
       credentialNotice = nil
       _ = await refreshCredentialStatuses()
+      await refreshModelInventory()
       return true
     } catch {
       credentialNotice = userFacingCredentialError(error)
@@ -247,8 +259,44 @@ final class AppModel {
       }
       credentialNotice = nil
       _ = await refreshCredentialStatuses()
+      await refreshModelInventory()
     } catch {
       credentialNotice = userFacingCredentialError(error)
+    }
+  }
+
+  func refreshModelInventory() async {
+    guard !isRefreshingModelInventory else {
+      return
+    }
+
+    isRefreshingModelInventory = true
+    defer { isRefreshingModelInventory = false }
+
+    let results = await providerModelCatalog.refresh()
+    var failedProviderNames: [String] = []
+
+    for result in results {
+      switch result.state {
+      case .loaded(let models):
+        discoveredModelsByProvider[result.providerID] = models
+      case .notConfigured:
+        discoveredModelsByProvider[result.providerID] = nil
+      case .failed:
+        let providerName =
+          OpenAICompatibleConfiguration.supported.first {
+            $0.providerID == result.providerID
+          }?.providerName ?? "A provider"
+        failedProviderNames.append(providerName)
+      }
+    }
+
+    rebuildDestinations()
+    if failedProviderNames.isEmpty {
+      modelInventoryNotice = nil
+    } else {
+      modelInventoryNotice =
+        "Wayfinder could not refresh models for \(failedProviderNames.joined(separator: ", ")). Existing destinations remain available."
     }
   }
 
@@ -842,6 +890,51 @@ final class AppModel {
         credentialStatuses.first(where: { $0.id == credentialID })?
         .isConfigured ?? false
       return destination.withReadiness(isConfigured ? .ready : .signedOut)
+    }
+  }
+
+  private func rebuildDestinations() {
+    var rebuilt = compiledDestinations
+    let compiledModels = Set(
+      compiledDestinations.map { "\($0.providerID)\u{0}\($0.modelID)" }
+    )
+
+    for configuration in OpenAICompatibleConfiguration.supported {
+      for model in discoveredModelsByProvider[configuration.providerID] ?? [] {
+        guard
+          !compiledModels.contains(
+            "\(configuration.providerID)\u{0}\(model.modelID)"
+          )
+        else {
+          continue
+        }
+        rebuilt.append(
+          RoutingDestination(
+            id: "\(configuration.providerID):\(model.modelID)",
+            providerID: configuration.providerID,
+            providerName: configuration.providerName,
+            modelID: model.modelID,
+            displayName: model.displayName,
+            detail: "Discovered model · API key required",
+            routeTier: "cloud",
+            boundary: .hosted,
+            boundaryLabel: "Hosted cloud",
+            billingClass: .apiMetered,
+            readiness: .signedOut,
+            automaticEligible: false,
+            contextWindow: model.contextWindow,
+            credentialID: configuration.credentialID
+          )
+        )
+      }
+    }
+
+    destinations = rebuilt
+    updateDestinationReadiness()
+    if let selectedDestinationID,
+      !destinations.contains(where: { $0.id == selectedDestinationID })
+    {
+      self.selectedDestinationID = nil
     }
   }
 
