@@ -22,9 +22,16 @@ provider boundary. Adding a key makes only that provider's destinations ready
 but does not silently add any destination to Automatic; select a direct
 destination explicitly in Chat.
 
-Dynamic model discovery, Apple Foundation Models, and optional Mac pairing land
-in later review boundaries. These presets use Chat Completions; an
-OpenAI-specific Responses API adapter remains a separate provider decision.
+Authenticated, bounded model discovery publishes current Moonshot/Kimi and
+OpenRouter text models after their keys are configured. Destinations supports
+search, pull-to-refresh, and explicit Chat selection. OpenAI Platform keeps the
+compiled GPT-5.6 fallback because its general catalog does not reliably
+distinguish chat-capable models. Discovery failures preserve the last useful
+inventory and never expose raw provider errors.
+
+Apple Foundation Models and optional Mac pairing land in later review
+boundaries. These presets use Chat Completions; an OpenAI-specific Responses API
+adapter remains a separate provider decision.
 
 ## Build
 
