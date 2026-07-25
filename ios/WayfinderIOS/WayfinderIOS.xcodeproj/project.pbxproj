@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		014B0F0F1659B0478F68FAF3 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A28A0256D98D907F1BAF7A34 /* RootView.swift */; };
+		020FB7A9FD88AEC51B222D94 /* AppleFoundationModelsDeviceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E4CE284A1424D7C18B1B310 /* AppleFoundationModelsDeviceTests.swift */; };
 		0E85558185ACD9CE067729BD /* AppleFoundationModelsProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD1784496CB4D262A2DFD3F1 /* AppleFoundationModelsProvider.swift */; };
 		0F77A8625C270B1375083539 /* OpenRouterAccountTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF05080FED6F4E97C82B3C4F /* OpenRouterAccountTests.swift */; };
 		165C905840F4DCF56C27BF8F /* ConversationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D89C6EA7388FA2CCF9F5865E /* ConversationStore.swift */; };
@@ -66,6 +67,7 @@
 		70CB5BEDA315456CABBAE00D /* AppleFoundationModelsProviderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleFoundationModelsProviderTests.swift; sourceTree = "<group>"; };
 		83D516988396183A30C27411 /* ProviderModelCatalogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderModelCatalogTests.swift; sourceTree = "<group>"; };
 		8A7B4FB8866C8CE81BA3E3A9 /* CredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialStore.swift; sourceTree = "<group>"; };
+		8E4CE284A1424D7C18B1B310 /* AppleFoundationModelsDeviceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleFoundationModelsDeviceTests.swift; sourceTree = "<group>"; };
 		910171253EA965875F0C979A /* WayfinderIOSTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = WayfinderIOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9B27149D56F517F17D1F971B /* WayfinderTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WayfinderTheme.swift; sourceTree = "<group>"; };
 		9E92E195F328A16C8A4C9159 /* ChatExecution.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatExecution.swift; sourceTree = "<group>"; };
@@ -127,6 +129,7 @@
 		89636497AC4E9DD7FC0A1574 /* WayfinderIOSTests */ = {
 			isa = PBXGroup;
 			children = (
+				8E4CE284A1424D7C18B1B310 /* AppleFoundationModelsDeviceTests.swift */,
 				70CB5BEDA315456CABBAE00D /* AppleFoundationModelsProviderTests.swift */,
 				C17D8ECF221517590115EA9F /* AppModelTests.swift */,
 				5802A399EFEE02A09B5C7492 /* AuthorizationCodePKCETests.swift */,
@@ -240,6 +243,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AD9F05EEA94FD7440F0DD8A9 /* AppModelTests.swift in Sources */,
+				020FB7A9FD88AEC51B222D94 /* AppleFoundationModelsDeviceTests.swift in Sources */,
 				EBB5FC47BA62D841C32D9A8F /* AppleFoundationModelsProviderTests.swift in Sources */,
 				16E260B200C5AD48A0F88E40 /* AuthorizationCodePKCETests.swift in Sources */,
 				2663961FFDA2EEAEF58529A8 /* ConversationStoreTests.swift in Sources */,
