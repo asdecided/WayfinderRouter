@@ -30,11 +30,16 @@ struct ProviderAccountState: Equatable, Sendable {
   let readiness: ProviderAccountReadiness
 }
 
+enum WebAuthenticationCallback: Equatable, Sendable {
+  case customScheme(String)
+  case https(host: String, path: String)
+}
+
 struct AuthorizationChallenge: Equatable, Identifiable, Sendable {
   let id: UUID
   let providerID: String
   let authorizationURL: URL
-  let callbackURLScheme: String
+  let callback: WebAuthenticationCallback
 }
 
 protocol ProviderAccountController: Sendable {
@@ -54,6 +59,11 @@ enum OAuthTokenRequestEncoding: Sendable {
   case form
 }
 
+enum OAuthStateTransport: Sendable {
+  case queryParameter
+  case callbackPathComponent
+}
+
 struct AuthorizationCodePKCEConfiguration: Sendable {
   let providerID: String
   let authorizationEndpoint: URL
@@ -63,7 +73,10 @@ struct AuthorizationCodePKCEConfiguration: Sendable {
   let scopes: [String]
   let callbackParameterName: String
   let additionalAuthorizationParameters: [String: String]
+  let stateTransport: OAuthStateTransport
   let tokenRequestEncoding: OAuthTokenRequestEncoding
+  let includeCallbackInTokenRequest: Bool
+  let additionalTokenParameters: [String: String]
   let credentialResponseField: String
   let credentialID: CredentialID
 
@@ -76,7 +89,10 @@ struct AuthorizationCodePKCEConfiguration: Sendable {
     scopes: [String] = [],
     callbackParameterName: String = "redirect_uri",
     additionalAuthorizationParameters: [String: String] = [:],
+    stateTransport: OAuthStateTransport = .queryParameter,
     tokenRequestEncoding: OAuthTokenRequestEncoding = .form,
+    includeCallbackInTokenRequest: Bool = true,
+    additionalTokenParameters: [String: String] = [:],
     credentialResponseField: String = "access_token",
     credentialID: CredentialID
   ) {
@@ -88,7 +104,10 @@ struct AuthorizationCodePKCEConfiguration: Sendable {
     self.scopes = scopes
     self.callbackParameterName = callbackParameterName
     self.additionalAuthorizationParameters = additionalAuthorizationParameters
+    self.stateTransport = stateTransport
     self.tokenRequestEncoding = tokenRequestEncoding
+    self.includeCallbackInTokenRequest = includeCallbackInTokenRequest
+    self.additionalTokenParameters = additionalTokenParameters
     self.credentialResponseField = credentialResponseField
     self.credentialID = credentialID
   }
@@ -160,6 +179,7 @@ actor AuthorizationCodePKCEController: ProviderAccountController {
     let id: UUID
     let state: String
     let verifier: String
+    let callbackURL: URL
   }
 
   private let configuration: AuthorizationCodePKCEConfiguration
@@ -209,10 +229,12 @@ actor AuthorizationCodePKCEController: ProviderAccountController {
     }
 
     let id = UUID()
+    let callbackURL = try callbackURL(for: state)
     let pending = PendingAuthorization(
       id: id,
       state: state,
-      verifier: verifier
+      verifier: verifier,
+      callbackURL: callbackURL
     )
     self.pending = pending
     currentReadiness = .authorizing
@@ -221,7 +243,10 @@ actor AuthorizationCodePKCEController: ProviderAccountController {
       id: id,
       providerID: configuration.providerID,
       authorizationURL: try authorizationURL(for: pending),
-      callbackURLScheme: callbackScheme
+      callback: try webAuthenticationCallback(
+        for: pending.callbackURL,
+        scheme: callbackScheme
+      )
     )
   }
 
@@ -236,22 +261,33 @@ actor AuthorizationCodePKCEController: ProviderAccountController {
     do {
       let code = try authorizationCode(
         callbackURL: callbackURL,
+        expectedCallbackURL: pending.callbackURL,
         expectedState: pending.state
       )
       let credential = try await exchange(
         code: code,
-        verifier: pending.verifier
+        verifier: pending.verifier,
+        callbackURL: pending.callbackURL
       )
+      guard self.pending?.id == authorizationID else {
+        throw AuthorizationCodePKCEError.noPendingAuthorization
+      }
       try await credentialStore.save(
         secret: credential,
         for: configuration.credentialID
       )
+      guard self.pending?.id == authorizationID else {
+        try? await credentialStore.delete(configuration.credentialID)
+        throw AuthorizationCodePKCEError.noPendingAuthorization
+      }
       self.pending = nil
       currentReadiness = .ready
       return snapshot()
     } catch {
-      self.pending = nil
-      currentReadiness = .failed
+      if self.pending?.id == authorizationID {
+        self.pending = nil
+        currentReadiness = .failed
+      }
       throw error
     }
   }
@@ -305,7 +341,7 @@ actor AuthorizationCodePKCEController: ProviderAccountController {
     queryItems.append(
       URLQueryItem(
         name: configuration.callbackParameterName,
-        value: configuration.callbackURL.absoluteString
+        value: pending.callbackURL.absoluteString
       )
     )
     if !configuration.scopes.isEmpty {
@@ -313,7 +349,9 @@ actor AuthorizationCodePKCEController: ProviderAccountController {
         URLQueryItem(name: "scope", value: configuration.scopes.joined(separator: " "))
       )
     }
-    queryItems.append(URLQueryItem(name: "state", value: pending.state))
+    if configuration.stateTransport == .queryParameter {
+      queryItems.append(URLQueryItem(name: "state", value: pending.state))
+    }
     queryItems.append(
       URLQueryItem(
         name: "code_challenge",
@@ -336,12 +374,13 @@ actor AuthorizationCodePKCEController: ProviderAccountController {
 
   private func authorizationCode(
     callbackURL: URL,
+    expectedCallbackURL: URL,
     expectedState: String
   ) throws -> String {
     guard
-      callbackURL.scheme == configuration.callbackURL.scheme,
-      callbackURL.host == configuration.callbackURL.host,
-      callbackURL.path == configuration.callbackURL.path,
+      callbackURL.scheme == expectedCallbackURL.scheme,
+      callbackURL.host == expectedCallbackURL.host,
+      callbackURL.path == expectedCallbackURL.path,
       callbackURL.fragment == nil
     else {
       throw AuthorizationCodePKCEError.callbackMismatch
@@ -357,12 +396,14 @@ actor AuthorizationCodePKCEController: ProviderAccountController {
     if values["error"]?.isEmpty == false {
       throw AuthorizationCodePKCEError.authorizationDenied
     }
-    guard
-      let states = values["state"]?.compactMap(\.value),
-      states.count == 1,
-      states[0] == expectedState
-    else {
-      throw AuthorizationCodePKCEError.stateMismatch
+    if configuration.stateTransport == .queryParameter {
+      guard
+        let states = values["state"]?.compactMap(\.value),
+        states.count == 1,
+        states[0] == expectedState
+      else {
+        throw AuthorizationCodePKCEError.stateMismatch
+      }
     }
     guard
       let codes = values["code"]?.compactMap(\.value),
@@ -376,15 +417,21 @@ actor AuthorizationCodePKCEController: ProviderAccountController {
 
   private func exchange(
     code: String,
-    verifier: String
+    verifier: String,
+    callbackURL: URL
   ) async throws -> String {
     var fields = [
       "code": code,
       "code_verifier": verifier,
-      "redirect_uri": configuration.callbackURL.absoluteString,
     ]
+    if configuration.includeCallbackInTokenRequest {
+      fields["redirect_uri"] = callbackURL.absoluteString
+    }
     if let clientID = configuration.clientID {
       fields["client_id"] = clientID
+    }
+    fields.merge(configuration.additionalTokenParameters) { _, reviewedValue in
+      reviewedValue
     }
 
     var request = URLRequest(url: configuration.tokenEndpoint)
@@ -431,6 +478,32 @@ actor AuthorizationCodePKCEController: ProviderAccountController {
 
   private static func challenge(for verifier: String) -> String {
     Data(SHA256.hash(data: Data(verifier.utf8))).base64URLEncodedString()
+  }
+
+  private func callbackURL(for state: String) throws -> URL {
+    switch configuration.stateTransport {
+    case .queryParameter:
+      return configuration.callbackURL
+    case .callbackPathComponent:
+      let callbackURL = configuration.callbackURL.appendingPathComponent(state)
+      guard callbackURL.absoluteString.count <= 2_048 else {
+        throw AuthorizationCodePKCEError.invalidConfiguration
+      }
+      return callbackURL
+    }
+  }
+
+  private func webAuthenticationCallback(
+    for callbackURL: URL,
+    scheme: String
+  ) throws -> WebAuthenticationCallback {
+    if scheme == "https" {
+      guard let host = callbackURL.host, !host.isEmpty else {
+        throw AuthorizationCodePKCEError.invalidConfiguration
+      }
+      return .https(host: host, path: callbackURL.path)
+    }
+    return .customScheme(scheme)
   }
 
   private static func isValidVerifierCharacter(

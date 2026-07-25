@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		014B0F0F1659B0478F68FAF3 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A28A0256D98D907F1BAF7A34 /* RootView.swift */; };
+		0F77A8625C270B1375083539 /* OpenRouterAccountTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF05080FED6F4E97C82B3C4F /* OpenRouterAccountTests.swift */; };
 		165C905840F4DCF56C27BF8F /* ConversationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D89C6EA7388FA2CCF9F5865E /* ConversationStore.swift */; };
 		16E260B200C5AD48A0F88E40 /* AuthorizationCodePKCETests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5802A399EFEE02A09B5C7492 /* AuthorizationCodePKCETests.swift */; };
 		17923336D4226B2F812CF7CA /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE0BB131143C117BDF129E06 /* SettingsView.swift */; };
@@ -18,10 +19,12 @@
 		4516AED0EA2C6143C441CAC1 /* OpenAICompatibleProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AA05C69CF6E5D026498FA04 /* OpenAICompatibleProvider.swift */; };
 		505322426BA37D7C41706A05 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A7B4FB8866C8CE81BA3E3A9 /* CredentialStore.swift */; };
 		5289F042BE903630416D2DC7 /* ThreadsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DA6AA772008E2B7C904EA80 /* ThreadsView.swift */; };
+		5B2A7371A127D18927D51B6C /* AccountsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45F5FA0D2F24CB2485DC0541 /* AccountsView.swift */; };
 		81347D868AF6B843F8845DCD /* ProviderModelCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45626E28DD8157BEF5D16EF7 /* ProviderModelCatalog.swift */; };
 		A7AFF77BAFD88E83930B3DC6 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D3D621AD229ED0AF9703D04 /* AppModel.swift */; };
 		A95064FBE316BC583A492270 /* WayfinderRoutingBridge in Frameworks */ = {isa = PBXBuildFile; productRef = 2B873E1C9EC13707AC9AB4B1 /* WayfinderRoutingBridge */; };
 		AD9F05EEA94FD7440F0DD8A9 /* AppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C17D8ECF221517590115EA9F /* AppModelTests.swift */; };
+		AECF557711C7CD3BC8C373BF /* OpenRouterAccount.swift in Sources */ = {isa = PBXBuildFile; fileRef = 199D09FCEAB826F397ABEAF1 /* OpenRouterAccount.swift */; };
 		B1447F8C483CFBAC90E2C3FD /* OpenAICompatibleProviderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 261CF6528CA739E9E0D7D553 /* OpenAICompatibleProviderTests.swift */; };
 		C04837E936D39B59FC3DAEDE /* DestinationsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 375A787B3245E247D326C13E /* DestinationsView.swift */; };
 		CD7EFB8AE4D72853B02822C9 /* AuthorizationCodePKCE.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A8F8648A591ACB6DD8AA3 /* AuthorizationCodePKCE.swift */; };
@@ -43,6 +46,7 @@
 
 /* Begin PBXFileReference section */
 		0D3D621AD229ED0AF9703D04 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		199D09FCEAB826F397ABEAF1 /* OpenRouterAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenRouterAccount.swift; sourceTree = "<group>"; };
 		1F3A8F8648A591ACB6DD8AA3 /* AuthorizationCodePKCE.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorizationCodePKCE.swift; sourceTree = "<group>"; };
 		25109E76A4BFCC3FD9297E97 /* ChatTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTabView.swift; sourceTree = "<group>"; };
 		261CF6528CA739E9E0D7D553 /* OpenAICompatibleProviderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAICompatibleProviderTests.swift; sourceTree = "<group>"; };
@@ -50,6 +54,7 @@
 		39BC65B89F3C0433A3716A07 /* WayfinderRoutingBridge */ = {isa = PBXFileReference; lastKnownFileType = folder; name = WayfinderRoutingBridge; path = ../../apple/Packages/WayfinderRoutingBridge; sourceTree = SOURCE_ROOT; };
 		3AD4110CCB21039F8900BB91 /* CredentialStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialStoreTests.swift; sourceTree = "<group>"; };
 		45626E28DD8157BEF5D16EF7 /* ProviderModelCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderModelCatalog.swift; sourceTree = "<group>"; };
+		45F5FA0D2F24CB2485DC0541 /* AccountsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountsView.swift; sourceTree = "<group>"; };
 		4A2C2884452C3AECE92EE0E1 /* WayfinderIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WayfinderIOSApp.swift; sourceTree = "<group>"; };
 		4DA6AA772008E2B7C904EA80 /* ThreadsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadsView.swift; sourceTree = "<group>"; };
 		5802A399EFEE02A09B5C7492 /* AuthorizationCodePKCETests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorizationCodePKCETests.swift; sourceTree = "<group>"; };
@@ -64,6 +69,7 @@
 		A28A0256D98D907F1BAF7A34 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		BE0BB131143C117BDF129E06 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		C17D8ECF221517590115EA9F /* AppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelTests.swift; sourceTree = "<group>"; };
+		CF05080FED6F4E97C82B3C4F /* OpenRouterAccountTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenRouterAccountTests.swift; sourceTree = "<group>"; };
 		D89C6EA7388FA2CCF9F5865E /* ConversationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationStore.swift; sourceTree = "<group>"; };
 		D8A79F801F4849CBD50C8A61 /* ConversationStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationStoreTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -83,6 +89,7 @@
 		0F27F14F5F65590F365CE447 /* WayfinderIOS */ = {
 			isa = PBXGroup;
 			children = (
+				45F5FA0D2F24CB2485DC0541 /* AccountsView.swift */,
 				64B75781C7C160DEB4257207 /* APIKeysView.swift */,
 				0D3D621AD229ED0AF9703D04 /* AppModel.swift */,
 				1F3A8F8648A591ACB6DD8AA3 /* AuthorizationCodePKCE.swift */,
@@ -92,6 +99,7 @@
 				8A7B4FB8866C8CE81BA3E3A9 /* CredentialStore.swift */,
 				375A787B3245E247D326C13E /* DestinationsView.swift */,
 				6AA05C69CF6E5D026498FA04 /* OpenAICompatibleProvider.swift */,
+				199D09FCEAB826F397ABEAF1 /* OpenRouterAccount.swift */,
 				45626E28DD8157BEF5D16EF7 /* ProviderModelCatalog.swift */,
 				A28A0256D98D907F1BAF7A34 /* RootView.swift */,
 				BE0BB131143C117BDF129E06 /* SettingsView.swift */,
@@ -119,6 +127,7 @@
 				D8A79F801F4849CBD50C8A61 /* ConversationStoreTests.swift */,
 				3AD4110CCB21039F8900BB91 /* CredentialStoreTests.swift */,
 				261CF6528CA739E9E0D7D553 /* OpenAICompatibleProviderTests.swift */,
+				CF05080FED6F4E97C82B3C4F /* OpenRouterAccountTests.swift */,
 				83D516988396183A30C27411 /* ProviderModelCatalogTests.swift */,
 			);
 			path = WayfinderIOSTests;
@@ -229,6 +238,7 @@
 				2663961FFDA2EEAEF58529A8 /* ConversationStoreTests.swift in Sources */,
 				F4E9D5D8ED49654292FFA71E /* CredentialStoreTests.swift in Sources */,
 				B1447F8C483CFBAC90E2C3FD /* OpenAICompatibleProviderTests.swift in Sources */,
+				0F77A8625C270B1375083539 /* OpenRouterAccountTests.swift in Sources */,
 				32B23F52E639A8EFBDA0D975 /* ProviderModelCatalogTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -238,6 +248,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				D060F612A4C672A8932A47B9 /* APIKeysView.swift in Sources */,
+				5B2A7371A127D18927D51B6C /* AccountsView.swift in Sources */,
 				A7AFF77BAFD88E83930B3DC6 /* AppModel.swift in Sources */,
 				CD7EFB8AE4D72853B02822C9 /* AuthorizationCodePKCE.swift in Sources */,
 				2FDE760EEAA633A74BF8B379 /* ChatExecution.swift in Sources */,
@@ -246,6 +257,7 @@
 				505322426BA37D7C41706A05 /* CredentialStore.swift in Sources */,
 				C04837E936D39B59FC3DAEDE /* DestinationsView.swift in Sources */,
 				4516AED0EA2C6143C441CAC1 /* OpenAICompatibleProvider.swift in Sources */,
+				AECF557711C7CD3BC8C373BF /* OpenRouterAccount.swift in Sources */,
 				81347D868AF6B843F8845DCD /* ProviderModelCatalog.swift in Sources */,
 				014B0F0F1659B0478F68FAF3 /* RootView.swift in Sources */,
 				17923336D4226B2F812CF7CA /* SettingsView.swift in Sources */,

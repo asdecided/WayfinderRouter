@@ -141,6 +141,11 @@ final class AppModel {
   var activeThreadID: UUID?
   var persistenceNotice: String?
   var credentialNotice: String?
+  var accountNotice: String?
+  var openRouterAccountState = ProviderAccountState(
+    providerID: "openrouter",
+    readiness: .checking
+  )
   var modelInventoryNotice: String?
   var isRefreshingModelInventory = false
   var isRestoringConversations = false
@@ -153,6 +158,7 @@ final class AppModel {
   private let routingEngine: RoutingEngine
   private let conversationStore: any ConversationStore
   private let credentialStore: any CredentialStore
+  private let openRouterAccountController: any ProviderAccountController
   private let providerExecutor: any ProviderExecutor
   private let providerModelCatalog: any ProviderModelCatalog
   private let compiledDestinations: [RoutingDestination]
@@ -165,6 +171,7 @@ final class AppModel {
   init(
     conversationStore: any ConversationStore = InMemoryConversationStore(),
     credentialStore: any CredentialStore = KeychainCredentialStore(),
+    openRouterAccountController: (any ProviderAccountController)? = nil,
     providerExecutor: any ProviderExecutor = DeterministicMockProvider(),
     providerModelCatalog: any ProviderModelCatalog = EmptyProviderModelCatalog(),
     destinations: [RoutingDestination] = .previewCandidates,
@@ -173,6 +180,12 @@ final class AppModel {
   ) {
     self.conversationStore = conversationStore
     self.credentialStore = credentialStore
+    self.openRouterAccountController =
+      openRouterAccountController
+      ?? AuthorizationCodePKCEController(
+        configuration: .openRouter,
+        credentialStore: credentialStore
+      )
     self.providerExecutor = providerExecutor
     self.providerModelCatalog = providerModelCatalog
     compiledDestinations = destinations
@@ -228,7 +241,59 @@ final class AppModel {
     }
     hasRestoredCredentialStatuses = await refreshCredentialStatuses()
     if hasRestoredCredentialStatuses {
+      openRouterAccountState = await openRouterAccountController.refresh()
       await refreshModelInventory()
+    }
+  }
+
+  func beginOpenRouterAuthorization() async -> AuthorizationChallenge? {
+    do {
+      let challenge = try await openRouterAccountController.beginAuthorization()
+      openRouterAccountState = await openRouterAccountController.state()
+      accountNotice = nil
+      return challenge
+    } catch {
+      accountNotice = userFacingAccountError(error)
+      openRouterAccountState = await openRouterAccountController.state()
+      return nil
+    }
+  }
+
+  func completeOpenRouterAuthorization(
+    _ authorizationID: UUID,
+    callbackURL: URL
+  ) async -> Bool {
+    do {
+      openRouterAccountState = try await openRouterAccountController
+        .completeAuthorization(
+          authorizationID,
+          callbackURL: callbackURL
+        )
+      accountNotice = nil
+      _ = await refreshCredentialStatuses()
+      await refreshModelInventory()
+      return true
+    } catch {
+      accountNotice = userFacingAccountError(error)
+      openRouterAccountState = await openRouterAccountController.state()
+      return false
+    }
+  }
+
+  func cancelOpenRouterAuthorization(_ authorizationID: UUID) async {
+    await openRouterAccountController.cancelAuthorization(authorizationID)
+    openRouterAccountState = await openRouterAccountController.state()
+  }
+
+  func disconnectOpenRouterAccount() async {
+    do {
+      try await openRouterAccountController.signOut()
+      openRouterAccountState = await openRouterAccountController.state()
+      accountNotice = nil
+      _ = await refreshCredentialStatuses()
+      await refreshModelInventory()
+    } catch {
+      accountNotice = userFacingAccountError(error)
     }
   }
 
@@ -241,6 +306,9 @@ final class AppModel {
       try await credentialStore.save(secret: normalized, for: provider.id)
       credentialNotice = nil
       _ = await refreshCredentialStatuses()
+      if provider.id == OpenAICompatibleConfiguration.openRouter.credentialID {
+        openRouterAccountState = await openRouterAccountController.refresh()
+      }
       await refreshModelInventory()
       return true
     } catch {
@@ -259,6 +327,9 @@ final class AppModel {
       }
       credentialNotice = nil
       _ = await refreshCredentialStatuses()
+      if provider.id == OpenAICompatibleConfiguration.openRouter.credentialID {
+        openRouterAccountState = await openRouterAccountController.refresh()
+      }
       await refreshModelInventory()
     } catch {
       credentialNotice = userFacingCredentialError(error)
@@ -881,6 +952,18 @@ final class AppModel {
     return "Wayfinder could not update the iOS Keychain."
   }
 
+  private func userFacingAccountError(_ error: Error) -> String {
+    if error is CancellationError {
+      return "OpenRouter sign-in was cancelled."
+    }
+    if let authenticationError = error as? AuthorizationCodePKCEError,
+      let description = authenticationError.errorDescription
+    {
+      return description
+    }
+    return "Wayfinder could not connect the OpenRouter account."
+  }
+
   private func updateDestinationReadiness() {
     destinations = destinations.map { destination in
       guard let credentialID = destination.credentialID else {
@@ -899,7 +982,7 @@ final class AppModel {
       compiledDestinations.map { "\($0.providerID)\u{0}\($0.modelID)" }
     )
 
-    for configuration in OpenAICompatibleConfiguration.supported {
+    for configuration in OpenAICompatibleConfiguration.discoverySupported {
       for model in discoveredModelsByProvider[configuration.providerID] ?? [] {
         guard
           !compiledModels.contains(
@@ -946,7 +1029,7 @@ final class AppModel {
     {
       if destination.readiness == .signedOut {
         return
-          "Add the \(destination.providerName) API key in Settings before using \(destination.displayName)."
+          "Connect \(destination.providerName) in Settings before using \(destination.displayName)."
       }
       return "\(destination.displayName) is not currently available under \(privacyPosture.title)."
     }
@@ -1231,6 +1314,7 @@ extension [RoutingDestination] {
     OpenAICompatibleConfiguration.openAIPlatform,
     OpenAICompatibleConfiguration.moonshotPlatform,
     OpenAICompatibleConfiguration.openRouter,
+    OpenAICompatibleConfiguration.openRouterFree,
   ].map { configuration in
     RoutingDestination(
       id: configuration.destinationID,
@@ -1238,7 +1322,9 @@ extension [RoutingDestination] {
       providerName: configuration.providerName,
       modelID: configuration.modelID,
       displayName: configuration.displayName,
-      detail: "Direct API · API key required",
+      detail: configuration.modelID == "openrouter/free"
+        ? "No-cost models · rate limited"
+        : "Direct API · account or API key",
       routeTier: "cloud",
       boundary: .hosted,
       boundaryLabel: "Hosted cloud",

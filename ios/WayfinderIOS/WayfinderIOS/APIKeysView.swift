@@ -23,9 +23,10 @@ struct APIKeysView: View {
       }
 
       Section("Account access") {
-        LabeledContent("ChatGPT / Codex", value: "Not an API key")
+        LabeledContent("OpenRouter", value: "Sign in under Accounts")
+        LabeledContent("ChatGPT / Codex", value: "Paired Mac only")
         Text(
-          "OpenAI Platform keys and ChatGPT subscriptions are separate. Native account sign-in is not part of this build."
+          "OpenAI Platform keys and ChatGPT subscriptions are separate. Wayfinder never treats a consumer subscription as general API access."
         )
         .font(.footnote)
         .foregroundStyle(.secondary)
