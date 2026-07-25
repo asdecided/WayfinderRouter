@@ -42,6 +42,10 @@
 		20B8954947389B3467C1A7CB /* MarkdownRenderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12F38C9DD8AA4D34367BAFDE /* MarkdownRenderingTests.swift */; };
 		B05F4D8E22F0E3DB9130228A /* Instrumentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = E55909C4415E30876974F00E /* Instrumentation.swift */; };
 		5E28F56096A496E7096ED069 /* ChatLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E152315242DF50CD0966A74 /* ChatLifecycleTests.swift */; };
+		00288E0D8FDE4D3D73CB5B8A /* WayfinderFeedback.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B40CAEB0C71E054BBEAAA2F /* WayfinderFeedback.swift */; };
+		0BF08FCEBE4334F725228C3C /* TranscriptScroll.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3410BEB9A61E50C8837E5C11 /* TranscriptScroll.swift */; };
+		016C2DA8BBBEF64FFF547B2D /* RouteReceipt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97AEEE355705A642C7D55C11 /* RouteReceipt.swift */; };
+		6185E43E26661D1875EA9BE6 /* TranscriptScrollTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD99427DAE64871659D80447 /* TranscriptScrollTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -92,6 +96,10 @@
 		12F38C9DD8AA4D34367BAFDE /* MarkdownRenderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownRenderingTests.swift; sourceTree = "<group>"; };
 		E55909C4415E30876974F00E /* Instrumentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Instrumentation.swift; sourceTree = "<group>"; };
 		8E152315242DF50CD0966A74 /* ChatLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatLifecycleTests.swift; sourceTree = "<group>"; };
+		5B40CAEB0C71E054BBEAAA2F /* WayfinderFeedback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WayfinderFeedback.swift; sourceTree = "<group>"; };
+		3410BEB9A61E50C8837E5C11 /* TranscriptScroll.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptScroll.swift; sourceTree = "<group>"; };
+		97AEEE355705A642C7D55C11 /* RouteReceipt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteReceipt.swift; sourceTree = "<group>"; };
+		FD99427DAE64871659D80447 /* TranscriptScrollTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptScrollTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -127,8 +135,11 @@
 				199D09FCEAB826F397ABEAF1 /* OpenRouterAccount.swift */,
 				45626E28DD8157BEF5D16EF7 /* ProviderModelCatalog.swift */,
 				A28A0256D98D907F1BAF7A34 /* RootView.swift */,
+				97AEEE355705A642C7D55C11 /* RouteReceipt.swift */,
 				BE0BB131143C117BDF129E06 /* SettingsView.swift */,
 				4DA6AA772008E2B7C904EA80 /* ThreadsView.swift */,
+				3410BEB9A61E50C8837E5C11 /* TranscriptScroll.swift */,
+				5B40CAEB0C71E054BBEAAA2F /* WayfinderFeedback.swift */,
 				4A2C2884452C3AECE92EE0E1 /* WayfinderIOSApp.swift */,
 				9B27149D56F517F17D1F971B /* WayfinderTheme.swift */,
 			);
@@ -158,6 +169,7 @@
 				261CF6528CA739E9E0D7D553 /* OpenAICompatibleProviderTests.swift */,
 				CF05080FED6F4E97C82B3C4F /* OpenRouterAccountTests.swift */,
 				83D516988396183A30C27411 /* ProviderModelCatalogTests.swift */,
+				FD99427DAE64871659D80447 /* TranscriptScrollTests.swift */,
 				B2C5986A2A84636B64159FE7 /* WayfinderThemeTests.swift */,
 			);
 			path = WayfinderIOSTests;
@@ -286,6 +298,7 @@
 				B1447F8C483CFBAC90E2C3FD /* OpenAICompatibleProviderTests.swift in Sources */,
 				0F77A8625C270B1375083539 /* OpenRouterAccountTests.swift in Sources */,
 				32B23F52E639A8EFBDA0D975 /* ProviderModelCatalogTests.swift in Sources */,
+				6185E43E26661D1875EA9BE6 /* TranscriptScrollTests.swift in Sources */,
 				75374729F624DC6AA2AB9C72 /* WayfinderThemeTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -311,8 +324,11 @@
 				AECF557711C7CD3BC8C373BF /* OpenRouterAccount.swift in Sources */,
 				81347D868AF6B843F8845DCD /* ProviderModelCatalog.swift in Sources */,
 				014B0F0F1659B0478F68FAF3 /* RootView.swift in Sources */,
+				016C2DA8BBBEF64FFF547B2D /* RouteReceipt.swift in Sources */,
 				17923336D4226B2F812CF7CA /* SettingsView.swift in Sources */,
 				5289F042BE903630416D2DC7 /* ThreadsView.swift in Sources */,
+				0BF08FCEBE4334F725228C3C /* TranscriptScroll.swift in Sources */,
+				00288E0D8FDE4D3D73CB5B8A /* WayfinderFeedback.swift in Sources */,
 				EBF78778DA2B68EDA8347CAF /* WayfinderIOSApp.swift in Sources */,
 				DDF893703A284EDEF6594AE6 /* WayfinderTheme.swift in Sources */,
 			);

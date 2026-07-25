@@ -74,6 +74,42 @@ struct MarkdownDocument: Equatable, Sendable {
     var parser = MarkdownParser(source: source)
     return parser.parse(idOffset: 0)
   }
+
+  /// Parses `source`, reusing any blocks of `previous` that cannot have
+  /// changed (UX-016, UX-021).
+  ///
+  /// While a reply streams, only the final block is still open, so every
+  /// earlier block is reused verbatim — keeping its identity, which is what
+  /// stops SwiftUI relaying-out content the reader has already read, and
+  /// avoiding a re-run of the inline parser over the whole message per delta.
+  ///
+  /// Reuse is gated on `source` actually beginning with the closed prefix, so
+  /// content that was replaced rather than appended — a retry regenerating in
+  /// place — correctly falls back to a full parse. When a replacement does
+  /// happen to share that prefix, reusing its blocks is still correct: they
+  /// are derived from exactly those characters.
+  static func parse(
+    _ source: String,
+    reusing previous: MarkdownDocument?
+  ) -> MarkdownDocument {
+    guard let previous,
+      !previous.closedSource.isEmpty,
+      source.count > previous.closedSource.count,
+      source.hasPrefix(previous.closedSource)
+    else {
+      return parse(source)
+    }
+
+    let closed = Array(previous.nodes.dropLast())
+    let tail = String(source.dropFirst(previous.closedSource.count))
+    var parser = MarkdownParser(source: tail)
+    let parsed = parser.parse(idOffset: closed.count)
+
+    return MarkdownDocument(
+      nodes: closed + parsed.nodes,
+      closedSource: previous.closedSource + parsed.closedSource
+    )
+  }
 }
 
 // MARK: - Parser
@@ -524,68 +560,5 @@ enum MarkdownInline {
       // A half-written emphasis run mid-stream must still render as text.
       return AttributedString(text)
     }
-  }
-}
-
-// MARK: - Incremental parsing
-
-/// Caches parsed markdown per message so a streaming reply does not re-run the
-/// inline parser over text that can no longer change (UX-016, UX-021).
-///
-/// Only the final block of a document is still open while a reply streams, so
-/// every earlier block is reused verbatim and keeps its identity — which is
-/// what stops already-rendered content from re-laying-out on each delta.
-@MainActor
-final class MarkdownCache {
-  private struct Entry {
-    let source: String
-    let document: MarkdownDocument
-  }
-
-  private var entries: [UUID: Entry] = [:]
-  /// Bounds memory when a long thread is scrolled; the transcript only ever
-  /// renders a window of messages.
-  private let capacity: Int
-
-  init(capacity: Int = 64) {
-    self.capacity = capacity
-  }
-
-  func document(for source: String, id: UUID) -> MarkdownDocument {
-    if let entry = entries[id] {
-      if entry.source == source {
-        return entry.document
-      }
-      if source.count > entry.source.count,
-        !entry.document.closedSource.isEmpty,
-        source.hasPrefix(entry.document.closedSource)
-      {
-        let closed = entry.document.nodes.dropLast()
-        let tail = String(source.dropFirst(entry.document.closedSource.count))
-        var parser = MarkdownParser(source: tail)
-        let parsed = parser.parse(idOffset: closed.count)
-        let document = MarkdownDocument(
-          nodes: Array(closed) + parsed.nodes,
-          closedSource: entry.document.closedSource + parsed.closedSource
-        )
-        store(Entry(source: source, document: document), id: id)
-        return document
-      }
-    }
-
-    let document = MarkdownDocument.parse(source)
-    store(Entry(source: source, document: document), id: id)
-    return document
-  }
-
-  func forget(id: UUID) {
-    entries[id] = nil
-  }
-
-  private func store(_ entry: Entry, id: UUID) {
-    if entries[id] == nil, entries.count >= capacity {
-      entries.removeAll()
-    }
-    entries[id] = entry
   }
 }

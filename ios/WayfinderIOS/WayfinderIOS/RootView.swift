@@ -4,7 +4,10 @@ struct RootView: View {
   @Environment(AppModel.self) private var appModel
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
   @Environment(\.scenePhase) private var scenePhase
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var showsSidebar = false
+  /// Live drag offset, in points, while the drawer is being dragged.
+  @State private var dragTranslation: CGFloat = 0
 
   var body: some View {
     Group {
@@ -14,23 +17,8 @@ struct RootView: View {
         compactWidthLayout
       }
     }
-    .alert(
-      "Conversation storage",
-      isPresented: Binding(
-        get: { appModel.persistenceNotice != nil },
-        set: { isPresented in
-          if !isPresented {
-            appModel.persistenceNotice = nil
-          }
-        }
-      )
-    ) {
-      Button("OK") {
-        appModel.persistenceNotice = nil
-      }
-    } message: {
-      Text(appModel.persistenceNotice ?? "")
-    }
+    // Storage failures are recoverable and are surfaced inline in Chat
+    // (UX-015); this screen no longer interrupts with a blocking alert.
     .onChange(of: scenePhase) {
       guard scenePhase != .active else {
         return
@@ -43,76 +31,114 @@ struct RootView: View {
 
   private var compactWidthLayout: some View {
     GeometryReader { proxy in
+      let width = min(340, proxy.size.width * 0.86)
+
       ZStack(alignment: .leading) {
-        compactSelectedDetail
+        sectionStack
           .allowsHitTesting(!showsSidebar)
           .accessibilityHidden(showsSidebar)
 
-        if showsSidebar {
-          Color.black.opacity(0.28)
+        if showsSidebar || dragTranslation != 0 {
+          WayfinderTheme.scrim
+            .opacity(scrimOpacity(width: width))
             .ignoresSafeArea()
             .onTapGesture(perform: closeSidebar)
-            .transition(.opacity)
             .accessibilityHidden(true)
 
-          AppSidebarView(select: select)
-            .frame(width: min(340, proxy.size.width * 0.86))
-            .transition(.move(edge: .leading))
+          AppSidebarView(select: select, close: closeSidebar)
+            .frame(width: width)
+            .offset(x: drawerOffset(width: width))
             .accessibilityAddTraits(.isModal)
         }
       }
+      // The drawer is dismissible by swipe, not only by hitting the scrim,
+      // and the gesture is interruptible: dragging retargets the spring
+      // mid-flight rather than snapping (UX-019).
+      .gesture(drawerDragGesture(width: width))
     }
-    .animation(.snappy(duration: 0.28), value: showsSidebar)
+    .wayfinderAnimation(
+      WayfinderMotion.drawer,
+      value: showsSidebar,
+      reduceMotion: reduceMotion
+    )
   }
 
-  @ViewBuilder
-  private var compactSelectedDetail: some View {
-    switch appModel.selectedTab {
-    case .chat:
+  /// Every section keeps its own `NavigationStack`, all of them alive, so
+  /// pushed detail survives a round trip through the drawer. WF-DESIGN-0020
+  /// permits exactly this hidden-container mechanism; WF-ROADMAP-0016 and
+  /// WF-ADR-0047 require the state to be preserved (UX-020).
+  private var sectionStack: some View {
+    TabView(selection: sectionBinding) {
       ChatTabView(openSidebar: openSidebar)
-    case .threads:
+        .tag(AppTab.chat)
+
       NavigationStack {
         ThreadsView(openSidebar: openSidebar)
       }
-    case .destinations:
+      .tag(AppTab.threads)
+
       NavigationStack {
         DestinationsView(openSidebar: openSidebar)
       }
-    case .settings:
+      .tag(AppTab.destinations)
+
       NavigationStack {
         SettingsView(openSidebar: openSidebar)
       }
+      .tag(AppTab.settings)
     }
+    .tabViewStyle(.page(indexDisplayMode: .never))
+    // The container is a state holder, never visible navigation: no tab bar,
+    // no page indicator, and no swipe between sections.
+    .ignoresSafeArea(.container, edges: .bottom)
+  }
+
+  private var sectionBinding: Binding<AppTab> {
+    Binding(
+      get: { appModel.selectedTab },
+      set: { appModel.selectedTab = $0 }
+    )
   }
 
   private var regularWidthLayout: some View {
     NavigationSplitView {
-      AppSidebarView(select: select)
+      AppSidebarView(select: select, close: nil)
         .navigationSplitViewColumnWidth(min: 260, ideal: 300, max: 340)
     } detail: {
-      selectedDetail
+      sectionStack
     }
     .navigationSplitViewStyle(.balanced)
   }
 
-  @ViewBuilder
-  private var selectedDetail: some View {
-    switch appModel.selectedTab {
-    case .chat:
-      ChatTabView()
-    case .threads:
-      NavigationStack {
-        ThreadsView()
+  // MARK: - Drawer gesture
+
+  private func drawerDragGesture(width: CGFloat) -> some Gesture {
+    DragGesture(minimumDistance: 12, coordinateSpace: .local)
+      .onChanged { value in
+        guard showsSidebar else { return }
+        // Only closing drags move the drawer; pulling right does nothing.
+        dragTranslation = min(0, value.translation.width)
       }
-    case .destinations:
-      NavigationStack {
-        DestinationsView()
+      .onEnded { value in
+        guard showsSidebar else { return }
+        let travelled = -value.translation.width
+        let velocity = -value.predictedEndTranslation.width
+        dragTranslation = 0
+        if travelled > width / 3 || velocity > width {
+          closeSidebar()
+        }
       }
-    case .settings:
-      NavigationStack {
-        SettingsView()
-      }
-    }
+  }
+
+  private func drawerOffset(width: CGFloat) -> CGFloat {
+    let base: CGFloat = showsSidebar ? 0 : -width
+    return max(-width, base + dragTranslation)
+  }
+
+  private func scrimOpacity(width: CGFloat) -> Double {
+    guard width > 0 else { return showsSidebar ? 1 : 0 }
+    let revealed = (width + drawerOffset(width: width)) / width
+    return Double(max(0, min(1, revealed)))
   }
 
   private func openSidebar() {
@@ -120,6 +146,7 @@ struct RootView: View {
   }
 
   private func closeSidebar() {
+    dragTranslation = 0
     showsSidebar = false
   }
 
@@ -131,14 +158,22 @@ struct RootView: View {
 
 private struct AppSidebarView: View {
   @Environment(AppModel.self) private var appModel
+  @ScaledMetric(relativeTo: .headline) private var headerHeight: CGFloat = 56
+
   let select: (AppTab) -> Void
+  /// Present on iPhone, where the drawer is modal. Assistive technology had
+  /// no way to dismiss it: the scrim is hidden from it by design, leaving
+  /// selecting a destination as the only exit (UX-027).
+  let close: (() -> Void)?
+
+  private var recentLimit: Int { 30 }
 
   var body: some View {
     VStack(spacing: 0) {
       sidebarHeader
 
       ScrollView {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: WayfinderSpacing.medium) {
           Button {
             Task {
               await appModel.startNewChat()
@@ -147,68 +182,29 @@ private struct AppSidebarView: View {
           } label: {
             Label("New chat", systemImage: "square.and.pencil")
               .frame(maxWidth: .infinity, alignment: .leading)
+              .frame(minHeight: WayfinderMetrics.minimumHitTarget)
               .contentShape(Rectangle())
           }
           .buttonStyle(.plain)
           .font(.body.weight(.medium))
-          .disabled(appModel.executionPhase.isActive)
           .accessibilityHint("Starts a new conversation")
 
-          VStack(alignment: .leading, spacing: 8) {
-            Text("Chats")
-              .font(.caption.weight(.semibold))
-              .foregroundStyle(.secondary)
-              .textCase(.uppercase)
+          if !appModel.pinnedThreads.isEmpty {
+            threadSection("Pinned", threads: appModel.pinnedThreads)
+          }
 
-            if appModel.threads.isEmpty {
-              Text("Your conversations will appear here.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .padding(.vertical, 8)
-            } else {
-              ForEach(appModel.threads.prefix(12)) { thread in
-                Button {
-                  Task {
-                    await appModel.selectThread(id: thread.id)
-                    select(.chat)
-                  }
-                } label: {
-                  VStack(alignment: .leading, spacing: 3) {
-                    Text(thread.title)
-                      .lineLimit(1)
-                    Text(
-                      thread.id == appModel.activeThreadID
-                        ? "Current chat"
-                        : thread.updatedAt.formatted(
-                          date: .abbreviated,
-                          time: .shortened
-                        )
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                  }
-                  .frame(maxWidth: .infinity, alignment: .leading)
-                  .padding(.horizontal, 12)
-                  .padding(.vertical, 10)
-                  .background(
-                    thread.id == appModel.activeThreadID
-                      && appModel.selectedTab == .chat
-                      ? Color.primary.opacity(0.07)
-                      : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 10)
-                  )
-                }
-                .buttonStyle(.plain)
-              }
-            }
+          threadSection(
+            "Chats",
+            threads: Array(appModel.unpinnedThreads.prefix(recentLimit)),
+            showsEmptyState: appModel.threads.isEmpty
+          )
 
-            SidebarDestinationButton(
-              title: "All chats",
-              systemImage: AppTab.threads.systemImage,
-              isSelected: appModel.selectedTab == .threads
-            ) {
-              select(.threads)
-            }
+          SidebarDestinationButton(
+            title: "All chats",
+            systemImage: AppTab.threads.systemImage,
+            isSelected: appModel.selectedTab == .threads
+          ) {
+            select(.threads)
           }
 
           Divider()
@@ -229,8 +225,9 @@ private struct AppSidebarView: View {
             select(.settings)
           }
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 12)
+        .padding(.horizontal, WayfinderSpacing.medium)
+        .padding(.top, WayfinderSpacing.small)
+        .padding(.bottom, WayfinderSpacing.large)
       }
 
       Divider()
@@ -245,32 +242,139 @@ private struct AppSidebarView: View {
             Text(appModel.privacyPosture.boundarySummary)
               .font(.caption)
               .foregroundStyle(.secondary)
-              .lineLimit(1)
+              .lineLimit(2)
           }
         } icon: {
-          Image(systemName: "hand.raised.fill")
+          Image(systemName: appModel.privacyPosture.symbolName)
             .foregroundStyle(WayfinderTheme.accent)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(minHeight: WayfinderMetrics.minimumHitTarget)
         .contentShape(Rectangle())
       }
       .buttonStyle(.plain)
-      .padding(16)
+      .padding(WayfinderSpacing.medium)
+      .accessibilityHint("Opens privacy settings")
     }
-    .background(Color(uiColor: .secondarySystemBackground))
+    .background(WayfinderTheme.raisedSurface)
+  }
+
+  @ViewBuilder
+  private func threadSection(
+    _ title: String,
+    threads: [ConversationThreadSnapshot],
+    showsEmptyState: Bool = false
+  ) -> some View {
+    VStack(alignment: .leading, spacing: WayfinderSpacing.xSmall) {
+      Text(title)
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.secondary)
+        .textCase(.uppercase)
+        .accessibilityAddTraits(.isHeader)
+
+      if showsEmptyState, threads.isEmpty {
+        Text("Your conversations will appear here.")
+          .font(.subheadline)
+          .foregroundStyle(.secondary)
+          .padding(.vertical, WayfinderSpacing.xSmall)
+      }
+
+      ForEach(threads) { thread in
+        Button {
+          Task {
+            await appModel.selectThread(id: thread.id)
+            select(.chat)
+          }
+        } label: {
+          HStack(spacing: WayfinderSpacing.xSmall) {
+            VStack(alignment: .leading, spacing: 3) {
+              Text(thread.title)
+                .lineLimit(1)
+              Text(subtitle(for: thread))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if thread.isPinned {
+              Image(systemName: "pin.fill")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            }
+          }
+          .padding(.horizontal, WayfinderSpacing.small)
+          .padding(.vertical, WayfinderSpacing.xSmall)
+          .frame(minHeight: WayfinderMetrics.minimumHitTarget)
+          .background(
+            thread.id == appModel.activeThreadID
+              && appModel.selectedTab == .chat
+              ? Color.primary.opacity(0.07)
+              : Color.clear,
+            in: RoundedRectangle(cornerRadius: WayfinderRadius.small)
+          )
+          .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(thread.title)
+        .accessibilityValue(subtitle(for: thread))
+        .accessibilityAction(named: thread.isPinned ? "Unpin" : "Pin") {
+          Task { await appModel.setPinned(!thread.isPinned, threadID: thread.id) }
+        }
+      }
+    }
+  }
+
+  private func subtitle(for thread: ConversationThreadSnapshot) -> String {
+    if thread.id == appModel.activeThreadID {
+      return "Current chat"
+    }
+    return thread.updatedAt.relativeDescription
   }
 
   private var sidebarHeader: some View {
-    HStack {
+    HStack(spacing: WayfinderSpacing.xSmall) {
       WayfinderMark()
 
       Text("Wayfinder")
         .font(.headline)
 
       Spacer()
+
+      if let close {
+        Button(action: close) {
+          Image(systemName: "xmark")
+            .font(.subheadline.weight(.semibold))
+            .frame(
+              width: WayfinderMetrics.minimumHitTarget,
+              height: WayfinderMetrics.minimumHitTarget
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .accessibilityLabel("Close navigation")
+      }
     }
-    .padding(.horizontal, 16)
-    .frame(height: 56)
+    .padding(.leading, WayfinderSpacing.medium)
+    .padding(.trailing, close == nil ? WayfinderSpacing.medium : WayfinderSpacing.hairline)
+    .frame(minHeight: headerHeight)
+  }
+}
+
+extension Date {
+  /// Relative time, as both reference apps use in conversation lists
+  /// (UX-022). Falls back to an absolute date once relative wording stops
+  /// being useful.
+  var relativeDescription: String {
+    let elapsed = Date().timeIntervalSince(self)
+    guard elapsed < 60 else {
+      guard elapsed < 6 * 24 * 60 * 60 else {
+        return formatted(date: .abbreviated, time: .omitted)
+      }
+      return formatted(.relative(presentation: .named))
+    }
+    return "Just now"
   }
 }
 

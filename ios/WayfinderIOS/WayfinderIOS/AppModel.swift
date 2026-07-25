@@ -160,6 +160,8 @@ final class AppModel {
   /// the work that failed, so the notice can offer Try Again inline.
   private(set) var persistenceRetry: PersistenceRetryAction?
   private(set) var isRetryingPersistence = false
+  /// The most recent meaningful state change, for haptics and VoiceOver.
+  private(set) var feedbackEvent: WayfinderFeedbackEvent?
   var credentialNotice: String?
   var accountNotice: String?
   var openRouterAccountState = ProviderAccountState(
@@ -197,6 +199,7 @@ final class AppModel {
   /// Which terminal state an in-flight turn should settle into once its
   /// cancellation lands: the user pressing Stop, or navigating away.
   private var stopReason: ConversationMessageStatus = .stopped
+  private var feedbackSequence = 0
 
   init(
     conversationStore: any ConversationStore = InMemoryConversationStore(),
@@ -537,12 +540,21 @@ final class AppModel {
         executionSummary: destination.boundaryLabel
       )
       routePreviewState = .routed(preview)
+      let destinationsByID = Dictionary(
+        destinations.map { ($0.id, $0.displayName) },
+        uniquingKeysWith: { first, _ in first }
+      )
       let receipt = StoredRouteReceipt(
         destinationID: destination.id,
         destinationName: destination.displayName,
         score: plan.score,
         recommendation: plan.recommendation,
-        executionSummary: destination.boundaryLabel
+        executionSummary: destination.boundaryLabel,
+        boundaryID: destination.boundary.storageID,
+        excluded: plan.exclusions { destinationsByID[$0] },
+        fallbackDestinationNames: plan.fallbackDestinationIds.map {
+          destinationsByID[$0] ?? $0
+        }
       )
       let providerMessages = providerHistory(appending: prompt)
       let turn: TurnSlot
@@ -560,6 +572,8 @@ final class AppModel {
       } else {
         turn = await beginTurn(prompt: prompt, receipt: receipt)
       }
+
+      emitFeedback(.messageSent)
 
       if executionPhase == .stopping(requestID) {
         await finishMessage(turn, status: stopReason)
@@ -995,6 +1009,7 @@ final class AppModel {
       routeReceipt: message.routeReceipt
     )
     thread.updatedAt = now()
+    emitFeedback(status == .completed ? .responseCompleted : .responseEnded)
     // Terminal states always reach storage, whatever the checkpoint cadence.
     await saveUpdatedThread(thread)
   }
@@ -1019,6 +1034,7 @@ final class AppModel {
       routeReceipt: message.routeReceipt
     )
     thread.updatedAt = now()
+    emitFeedback(.failure)
     await saveUpdatedThread(thread)
   }
 
@@ -1078,6 +1094,14 @@ final class AppModel {
 
   private func thread(id: UUID) -> ConversationThreadSnapshot? {
     threads.first { $0.id == id }
+  }
+
+  func emitFeedback(_ kind: WayfinderFeedbackKind) {
+    feedbackSequence += 1
+    feedbackEvent = WayfinderFeedbackEvent(
+      sequence: feedbackSequence,
+      kind: kind
+    )
   }
 
   // MARK: - Persistence recovery
@@ -1443,14 +1467,94 @@ final class AppModel {
     return true
   }
 
+  /// Pinned conversations lead, then most-recently-updated. Ties break on id
+  /// so ordering stays deterministic.
   private static func isOrderedBefore(
     _ lhs: ConversationThreadSnapshot,
     _ rhs: ConversationThreadSnapshot
   ) -> Bool {
+    switch (lhs.pinnedAt, rhs.pinnedAt) {
+    case (.some(let left), .some(let right)):
+      if left != right {
+        return left > right
+      }
+    case (.some, .none):
+      return true
+    case (.none, .some):
+      return false
+    case (.none, .none):
+      break
+    }
+
     if lhs.updatedAt == rhs.updatedAt {
       return lhs.id.uuidString < rhs.id.uuidString
     }
     return lhs.updatedAt > rhs.updatedAt
+  }
+
+  // MARK: - Thread management
+
+  /// Renames a conversation. Titles were derived from the first ~49 characters
+  /// of the opening prompt and never revisited (UX-014).
+  func renameThread(id: UUID, to title: String) async {
+    let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard var thread = thread(id: id), !trimmed.isEmpty else {
+      return
+    }
+
+    thread.title = String(trimmed.prefix(120))
+    thread.hasCustomTitle = true
+    upsertInMemory(thread)
+
+    do {
+      try await conversationStore.save(thread: thread)
+    } catch {
+      recordPersistenceFailure(
+        "Wayfinder could not rename that conversation.",
+        retry: .saveThread(thread)
+      )
+    }
+  }
+
+  func setPinned(_ pinned: Bool, threadID: UUID) async {
+    guard var thread = thread(id: threadID) else {
+      return
+    }
+
+    thread.pinnedAt = pinned ? now() : nil
+    upsertInMemory(thread)
+    emitFeedback(.selectionBoundary)
+
+    do {
+      try await conversationStore.save(thread: thread)
+    } catch {
+      recordPersistenceFailure(
+        "Wayfinder could not update that conversation.",
+        retry: .saveThread(thread)
+      )
+    }
+  }
+
+  var pinnedThreads: [ConversationThreadSnapshot] {
+    threads.filter(\.isPinned)
+  }
+
+  var unpinnedThreads: [ConversationThreadSnapshot] {
+    threads.filter { !$0.isPinned }
+  }
+
+  /// Case- and diacritic-insensitive match over titles and message text.
+  func threads(matching query: String) -> [ConversationThreadSnapshot] {
+    let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return threads
+    }
+    return threads.filter { thread in
+      thread.title.localizedStandardContains(trimmed)
+        || thread.messages.contains {
+          $0.content.localizedStandardContains(trimmed)
+        }
+    }
   }
 
   private func restorePreview(from thread: ConversationThreadSnapshot) {

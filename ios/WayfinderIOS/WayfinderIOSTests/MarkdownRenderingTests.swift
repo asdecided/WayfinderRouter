@@ -252,10 +252,9 @@ final class MarkdownParsingTests: XCTestCase {
   }
 }
 
-/// The incremental cache is the mechanism behind "streaming does not reflow
+/// Incremental parsing is the mechanism behind "streaming does not reflow
 /// already-rendered content". These tests hold it to producing exactly what a
 /// full re-parse would, one delta at a time.
-@MainActor
 final class MarkdownStreamingTests: XCTestCase {
 
   private let reply = """
@@ -276,17 +275,15 @@ final class MarkdownStreamingTests: XCTestCase {
     """
 
   func testIncrementalParseMatchesAFullParseAtEveryDelta() {
-    let cache = MarkdownCache()
-    let id = UUID()
     var accumulated = ""
+    var document: MarkdownDocument?
 
     for character in reply {
       accumulated.append(character)
-      let streamed = cache.document(for: accumulated, id: id)
-      let fresh = MarkdownDocument.parse(accumulated)
+      document = MarkdownDocument.parse(accumulated, reusing: document)
       XCTAssertEqual(
-        streamed.nodes,
-        fresh.nodes,
+        document?.nodes,
+        MarkdownDocument.parse(accumulated).nodes,
         "incremental parse diverged at \(accumulated.count) characters"
       )
     }
@@ -295,68 +292,53 @@ final class MarkdownStreamingTests: XCTestCase {
   func testClosedBlocksKeepTheirIdentityWhileTextIsAppended() {
     // Identity stability is what stops SwiftUI rebuilding earlier blocks, and
     // therefore what stops the transcript re-laying-out during a stream.
-    let cache = MarkdownCache()
-    let id = UUID()
     var accumulated = ""
+    var document: MarkdownDocument?
     var previous: [MarkdownBlockNode] = []
 
     for character in reply {
       accumulated.append(character)
-      let document = cache.document(for: accumulated, id: id)
-      let closed = document.nodes.dropLast()
+      document = MarkdownDocument.parse(accumulated, reusing: document)
+      let nodes = document?.nodes ?? []
 
-      for node in closed where node.id < previous.count - 1 {
+      for node in nodes.dropLast() where node.id < previous.count - 1 {
         XCTAssertEqual(
           node,
           previous[node.id],
           "block \(node.id) changed after it was closed"
         )
       }
-      previous = document.nodes
+      previous = nodes
     }
   }
 
-  func testRepeatedLookupOfUnchangedContentIsStable() {
-    let cache = MarkdownCache()
-    let id = UUID()
-
-    let first = cache.document(for: reply, id: id)
-    let second = cache.document(for: reply, id: id)
+  func testReparsingUnchangedContentIsStable() {
+    let first = MarkdownDocument.parse(reply)
+    let second = MarkdownDocument.parse(reply, reusing: first)
 
     XCTAssertEqual(first.nodes, second.nodes)
-    XCTAssertEqual(first.nodes, MarkdownDocument.parse(reply).nodes)
   }
 
   func testContentThatIsNotAnAppendFallsBackToAFullParse() {
     // Retry-in-place replaces a message's content outright.
-    let cache = MarkdownCache()
-    let id = UUID()
-
-    _ = cache.document(for: "# Original\n\nbody", id: id)
-    let replaced = cache.document(for: "Completely different", id: id)
-
-    XCTAssertEqual(replaced.nodes, MarkdownDocument.parse("Completely different").nodes)
-  }
-
-  func testForgettingAMessageDropsItsCachedDocument() {
-    let cache = MarkdownCache()
-    let id = UUID()
-
-    _ = cache.document(for: reply, id: id)
-    cache.forget(id: id)
+    let original = MarkdownDocument.parse("# Original\n\nbody")
+    let replaced = MarkdownDocument.parse(
+      "Completely different",
+      reusing: original
+    )
 
     XCTAssertEqual(
-      cache.document(for: reply, id: id).nodes,
-      MarkdownDocument.parse(reply).nodes
+      replaced.nodes,
+      MarkdownDocument.parse("Completely different").nodes
     )
   }
 
   func testStreamingACodeBlockDoesNotRestructureWhenTheFenceCloses() {
-    let cache = MarkdownCache()
-    let id = UUID()
-
-    let open = cache.document(for: "intro\n\n```swift\nlet a = 1", id: id)
-    let closed = cache.document(for: "intro\n\n```swift\nlet a = 1\n```", id: id)
+    let open = MarkdownDocument.parse("intro\n\n```swift\nlet a = 1")
+    let closed = MarkdownDocument.parse(
+      "intro\n\n```swift\nlet a = 1\n```",
+      reusing: open
+    )
 
     XCTAssertEqual(open.nodes.count, closed.nodes.count)
     XCTAssertEqual(open.nodes[0], closed.nodes[0])

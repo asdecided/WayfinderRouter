@@ -16,12 +16,46 @@ enum ConversationMessageStatus: String, Codable, Sendable {
   case failed
 }
 
+/// One destination the router considered and rejected, with the contract's
+/// stable reasons (UX-017).
+struct StoredRouteExclusion: Codable, Equatable, Sendable {
+  let destinationName: String
+  let reasons: [String]
+}
+
 struct StoredRouteReceipt: Codable, Equatable, Sendable {
   let destinationID: String
   let destinationName: String
   let score: Double
   let recommendation: String
   let executionSummary: String
+
+  // Fields below were added after the first receipts were persisted. They are
+  // optional so existing records keep decoding; a receipt without them still
+  // renders, just without the routing explanation.
+  let boundaryID: String?
+  let excluded: [StoredRouteExclusion]?
+  let fallbackDestinationNames: [String]?
+
+  init(
+    destinationID: String,
+    destinationName: String,
+    score: Double,
+    recommendation: String,
+    executionSummary: String,
+    boundaryID: String? = nil,
+    excluded: [StoredRouteExclusion]? = nil,
+    fallbackDestinationNames: [String]? = nil
+  ) {
+    self.destinationID = destinationID
+    self.destinationName = destinationName
+    self.score = score
+    self.recommendation = recommendation
+    self.executionSummary = executionSummary
+    self.boundaryID = boundaryID
+    self.excluded = excluded
+    self.fallbackDestinationNames = fallbackDestinationNames
+  }
 }
 
 struct ConversationMessageSnapshot: Codable, Equatable, Identifiable, Sendable {
@@ -40,6 +74,36 @@ struct ConversationThreadSnapshot: Codable, Equatable, Identifiable, Sendable {
   var updatedAt: Date
   var messages: [ConversationMessageSnapshot]
   var draft: String
+  /// When the user pinned this conversation, or nil if it is unpinned.
+  ///
+  /// Optional rather than a `Bool` so records written before pinning existed
+  /// still decode, and so pinned order is stable (UX-014).
+  var pinnedAt: Date?
+  /// Set when the user renames a conversation, so an automatic title is never
+  /// re-derived over a chosen one.
+  var hasCustomTitle: Bool?
+
+  init(
+    id: UUID,
+    title: String,
+    createdAt: Date,
+    updatedAt: Date,
+    messages: [ConversationMessageSnapshot],
+    draft: String,
+    pinnedAt: Date? = nil,
+    hasCustomTitle: Bool? = nil
+  ) {
+    self.id = id
+    self.title = title
+    self.createdAt = createdAt
+    self.updatedAt = updatedAt
+    self.messages = messages
+    self.draft = draft
+    self.pinnedAt = pinnedAt
+    self.hasCustomTitle = hasCustomTitle
+  }
+
+  var isPinned: Bool { pinnedAt != nil }
 
   static func title(for prompt: String) -> String {
     let collapsed =

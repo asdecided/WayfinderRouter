@@ -10,6 +10,20 @@ struct SettingsView: View {
     @Bindable var appModel = appModel
 
     Form {
+      // Keychain failures render in place with a way forward rather than as
+      // a blocking alert (UX-015).
+      if let credentialNotice = appModel.credentialNotice {
+        Section {
+          Label(credentialNotice, systemImage: "exclamationmark.triangle.fill")
+            .font(.footnote)
+            .foregroundStyle(WayfinderTheme.routeCloud)
+          Button("Dismiss") {
+            appModel.credentialNotice = nil
+          }
+          .font(.footnote.weight(.semibold))
+        }
+      }
+
       Section("Connections") {
         NavigationLink {
           AccountsView()
@@ -37,7 +51,8 @@ struct SettingsView: View {
           }
         }
 
-        Text(appModel.privacyPosture.boundarySummary)
+        // The consequence of the choice, stated where the choice is made.
+        Text(appModel.privacyPosture.consequence)
           .font(.footnote)
           .foregroundStyle(.secondary)
       }
@@ -55,22 +70,16 @@ struct SettingsView: View {
           }
         }
 
-        if let exportedConversations {
-          ShareLink(
-            item: exportedConversations,
-            preview: SharePreview("Wayfinder conversations.json")
-          ) {
-            Label("Share Export", systemImage: "square.and.arrow.up")
-          }
-        } else {
-          Button {
-            Task {
-              exportedConversations = await appModel.exportConversations()
-            }
-          } label: {
-            Label("Prepare Export", systemImage: "doc.badge.arrow.up")
-          }
+        // One step, not "Prepare" then "Share" (UX-023): the export is
+        // built when Settings appears and refreshed as threads change, so
+        // the share sheet is always one tap away.
+        ShareLink(
+          item: exportedConversations ?? Data(),
+          preview: SharePreview("Wayfinder conversations.json")
+        ) {
+          Label("Export Conversations", systemImage: "square.and.arrow.up")
         }
+        .disabled(exportedConversations == nil)
 
         Button(role: .destructive) {
           showsClearConfirmation = true
@@ -107,22 +116,8 @@ struct SettingsView: View {
     } message: {
       Text("This permanently removes saved threads and the current draft.")
     }
-    .alert(
-      "Keychain",
-      isPresented: Binding(
-        get: { appModel.credentialNotice != nil },
-        set: { isPresented in
-          if !isPresented {
-            appModel.credentialNotice = nil
-          }
-        }
-      )
-    ) {
-      Button("OK") {
-        appModel.credentialNotice = nil
-      }
-    } message: {
-      Text(appModel.credentialNotice ?? "")
+    .task(id: appModel.threads.count) {
+      exportedConversations = await appModel.exportConversations()
     }
   }
 
