@@ -269,6 +269,13 @@ credential directly to the existing device-only `CredentialStore`. App-visible
 state is limited to readiness and an opaque browser challenge. Real provider
 adapters remain separate follow-on changes.
 
+OpenRouter is the first approved authorization-code adapter under
+`WF-QUAL-0002`. Its account connection converges on the existing OpenRouter
+Keychain credential and publishes two explicit pinned destinations:
+`openrouter/auto` for credit-backed routing and `openrouter/free` for
+rate-limited no-cost inference. Neither enters `Automatic` merely because the
+account connected.
+
 Exit: physical-device lifecycle passes; tokens remain in Keychain; cancelled,
 expired, and denied flows leave no partial credential; account connection does
 not mutate routes.
