@@ -162,6 +162,8 @@ final class AppModel {
   private(set) var isRetryingPersistence = false
   /// The most recent meaningful state change, for haptics and VoiceOver.
   private(set) var feedbackEvent: WayfinderFeedbackEvent?
+  /// Whether the first-launch chooser has been answered or skipped (UX-013).
+  private(set) var hasCompletedFirstRun = true
   var credentialNotice: String?
   var accountNotice: String?
   var openRouterAccountState = ProviderAccountState(
@@ -436,6 +438,7 @@ final class AppModel {
       retentionPolicy = ConversationRetentionPolicy(
         days: workspace.retentionDays
       )
+      hasCompletedFirstRun = workspace.hasCompletedFirstRun ?? false
       activeThreadID = workspace.activeThreadID
 
       if let activeThread {
@@ -1383,7 +1386,8 @@ final class AppModel {
       activeThreadID: activeThreadID,
       draft: activeThreadID == nil ? draft : "",
       retentionDays: retentionPolicy.days,
-      updatedAt: now()
+      updatedAt: now(),
+      hasCompletedFirstRun: hasCompletedFirstRun
     )
 
     do {
@@ -1490,6 +1494,46 @@ final class AppModel {
       return lhs.id.uuidString < rhs.id.uuidString
     }
     return lhs.updatedAt > rhs.updatedAt
+  }
+
+  // MARK: - First launch
+
+  /// Records that the chooser was answered or skipped. Skipping is a
+  /// first-class outcome: the roadmap requires a useful no-destination state,
+  /// so this never gates the app.
+  func completeFirstRun() async {
+    guard !hasCompletedFirstRun else {
+      return
+    }
+    hasCompletedFirstRun = true
+    await persistWorkspace()
+  }
+
+  /// Destinations that could actually run a turn right now. Adding a key had
+  /// no visible effect outside the key screens (UX-013); this is what Chat and
+  /// the chooser read to say something truthful about readiness.
+  var readyDestinations: [RoutingDestination] {
+    destinations.filter { $0.readiness == .ready }
+  }
+
+  var isAppleOnDeviceAvailable: Bool {
+    destinations.contains {
+      $0.id == NativeAppleFoundationModelsProvider.destinationID
+        && $0.readiness == .ready
+    }
+  }
+
+  /// One honest line about what the app can currently do.
+  var destinationReadinessSummary: String {
+    let ready = readyDestinations
+    switch ready.count {
+    case 0:
+      return "No destination is connected yet."
+    case 1:
+      return "\(ready[0].displayName) is ready."
+    default:
+      return "\(ready.count) destinations are ready."
+    }
   }
 
   // MARK: - Thread management

@@ -19,6 +19,9 @@ struct RootView: View {
     }
     // Storage failures are recoverable and are surfaced inline in Chat
     // (UX-015); this screen no longer interrupts with a blocking alert.
+    .fullScreenCover(isPresented: firstRunBinding) {
+      FirstLaunchView()
+    }
     .onChange(of: scenePhase) {
       guard scenePhase != .active else {
         return
@@ -139,6 +142,15 @@ struct RootView: View {
     guard width > 0 else { return showsSidebar ? 1 : 0 }
     let revealed = (width + drawerOffset(width: width)) / width
     return Double(max(0, min(1, revealed)))
+  }
+
+  /// Read-only in effect: the chooser dismisses itself by recording
+  /// completion, so there is no way to reopen it by toggling this.
+  private var firstRunBinding: Binding<Bool> {
+    Binding(
+      get: { !appModel.hasCompletedFirstRun },
+      set: { _ in }
+    )
   }
 
   private func openSidebar() {

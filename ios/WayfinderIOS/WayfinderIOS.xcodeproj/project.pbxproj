@@ -46,6 +46,7 @@
 		0BF08FCEBE4334F725228C3C /* TranscriptScroll.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3410BEB9A61E50C8837E5C11 /* TranscriptScroll.swift */; };
 		016C2DA8BBBEF64FFF547B2D /* RouteReceipt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97AEEE355705A642C7D55C11 /* RouteReceipt.swift */; };
 		6185E43E26661D1875EA9BE6 /* TranscriptScrollTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD99427DAE64871659D80447 /* TranscriptScrollTests.swift */; };
+		27EF4155691E79DCF59BB731 /* FirstLaunchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EF64E6A3CFA4AFF2EA6A88D /* FirstLaunchView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -100,6 +101,7 @@
 		3410BEB9A61E50C8837E5C11 /* TranscriptScroll.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptScroll.swift; sourceTree = "<group>"; };
 		97AEEE355705A642C7D55C11 /* RouteReceipt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteReceipt.swift; sourceTree = "<group>"; };
 		FD99427DAE64871659D80447 /* TranscriptScrollTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptScrollTests.swift; sourceTree = "<group>"; };
+		0EF64E6A3CFA4AFF2EA6A88D /* FirstLaunchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstLaunchView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -128,6 +130,7 @@
 				D89C6EA7388FA2CCF9F5865E /* ConversationStore.swift */,
 				8A7B4FB8866C8CE81BA3E3A9 /* CredentialStore.swift */,
 				375A787B3245E247D326C13E /* DestinationsView.swift */,
+				0EF64E6A3CFA4AFF2EA6A88D /* FirstLaunchView.swift */,
 				E55909C4415E30876974F00E /* Instrumentation.swift */,
 				8DD5A33043D525912C69CEBC /* MarkdownRendering.swift */,
 				58EF24813B3BA8027B7E4CE4 /* MarkdownView.swift */,
@@ -317,6 +320,7 @@
 				165C905840F4DCF56C27BF8F /* ConversationStore.swift in Sources */,
 				505322426BA37D7C41706A05 /* CredentialStore.swift in Sources */,
 				C04837E936D39B59FC3DAEDE /* DestinationsView.swift in Sources */,
+				27EF4155691E79DCF59BB731 /* FirstLaunchView.swift in Sources */,
 				B05F4D8E22F0E3DB9130228A /* Instrumentation.swift in Sources */,
 				36AF071C8F7CE243E509F5B2 /* MarkdownRendering.swift in Sources */,
 				05E82E625C01CD5ABD2F9BB0 /* MarkdownView.swift in Sources */,

@@ -82,10 +82,14 @@ struct ChatView: View {
       // defeated the laziness entirely (UX-021).
       LazyVStack(alignment: .leading, spacing: WayfinderSpacing.large) {
         if messages.isEmpty {
-          ChatEmptyState()
-            .containerRelativeFrame(.vertical) { length, _ in
-              max(240, length * 0.55)
-            }
+          ChatEmptyState(
+            readiness: appModel.destinationReadinessSummary,
+            hasDestination: !appModel.readyDestinations.isEmpty,
+            openDestinations: { appModel.selectedTab = .destinations }
+          )
+          .containerRelativeFrame(.vertical) { length, _ in
+            max(240, length * 0.55)
+          }
         } else {
           ForEach(messages) { message in
             MessageView(
@@ -308,6 +312,10 @@ private struct RoutingModeMenu: View {
 private struct ChatEmptyState: View {
   @ScaledMetric(relativeTo: .largeTitle) private var markSize: CGFloat = 30
 
+  let readiness: String
+  let hasDestination: Bool
+  let openDestinations: () -> Void
+
   var body: some View {
     VStack(spacing: WayfinderSpacing.medium) {
       WayfinderMark()
@@ -321,10 +329,29 @@ private struct ChatEmptyState: View {
         .font(.subheadline)
         .foregroundStyle(.secondary)
         .multilineTextAlignment(.center)
+
+      // Saving a key used to change nothing outside the key screens (UX-013).
+      // Readiness is stated here, where it decides whether sending will work.
+      Button(action: openDestinations) {
+        HStack(spacing: WayfinderSpacing.hairline + 2) {
+          Image(systemName: hasDestination ? "checkmark.circle" : "exclamationmark.circle")
+          Text(readiness)
+          if !hasDestination {
+            Text("Connect one")
+              .fontWeight(.semibold)
+          }
+        }
+        .font(.footnote)
+        .foregroundStyle(hasDestination ? Color.secondary : WayfinderTheme.routeCloud)
+        .frame(minHeight: WayfinderMetrics.minimumHitTarget)
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel(readiness)
+      .accessibilityHint("Opens Destinations")
     }
     .frame(maxWidth: .infinity)
     .padding(.horizontal, WayfinderSpacing.large)
-    .accessibilityElement(children: .combine)
   }
 }
 

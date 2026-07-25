@@ -124,6 +124,23 @@ struct ConversationWorkspaceSnapshot: Codable, Equatable, Sendable {
   var draft: String
   var retentionDays: Int?
   var updatedAt: Date
+  /// Whether the first-launch chooser has been answered or skipped.
+  /// Optional so workspaces written before it existed decode as "not yet".
+  var hasCompletedFirstRun: Bool?
+
+  init(
+    activeThreadID: UUID?,
+    draft: String,
+    retentionDays: Int?,
+    updatedAt: Date,
+    hasCompletedFirstRun: Bool? = nil
+  ) {
+    self.activeThreadID = activeThreadID
+    self.draft = draft
+    self.retentionDays = retentionDays
+    self.updatedAt = updatedAt
+    self.hasCompletedFirstRun = hasCompletedFirstRun
+  }
 
   static let empty = ConversationWorkspaceSnapshot(
     activeThreadID: nil,
@@ -200,19 +217,22 @@ enum WayfinderConversationSchemaV1: VersionedSchema {
     var draft: String
     var retentionDays: Int?
     var updatedAt: Date
+    var hasCompletedFirstRun: Bool?
 
     init(
       key: String,
       activeThreadID: UUID?,
       draft: String,
       retentionDays: Int?,
-      updatedAt: Date
+      updatedAt: Date,
+      hasCompletedFirstRun: Bool? = nil
     ) {
       self.key = key
       self.activeThreadID = activeThreadID
       self.draft = draft
       self.retentionDays = retentionDays
       self.updatedAt = updatedAt
+      self.hasCompletedFirstRun = hasCompletedFirstRun
     }
   }
 }
@@ -354,7 +374,8 @@ actor SwiftDataConversationStore: ConversationStore {
       activeThreadID: workspace.activeThreadID,
       draft: workspace.draft,
       retentionDays: workspace.retentionDays,
-      updatedAt: workspace.updatedAt
+      updatedAt: workspace.updatedAt,
+      hasCompletedFirstRun: workspace.hasCompletedFirstRun
     )
   }
 
@@ -364,6 +385,7 @@ actor SwiftDataConversationStore: ConversationStore {
       record.draft = workspace.draft
       record.retentionDays = workspace.retentionDays
       record.updatedAt = workspace.updatedAt
+      record.hasCompletedFirstRun = workspace.hasCompletedFirstRun
     } else {
       modelContext.insert(
         WayfinderConversationSchemaV1.WorkspaceRecord(
@@ -371,7 +393,8 @@ actor SwiftDataConversationStore: ConversationStore {
           activeThreadID: workspace.activeThreadID,
           draft: workspace.draft,
           retentionDays: workspace.retentionDays,
-          updatedAt: workspace.updatedAt
+          updatedAt: workspace.updatedAt,
+          hasCompletedFirstRun: workspace.hasCompletedFirstRun
         )
       )
     }
