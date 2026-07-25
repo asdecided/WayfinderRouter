@@ -215,7 +215,17 @@ boundary, Security framework backend, device-only non-synchronizing Keychain
 policy, and native add/replace/remove UI for OpenAI Platform, Moonshot/Kimi
 Platform, and OpenRouter keys. App-visible state contains readiness only.
 Adding or removing a key does not publish a destination or mutate routing.
-Live provider execution remains in the next review boundary.
+
+The second Phase 3 slice adds a generic OpenAI-compatible execution actor and
+injectable streaming HTTP boundary. The production app compiles one OpenAI
+Platform GPT-5.6 configuration, reads its credential only inside the
+provider boundary, and supports fragmented SSE, ordered deltas, cancellation,
+timeouts, bounded request/response data, and sanitized failure classes. The
+destination remains excluded from Automatic when its key becomes ready; users
+must select it explicitly in Chat. Additional presets and model discovery stay
+in their own review boundaries. This compatibility slice uses the supported
+Chat Completions shape; an OpenAI-specific Responses API adapter remains a
+separate provider-preset decision.
 
 - implement `CredentialStore`;
 - API-key lifecycle UI;
