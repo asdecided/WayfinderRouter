@@ -37,7 +37,7 @@ final class AuthorizationCodePKCETests: XCTestCase {
     .replacingOccurrences(of: "=", with: "")
 
     XCTAssertEqual(challenge.providerID, "test-account")
-    XCTAssertEqual(challenge.callbackURLScheme, "wayfinder")
+    XCTAssertEqual(challenge.callback, .customScheme("wayfinder"))
     XCTAssertEqual(query["client_id"], "test-client")
     XCTAssertEqual(query["redirect_uri"], "wayfinder://oauth/test")
     XCTAssertEqual(query["scope"], "models.read chat.write")

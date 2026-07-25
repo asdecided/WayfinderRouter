@@ -40,8 +40,26 @@ struct OpenAICompatibleConfiguration: Equatable, Sendable {
     contextWindow: nil
   )
 
+  static let openRouterFree = OpenAICompatibleConfiguration(
+    destinationID: "openrouter:openrouter-free",
+    providerID: "openrouter",
+    providerName: "OpenRouter",
+    displayName: "OpenRouter Free",
+    modelID: "openrouter/free",
+    endpoint: URL(string: "https://openrouter.ai/api/v1/chat/completions")!,
+    modelsEndpoint: nil,
+    credentialID: CredentialID(rawValue: "openrouter.api-key"),
+    contextWindow: nil
+  )
+
   static let supported = [
     openAIPlatform,
+    moonshotPlatform,
+    openRouter,
+    openRouterFree,
+  ]
+
+  static let discoverySupported = [
     moonshotPlatform,
     openRouter,
   ]

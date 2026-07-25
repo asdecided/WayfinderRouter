@@ -12,6 +12,15 @@ struct SettingsView: View {
     Form {
       Section("Connections") {
         NavigationLink {
+          AccountsView()
+        } label: {
+          LabeledContent(
+            "Accounts",
+            value: accountSummary
+          )
+        }
+
+        NavigationLink {
           APIKeysView()
         } label: {
           LabeledContent(
@@ -135,5 +144,11 @@ struct SettingsView: View {
     case 1: "1 saved"
     default: "\(appModel.configuredCredentialCount) saved"
     }
+  }
+
+  private var accountSummary: String {
+    appModel.openRouterAccountState.readiness == .ready
+      ? "OpenRouter connected"
+      : "None connected"
   }
 }
