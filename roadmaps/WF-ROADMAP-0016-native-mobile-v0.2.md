@@ -282,6 +282,14 @@ not mutate routes.
 
 ## Phase 5 — Apple Foundation Models
 
+Implementation note: the native mobile provider calls Foundation Models
+in-process behind an actor, maps live framework availability into normalized
+readiness, converts aggregated framework snapshots into ordered deltas, and
+supports bounded cancellation. Apple On-Device is an explicit pinned
+destination and does not silently change Automatic. Deterministic runtime
+fakes cover availability, streaming, bounds, cancellation, and privacy behavior
+in CI. Physical-device offline evidence remains required to close the phase.
+
 - native availability and execution actor;
 - capability/context discovery, buffered generation, streaming, cancellation;
 - deterministic fake provider for CI;

@@ -4,8 +4,9 @@ This target is the standalone native mobile shell governed by
 `WF-ROADMAP-0016`. It embeds the authoritative Rust routing core through
 `WayfinderRoutingBridge`; it does not require a Mac or localhost gateway.
 
-The current shell routes through the embedded core and can execute pinned
-OpenAI Platform GPT-5.6, Moonshot/Kimi Platform Kimi K2.6, and OpenRouter Auto
+The current shell routes through the embedded core and can execute Apple
+Foundation Models in-process on eligible devices, plus pinned OpenAI Platform
+GPT-5.6, Moonshot/Kimi Platform Kimi K2.6, OpenRouter Auto, and OpenRouter Free
 destinations directly from iOS. The generic OpenAI-compatible executor owns
 bounded JSON requests, fragmented SSE parsing, ordered deltas, cancellation,
 timeouts, sanitized provider errors, and request/response size limits. Tests
@@ -29,9 +30,12 @@ compiled GPT-5.6 fallback because its general catalog does not reliably
 distinguish chat-capable models. Discovery failures preserve the last useful
 inventory and never expose raw provider errors.
 
-Apple Foundation Models and optional Mac pairing land in later review
-boundaries. These presets use Chat Completions; an OpenAI-specific Responses API
-adapter remains a separate provider decision.
+Apple On-Device reports live framework readiness, streams ordered output,
+supports cancellation, and never enters Automatic merely because it is
+available. Context is left unspecified because the public framework does not
+currently expose a reliable context-window value. Optional Mac pairing lands
+in a later review boundary. Cloud presets use Chat Completions; an
+OpenAI-specific Responses API adapter remains a separate provider decision.
 
 ## Build
 
