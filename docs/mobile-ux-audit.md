@@ -388,6 +388,19 @@ show is enumerated in `docs/mobile-fidelity.md` and is **not** claimed here.
 | UX-026 | P3 | Polish | No haptics; no send-button content transition; empty-state chips mid-screen rather than composer-adjacent; redundant `navigationTitle` declaration superseded by the principal toolbar item | `ChatTabView.swift:92, 106-112, 150-186, 432-445` | Phase 6 | fixed@7b82e66 — centralised feedback vocabulary, composer-adjacent chips, redundant `navigationTitle` removed. The feel test is Tier 3 |
 | UX-027 | P2 | Accessibility / drawer | Drawer offers no explicit close control; the scrim is hidden from assistive tech, leaving destination selection as the only assistive dismissal | `RootView.swift:51-62` | Now | fixed@7b82e66 — explicit drawer close control and a turn rotor |
 
+### Deferred, with rationale
+
+- **UX-014, store pagination.** Search, rename, pin, relative timestamps, and the drawer cap were
+  closed. The `ConversationStore` fetch limit of 500 is unchanged and still unpaginated, so search
+  cannot reach past the 500 most-recently-updated conversations. Deferred: paginating the store is a
+  persistence change, not a polish change, and it is invisible below 500 threads. Archive is
+  likewise not implemented; pin plus delete covers the same need at this scale.
+- **Offline state.** Chat reports a provider's network failure truthfully on the turn that fails,
+  but no screen has a standing offline state and nothing monitors reachability. Adding reachability
+  monitoring is a capability change rather than polish, and guessing at connectivity would risk
+  claiming a boundary that is not true. `DestinationsView`'s "Offline" readiness badge is therefore
+  currently unreachable. Recorded rather than shipped.
+
 ## Intentional divergences to keep
 
 | Reference pattern | Wayfinder position | Governing rationale |

@@ -49,14 +49,20 @@ than assumed. **No row here has been observed.** Each is traceable to a finding 
 ### Performance (UX-021)
 
 - [ ] Cold launch to first interactive frame is under 400 ms on the oldest supported device.
-      Read the `appInit` signpost in the `com.wayfinder.router.ios` `launch` category.
+      The `appInit` signpost in the `com.wayfinder.router.ios` `launch` category covers only
+      `App.init()` — container and provider construction — so it bounds a prefix of that budget,
+      not the whole of it. Measure the frame separately.
 - [ ] Thread restore for a 200-turn conversation completes without a visible stall. Read the
       `restoreConversations` interval in the `conversation` category.
 - [ ] Streaming a 10 000-token reply at 80 tok/s holds 120 Hz with zero dropped frames in the
       Animation Hitches instrument.
 - [ ] The `applyDelta` signpost fires once per delta and the `checkpoint` interval fires on the
       cadence in `StreamingCheckpointPolicy.standard`, not per delta.
-- [ ] Memory does not grow unbounded across a 50-turn conversation with long replies.
+- [ ] Memory does not grow unbounded across a 50-turn conversation with long replies. Applying a
+      delta is still O(reply length) — the thread snapshot and its message array are copied per
+      token — so a very long reply remains quadratic in memory traffic even though the per-token
+      encode and write are gone.
+- [ ] Typing continuously while a long reply streams loses no reply text and no keystrokes.
 
 ### Typography and layout (UX-005)
 
@@ -68,6 +74,13 @@ than assumed. **No row here has been observed.** Each is traceable to a finding 
       shows no re-layout of content already on screen.
 - [ ] Long unbroken tokens — URLs, base64, minified code — wrap or scroll rather than forcing
       horizontal page scroll.
+- [ ] Wide markdown tables: they wrap rather than scroll, unlike code blocks, so confirm a
+      four-column table at AX3 is readable.
+- [ ] Scrolling up during a streaming reply keeps position, the scroll-to-latest control appears,
+      and returning to the bottom resumes following — including while the composer grows and the
+      keyboard appears, both of which change the scroll view's insets.
+- [ ] Switching to a long conversation restores its tail; the anchor is inside a `LazyVStack` and
+      may not be realised.
 - [ ] Code blocks scroll horizontally inside their own container; the page never scrolls sideways.
 
 ### Appearance and accessibility matrix
@@ -116,7 +129,15 @@ For every configuration:
 - [ ] Safe areas are correct in portrait, landscape, and with the Dynamic Island; the composer
       clears the home indicator without a floating gap.
 - [ ] iPad: the split view collapses to the iPhone model rather than compressing columns; Command-N,
-      Command-Return, and Escape all work from a hardware keyboard.
+      Command-Return, and Escape all work from a hardware keyboard, and none of them fires while a
+      section other than Chat is showing.
+- [ ] The drawer panel itself extends under the status bar and home indicator, not only its scrim,
+      in portrait, landscape, and with the Dynamic Island.
+- [ ] Status-bar glyphs stay legible over the open drawer and its scrim, not only over Chat.
+- [ ] The app icon's iOS 18 dark and tinted appearance variants — the catalogue currently ships the
+      single universal entry only, so the system derives both.
+- [ ] The launch screen's composition against the real first frame: the background matches, but the
+      launch mark is centred while Chat's empty state sits at 55% height behind a navigation bar.
 
 ### Screens and flows
 
@@ -145,7 +166,9 @@ For every configuration:
 - [ ] The turn rotor moves between turns in visual order.
 - [ ] The drawer traps focus while open and the explicit close control is reachable.
 - [ ] Reading a long markdown reply — headings, lists, code, tables — is coherent, and code blocks
-      announce as code.
+      announce as code. Tables currently carry no row/column semantics, so confirm what a table
+      actually reads as.
+- [ ] A failed reply can be retried, and its receipt opened, using only the turn's custom actions.
 
 ### Live device behaviour
 
