@@ -182,6 +182,26 @@ Kimi account authentication as **blocked pending provider approval**. v0.2.0
 may ship the Moonshot/Kimi Platform API-key preset. “Sign in with Kimi” remains
 absent unless every qualification gate is closed.
 
+## OpenRouter account boundary
+
+`WF-QUAL-0002` approves OpenRouter's documented OAuth PKCE flow for the first
+native account adapter. OpenRouter returns a user-controlled API key after
+authorization. Wayfinder stores that key under the same device-only credential
+ID as manual OpenRouter API-key setup, so authentication does not create a
+second credential path.
+
+The adapter uses `ASWebAuthenticationSession`'s HTTPS callback matcher, S256,
+and a random state encoded in the exact callback path. The provider-specific
+exchange sends only the documented code, verifier, and challenge method.
+Connecting publishes
+OpenRouter destinations but does not make either destination eligible for
+`Automatic`.
+
+`OpenRouter Free` pins the documented `openrouter/free` router. It is presented
+as no-cost and rate-limited, retains the `apiMetered` accounting class rather
+than inventing savings, and never falls back to `OpenRouter Auto` or another
+paid model.
+
 ## Apple on-device provider
 
 The iOS adapter calls Foundation Models in-process behind an actor. It queries
@@ -231,6 +251,10 @@ provider errors.
   https://www.rfc-editor.org/rfc/rfc8628
 - Kimi Code `kimi login`:
   https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command
+- OpenRouter OAuth PKCE:
+  https://openrouter.ai/docs/guides/overview/auth/oauth
+- OpenRouter Free Models Router:
+  https://openrouter.ai/docs/cookbook/get-started/free-models-router-playground
 - WF-ADR-0047
 - WF-ADR-0048
 - WF-DESIGN-0018
