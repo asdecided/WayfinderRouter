@@ -35,6 +35,8 @@
 		EBB5FC47BA62D841C32D9A8F /* AppleFoundationModelsProviderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70CB5BEDA315456CABBAE00D /* AppleFoundationModelsProviderTests.swift */; };
 		EBF78778DA2B68EDA8347CAF /* WayfinderIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A2C2884452C3AECE92EE0E1 /* WayfinderIOSApp.swift */; };
 		F4E9D5D8ED49654292FFA71E /* CredentialStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AD4110CCB21039F8900BB91 /* CredentialStoreTests.swift */; };
+		9A7F60920A4C838903EB5494 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7375918F7C357DF1BF11545F /* Assets.xcassets */; };
+		75374729F624DC6AA2AB9C72 /* WayfinderThemeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C5986A2A84636B64159FE7 /* WayfinderThemeTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -78,6 +80,8 @@
 		CF05080FED6F4E97C82B3C4F /* OpenRouterAccountTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenRouterAccountTests.swift; sourceTree = "<group>"; };
 		D89C6EA7388FA2CCF9F5865E /* ConversationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationStore.swift; sourceTree = "<group>"; };
 		D8A79F801F4849CBD50C8A61 /* ConversationStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationStoreTests.swift; sourceTree = "<group>"; };
+		7375918F7C357DF1BF11545F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		B2C5986A2A84636B64159FE7 /* WayfinderThemeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WayfinderThemeTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -99,6 +103,7 @@
 				64B75781C7C160DEB4257207 /* APIKeysView.swift */,
 				AD1784496CB4D262A2DFD3F1 /* AppleFoundationModelsProvider.swift */,
 				0D3D621AD229ED0AF9703D04 /* AppModel.swift */,
+				7375918F7C357DF1BF11545F /* Assets.xcassets */,
 				1F3A8F8648A591ACB6DD8AA3 /* AuthorizationCodePKCE.swift */,
 				9E92E195F328A16C8A4C9159 /* ChatExecution.swift */,
 				25109E76A4BFCC3FD9297E97 /* ChatTabView.swift */,
@@ -138,6 +143,7 @@
 				261CF6528CA739E9E0D7D553 /* OpenAICompatibleProviderTests.swift */,
 				CF05080FED6F4E97C82B3C4F /* OpenRouterAccountTests.swift */,
 				83D516988396183A30C27411 /* ProviderModelCatalogTests.swift */,
+				B2C5986A2A84636B64159FE7 /* WayfinderThemeTests.swift */,
 			);
 			path = WayfinderIOSTests;
 			sourceTree = "<group>";
@@ -187,6 +193,7 @@
 			buildPhases = (
 				72D843E6774C0988AA0ACB57 /* Sources */,
 				8EDBB9FF4085C8234662DBF2 /* Frameworks */,
+				C80E03B63A8C4AD9C3971C05 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -237,20 +244,32 @@
 		};
 /* End PBXProject section */
 
+/* Begin PBXResourcesBuildPhase section */
+		C80E03B63A8C4AD9C3971C05 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9A7F60920A4C838903EB5494 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		6C37979D4B0227750F2710D6 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				AD9F05EEA94FD7440F0DD8A9 /* AppModelTests.swift in Sources */,
 				020FB7A9FD88AEC51B222D94 /* AppleFoundationModelsDeviceTests.swift in Sources */,
 				EBB5FC47BA62D841C32D9A8F /* AppleFoundationModelsProviderTests.swift in Sources */,
+				AD9F05EEA94FD7440F0DD8A9 /* AppModelTests.swift in Sources */,
 				16E260B200C5AD48A0F88E40 /* AuthorizationCodePKCETests.swift in Sources */,
 				2663961FFDA2EEAEF58529A8 /* ConversationStoreTests.swift in Sources */,
 				F4E9D5D8ED49654292FFA71E /* CredentialStoreTests.swift in Sources */,
 				B1447F8C483CFBAC90E2C3FD /* OpenAICompatibleProviderTests.swift in Sources */,
 				0F77A8625C270B1375083539 /* OpenRouterAccountTests.swift in Sources */,
 				32B23F52E639A8EFBDA0D975 /* ProviderModelCatalogTests.swift in Sources */,
+				75374729F624DC6AA2AB9C72 /* WayfinderThemeTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -293,7 +312,8 @@
 		4410050A9C8E36DDDD118569 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -302,6 +322,8 @@
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_UIColorName = LaunchBackground;
+				INFOPLIST_KEY_UILaunchScreen_UIImageName = LaunchMark;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -317,7 +339,8 @@
 		5C31EF1690315521C6E80002 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -326,6 +349,8 @@
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_UIColorName = LaunchBackground;
+				INFOPLIST_KEY_UILaunchScreen_UIImageName = LaunchMark;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
