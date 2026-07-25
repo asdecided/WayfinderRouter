@@ -159,6 +159,9 @@ private struct ThreadRow: View {
     .contentShape(Rectangle())
     .accessibilityElement(children: .combine)
     .accessibilityLabel(thread.isPinned ? "\(thread.title), pinned" : thread.title)
+    .accessibilityValue(
+      "\(thread.messages.count) turns, \(thread.updatedAt.relativeDescription)"
+    )
   }
 }
 

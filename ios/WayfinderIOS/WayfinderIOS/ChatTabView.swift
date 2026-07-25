@@ -23,6 +23,8 @@ struct ChatView: View {
   @FocusState private var composerFocused: Bool
   @State private var presentedReceipt: PresentedReceipt?
   @State private var scroll = TranscriptScrollState()
+  @ScaledMetric(relativeTo: .body) private var followThreshold: CGFloat =
+    TranscriptScrollState.followThreshold
 
   var openSidebar: (() -> Void)?
 
@@ -61,13 +63,6 @@ struct ChatView: View {
     .onChange(of: appModel.draft) {
       appModel.scheduleDraftSave()
     }
-    // One place maps model state changes to haptics, and the same vocabulary
-    // supplies the VoiceOver announcements below.
-    .wayfinderFeedback(appModel.feedbackEvent)
-    .onChange(of: appModel.feedbackEvent) { _, event in
-      guard let announcement = event?.kind.announcement else { return }
-      AccessibilityNotification.Announcement(announcement).post()
-    }
     .task {
       await appModel.restoreConversations()
     }
@@ -81,7 +76,12 @@ struct ChatView: View {
       // plain VStack, as the audited build did, built every turn eagerly and
       // defeated the laziness entirely (UX-021).
       LazyVStack(alignment: .leading, spacing: WayfinderSpacing.large) {
-        if messages.isEmpty {
+        if messages.isEmpty, appModel.isRestoringConversations {
+          TranscriptRestoringState()
+            .containerRelativeFrame(.vertical) { length, _ in
+              max(240, length * 0.55)
+            }
+        } else if messages.isEmpty {
           ChatEmptyState(
             readiness: appModel.destinationReadinessSummary,
             hasDestination: !appModel.readyDestinations.isEmpty,
@@ -121,7 +121,7 @@ struct ChatView: View {
       let bottomEdge = geometry.contentOffset.y + geometry.containerSize.height
       let contentBottom =
         geometry.contentSize.height + geometry.contentInsets.bottom
-      return bottomEdge >= contentBottom - TranscriptScrollState.followThreshold
+      return bottomEdge >= contentBottom - followThreshold
     } action: { _, isNearBottom in
       scroll.viewportChanged(isNearBottom: isNearBottom)
     }
@@ -152,17 +152,6 @@ struct ChatView: View {
         )
       }
 
-      if let notice = appModel.persistenceNotice {
-        InlineNotice(
-          message: notice,
-          canRetry: appModel.persistenceRetry != nil,
-          isRetrying: appModel.isRetryingPersistence,
-          retry: { Task { await appModel.retryPersistence() } },
-          dismiss: appModel.dismissPersistenceNotice
-        )
-        .transition(.opacity)
-      }
-
       // Suggestions sit directly above the composer, where task entry
       // happens, rather than stranded mid-screen (UX-026).
       if messages.isEmpty, appModel.draft.isEmpty {
@@ -177,7 +166,8 @@ struct ChatView: View {
         canSubmit: appModel.canSendMessage,
         isGenerating: appModel.executionPhase.isActive,
         submit: { submit(using: scrollProxy) },
-        stop: { Task { await appModel.stopGenerating() } }
+        stop: { Task { await appModel.stopGenerating() } },
+        isForeground: appModel.selectedTab == .chat
       )
       .focused($composerFocused)
     }
@@ -186,11 +176,6 @@ struct ChatView: View {
     .padding(.vertical, WayfinderSpacing.xSmall)
     .frame(maxWidth: .infinity)
     .background(.bar)
-    .wayfinderAnimation(
-      WayfinderMotion.reveal,
-      value: appModel.persistenceNotice,
-      reduceMotion: reduceMotion
-    )
     .wayfinderAnimation(
       WayfinderMotion.reveal,
       value: scroll.showsScrollToBottomControl,
@@ -221,6 +206,7 @@ struct ChatView: View {
       }
       .accessibilityLabel("New chat")
       .keyboardShortcut("n", modifiers: .command)
+      .disabled(appModel.selectedTab != .chat)
     }
   }
 
@@ -342,7 +328,7 @@ private struct ChatEmptyState: View {
           }
         }
         .font(.footnote)
-        .foregroundStyle(hasDestination ? Color.secondary : WayfinderTheme.routeCloud)
+        .foregroundStyle(hasDestination ? Color.secondary : WayfinderTheme.warning)
         .frame(minHeight: WayfinderMetrics.minimumHitTarget)
         .contentShape(Rectangle())
       }
@@ -352,6 +338,31 @@ private struct ChatEmptyState: View {
     }
     .frame(maxWidth: .infinity)
     .padding(.horizontal, WayfinderSpacing.large)
+  }
+}
+
+/// Progressive reveal while the conversation is restored, rather than an
+/// empty state that makes claims about a transcript that has not loaded.
+private struct TranscriptRestoringState: View {
+  var body: some View {
+    VStack(alignment: .leading, spacing: WayfinderSpacing.large) {
+      ForEach(0..<3, id: \.self) { index in
+        VStack(alignment: index.isMultiple(of: 2) ? .leading : .trailing, spacing: WayfinderSpacing.xSmall) {
+          RoundedRectangle(cornerRadius: WayfinderRadius.small)
+            .fill(.quaternary)
+            .frame(height: 14)
+            .frame(maxWidth: index.isMultiple(of: 2) ? .infinity : 200)
+          RoundedRectangle(cornerRadius: WayfinderRadius.small)
+            .fill(.quaternary)
+            .frame(width: index.isMultiple(of: 2) ? 220 : 140, height: 14)
+        }
+        .frame(maxWidth: .infinity, alignment: index.isMultiple(of: 2) ? .leading : .trailing)
+      }
+    }
+    .padding(.horizontal, WayfinderSpacing.xSmall)
+    .accessibilityElement()
+    .accessibilityLabel("Restoring conversation")
+    .accessibilityAddTraits(.updatesFrequently)
   }
 }
 
@@ -425,7 +436,7 @@ private struct InlineNotice: View {
   var body: some View {
     HStack(alignment: .top, spacing: WayfinderSpacing.xSmall) {
       Image(systemName: "exclamationmark.triangle.fill")
-        .foregroundStyle(WayfinderTheme.routeCloud)
+        .foregroundStyle(WayfinderTheme.warning)
         .accessibilityHidden(true)
 
       Text(message)
@@ -434,19 +445,31 @@ private struct InlineNotice: View {
 
       if canRetry {
         Button(action: retry) {
-          if isRetrying {
-            ProgressView()
-          } else {
-            Text("Try Again")
+          Group {
+            if isRetrying {
+              ProgressView()
+            } else {
+              Text("Try Again")
+            }
           }
+          .frame(minHeight: WayfinderMetrics.minimumHitTarget)
+          .contentShape(Rectangle())
         }
         .font(.footnote.weight(.semibold))
         .disabled(isRetrying)
+        // The label must survive the swap to a spinner.
+        .accessibilityLabel("Try again")
+        .accessibilityValue(isRetrying ? "Retrying" : "")
       }
 
       Button(action: dismiss) {
         Image(systemName: "xmark")
           .font(.caption.weight(.bold))
+          .frame(
+            width: WayfinderMetrics.minimumHitTarget,
+            height: WayfinderMetrics.minimumHitTarget
+          )
+          .contentShape(Rectangle())
       }
       .buttonStyle(.plain)
       .foregroundStyle(.secondary)
@@ -531,6 +554,7 @@ private struct AssistantMessage: View {
     }
     .messageActions(content: message.content, speaker: "Wayfinder")
     .accessibilityElement(children: .contain)
+    .accessibilityRespondsToUserInteraction(true)
     // The audited build left assistant turns unattributed while user turns
     // announced "You", so VoiceOver read replies as free-floating text.
     .accessibilityLabel("Wayfinder")
@@ -571,8 +595,10 @@ private struct AssistantMessage: View {
       Label(statusDescription, systemImage: statusImage)
         .font(.footnote.weight(.medium))
         .foregroundStyle(
-          message.status == .failed ? WayfinderTheme.routeCloud : Color.secondary
+          message.status == .failed ? WayfinderTheme.warning : Color.secondary
         )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(statusDescription)
     }
 
     HStack(spacing: WayfinderSpacing.medium) {
@@ -587,9 +613,10 @@ private struct AssistantMessage: View {
           retry(message.id)
         }
         .font(.footnote.weight(.semibold))
+        .frame(minHeight: WayfinderMetrics.minimumHitTarget)
+        .accessibilityHint("Regenerates this reply in place")
       }
     }
-    .accessibilityHidden(true)
   }
 
   private var canRetry: Bool {
@@ -624,9 +651,14 @@ extension ConversationMessageStatus {
 
 extension ConversationMessageSnapshot {
   /// Label used by the transcript's turn rotor (UX-027).
+  ///
+  /// The rotor builder is eager over every message, and the transcript's body
+  /// re-evaluates on each delta, so this must not walk the whole reply.
+  /// Bounding the slice first keeps it O(1) per turn instead of
+  /// O(transcript length) per token.
   var rotorLabel: String {
     let speaker = role == .user ? "You" : "Wayfinder"
-    let preview = content
+    let preview = content.prefix(64)
       .split(whereSeparator: \.isWhitespace)
       .prefix(8)
       .joined(separator: " ")
@@ -698,6 +730,8 @@ private struct RouteReceiptChip: View {
           .foregroundStyle(.secondary)
       }
       .font(.footnote)
+      .frame(minHeight: WayfinderMetrics.minimumHitTarget)
+      .contentShape(Rectangle())
     }
     .buttonStyle(.plain)
     .accessibilityLabel(receipt.receiptSummary)
@@ -810,6 +844,8 @@ private struct ComposerView: View {
   @ScaledMetric(relativeTo: .body) private var controlSize: CGFloat =
     WayfinderMetrics.minimumHitTarget
 
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
   @Binding var draft: String
   @Binding var privacyPosture: PrivacyPostureOption
   @Binding var selectedDestinationID: String?
@@ -818,6 +854,9 @@ private struct ComposerView: View {
   let isGenerating: Bool
   let submit: () -> Void
   let stop: () -> Void
+  /// Every section stays mounted to preserve its navigation stack, so the
+  /// composer's shortcuts must not fire from Settings or Threads.
+  var isForeground = true
 
   var body: some View {
     VStack(alignment: .leading, spacing: WayfinderSpacing.xSmall) {
@@ -831,24 +870,41 @@ private struct ComposerView: View {
         .submitLabel(.send)
         .onSubmit(submitIfPossible)
 
-      HStack(spacing: WayfinderSpacing.xSmall) {
-        AttachmentAffordance(size: controlSize)
-        DestinationLabel(
-          selectedDestinationID: $selectedDestinationID,
-          destinations: destinations,
-          minimumHeight: controlSize
-        )
+      // At accessibility sizes each control scales from the 44 pt floor, so
+      // five of them plus a label cannot share one row on any iPhone width.
+      // WF-DESIGN-0020 forbids hiding send, privacy, or navigation, so the
+      // row wraps rather than truncating.
+      let layout = dynamicTypeSize.isAccessibilitySize
+        ? AnyLayout(VStackLayout(alignment: .leading, spacing: WayfinderSpacing.xSmall))
+        : AnyLayout(HStackLayout(spacing: WayfinderSpacing.xSmall))
 
-        Spacer(minLength: WayfinderSpacing.xSmall)
+      layout {
+        HStack(spacing: WayfinderSpacing.xSmall) {
+          AttachmentAffordance(size: controlSize)
+          DestinationLabel(
+            selectedDestinationID: $selectedDestinationID,
+            destinations: destinations,
+            minimumHeight: controlSize
+          )
+          if !dynamicTypeSize.isAccessibilitySize {
+            Spacer(minLength: WayfinderSpacing.xSmall)
+          }
+        }
 
-        PrivacyMenu(posture: $privacyPosture, size: controlSize)
-        SendButton(
-          isGenerating: isGenerating,
-          canSubmit: canSubmit,
-          size: controlSize,
-          submit: submit,
-          stop: stop
-        )
+        HStack(spacing: WayfinderSpacing.xSmall) {
+          if dynamicTypeSize.isAccessibilitySize {
+            Spacer(minLength: 0)
+          }
+          PrivacyMenu(posture: $privacyPosture, size: controlSize)
+          SendButton(
+            isGenerating: isGenerating,
+            canSubmit: canSubmit,
+            size: controlSize,
+            submit: submit,
+            stop: stop
+          )
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
       }
     }
     .padding(.horizontal, WayfinderSpacing.small)
@@ -873,10 +929,10 @@ private struct ComposerView: View {
       Group {
         Button("Send message", action: submitIfPossible)
           .keyboardShortcut(.return, modifiers: .command)
-          .disabled(!canSubmit)
+          .disabled(!canSubmit || !isForeground)
         Button("Stop response", action: stop)
           .keyboardShortcut(.escape, modifiers: [])
-          .disabled(!isGenerating)
+          .disabled(!isGenerating || !isForeground)
       }
       .opacity(0)
       .accessibilityHidden(true)

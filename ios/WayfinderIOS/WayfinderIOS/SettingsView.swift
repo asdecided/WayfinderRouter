@@ -16,7 +16,7 @@ struct SettingsView: View {
         Section {
           Label(credentialNotice, systemImage: "exclamationmark.triangle.fill")
             .font(.footnote)
-            .foregroundStyle(WayfinderTheme.routeCloud)
+            .foregroundStyle(WayfinderTheme.warning)
           Button("Dismiss") {
             appModel.credentialNotice = nil
           }

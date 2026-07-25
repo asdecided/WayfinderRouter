@@ -174,7 +174,8 @@ private struct MarkdownQuote: View {
 
 private struct MarkdownCodeBlock: View {
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
-  @ScaledMetric(relativeTo: .footnote) private var controlSize: CGFloat = 28
+  @ScaledMetric(relativeTo: .footnote) private var controlSize: CGFloat =
+    WayfinderMetrics.minimumHitTarget
 
   let language: String?
   let code: String
@@ -238,13 +239,16 @@ private struct MarkdownCodeBlock: View {
         )
         .font(.caption2.weight(.medium))
         .labelStyle(.titleAndIcon)
-        .frame(minHeight: controlSize)
-        .contentTransition(.symbolEffect(.replace))
+        .frame(minWidth: controlSize, minHeight: controlSize)
+        .contentShape(Rectangle())
+        .contentTransition(reduceMotion ? .opacity : .symbolEffect(.replace))
       }
       .buttonStyle(.plain)
       .foregroundStyle(didCopy ? WayfinderTheme.accent : Color.secondary)
       .accessibilityLabel(didCopy ? "Code copied" : "Copy code")
-      .sensoryFeedback(.success, trigger: didCopy) { _, copied in copied }
+      // Routed through the shared vocabulary rather than a bare .success, so
+      // "copied" has exactly one mapping in the app.
+      .wayfinderFeedback(.copied, trigger: didCopy) { _, copied in copied }
       .wayfinderAnimation(
         WayfinderMotion.control,
         value: didCopy,

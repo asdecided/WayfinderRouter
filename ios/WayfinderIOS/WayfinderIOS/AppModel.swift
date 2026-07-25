@@ -62,6 +62,9 @@ enum PrivacyPostureOption: String, CaseIterable, Identifiable {
 /// A storage operation that failed and can be tried again (UX-015).
 enum PersistenceRetryAction: Equatable {
   case saveThread(ConversationThreadSnapshot)
+  /// Re-saves whatever the conversation looks like *now*, for failures whose
+  /// captured snapshot may since have been superseded.
+  case saveActiveThread
   case saveDraft
   case restoreConversations
   case openThread(UUID)
@@ -559,7 +562,10 @@ final class AppModel {
           destinationsByID[$0] ?? $0
         }
       )
-      let providerMessages = providerHistory(appending: prompt)
+      let providerMessages = providerHistory(
+        appending: prompt,
+        upTo: assistantMessageID
+      )
       let turn: TurnSlot
       if let assistantMessageID {
         guard
@@ -787,6 +793,7 @@ final class AppModel {
         routePreviewState = .idle
       }
 
+      emitFeedback(.destructiveConfirmed)
       await refreshThreads()
       await persistWorkspace()
     } catch {
@@ -800,6 +807,7 @@ final class AppModel {
   func deleteAllThreads() async {
     do {
       try await conversationStore.deleteAll()
+      emitFeedback(.destructiveConfirmed)
       threads = []
       activeThreadID = nil
       draft = ""
@@ -1070,9 +1078,12 @@ final class AppModel {
     do {
       try await conversationStore.save(thread: thread)
     } catch {
+      // Deliberately not `.saveThread(thread)`: this snapshot is mid-stream,
+      // and by the time the user could tap Try Again the reply has moved on.
+      // Re-saving the live thread is the only correct retry.
       recordPersistenceFailure(
         "This reply is visible now, but Wayfinder could not save it.",
-        retry: .saveThread(thread)
+        retry: .saveActiveThread
       )
     }
   }
@@ -1139,6 +1150,10 @@ final class AppModel {
     switch action {
     case .saveThread(let thread):
       await saveUpdatedThread(thread)
+    case .saveActiveThread:
+      if let thread = activeThread {
+        await saveUpdatedThread(thread)
+      }
     case .saveDraft:
       await saveDraft()
     case .restoreConversations:
@@ -1313,13 +1328,25 @@ final class AppModel {
       "No Automatic destination is eligible under \(privacyPosture.title). Choose a destination or update routing."
   }
 
+  /// Builds the provider-visible history.
+  ///
+  /// `upTo` bounds it for a retry: regenerating an earlier reply must not send
+  /// the turns that come *after* it, or the model answers an old question with
+  /// knowledge of newer ones and the answer lands above its own context.
   private func providerHistory(
-    appending prompt: String
+    appending prompt: String,
+    upTo boundary: UUID? = nil
   ) -> [ProviderExecutionMessage] {
     var history: [ProviderExecutionMessage] = []
     var pendingUser: ConversationMessageSnapshot?
+    var messages = activeThread?.messages ?? []
+    if let boundary,
+      let end = messages.firstIndex(where: { $0.id == boundary })
+    {
+      messages = Array(messages[..<end])
+    }
 
-    for message in activeThread?.messages ?? [] {
+    for message in messages {
       switch message.role {
       case .system:
         if message.status == .completed {
@@ -1369,10 +1396,13 @@ final class AppModel {
 
     thread.draft = draft
     thread.updatedAt = now()
+    // Publish before suspending. Writing this snapshot back *after* the await
+    // would discard every delta that arrived while the save was in flight —
+    // reachable on every keystroke now that typing during a reply is allowed.
+    upsertInMemory(thread)
 
     do {
       try await conversationStore.save(thread: thread)
-      upsertInMemory(thread)
     } catch {
       recordPersistenceFailure(
         "Wayfinder could not save the current draft.",
@@ -1567,7 +1597,6 @@ final class AppModel {
 
     thread.pinnedAt = pinned ? now() : nil
     upsertInMemory(thread)
-    emitFeedback(.selectionBoundary)
 
     do {
       try await conversationStore.save(thread: thread)

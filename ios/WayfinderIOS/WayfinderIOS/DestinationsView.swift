@@ -115,6 +115,11 @@ struct DestinationsView: View {
     .frame(minHeight: WayfinderMetrics.minimumHitTarget)
     .badge(readinessLabel(for: destination))
     .disabled(destination.readiness != .ready)
+    .accessibilityHint(
+      destination.readiness == .ready
+        ? "Uses this destination for the next message"
+        : "Unavailable: \(readinessLabel(for: destination).lowercased())"
+    )
     .accessibilityLabel(destination.displayName)
     .accessibilityValue(
       "\(destination.boundary.receiptPhrase.replacingOccurrences(of: "Ran ", with: "Runs ")). \(readinessLabel(for: destination))"

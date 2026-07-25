@@ -11,6 +11,10 @@ import Foundation
 /// Kept free of SwiftUI so the rule itself is unit-testable.
 struct TranscriptScrollState: Equatable {
   /// How close to the bottom still counts as following, in points.
+  ///
+  /// Scaled by the caller against the current text size: at accessibility
+  /// sizes a single line of body text is taller than the unscaled value, so a
+  /// reader genuinely at the tail would be scored as having left it.
   static let followThreshold: CGFloat = 48
 
   /// True while new content should pull the transcript down.

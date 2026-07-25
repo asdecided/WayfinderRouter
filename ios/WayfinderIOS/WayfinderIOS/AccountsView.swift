@@ -41,16 +41,25 @@ struct AccountsView: View {
             Button {
               connectOpenRouter()
             } label: {
-              if appModel.openRouterAccountState.readiness == .authorizing {
-                ProgressView()
-                  .controlSize(.small)
-              } else {
-                Text("Continue with OpenRouter")
+              Group {
+                if appModel.openRouterAccountState.readiness == .authorizing {
+                  ProgressView()
+                    .controlSize(.small)
+                } else {
+                  Text("Continue with OpenRouter")
+                }
               }
+              .frame(minHeight: WayfinderMetrics.minimumHitTarget)
             }
             .buttonStyle(.borderedProminent)
             .disabled(
               appModel.openRouterAccountState.readiness == .authorizing
+            )
+            // The label must survive the swap to a spinner.
+            .accessibilityLabel("Continue with OpenRouter")
+            .accessibilityValue(
+              appModel.openRouterAccountState.readiness == .authorizing
+                ? "Connecting" : ""
             )
           }
         }
@@ -152,7 +161,7 @@ struct AccountsView: View {
     case .ready:
       WayfinderTheme.accent
     case .failed:
-      .orange
+      WayfinderTheme.warning
     default:
       .secondary
     }

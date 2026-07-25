@@ -47,6 +47,7 @@
 		016C2DA8BBBEF64FFF547B2D /* RouteReceipt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97AEEE355705A642C7D55C11 /* RouteReceipt.swift */; };
 		6185E43E26661D1875EA9BE6 /* TranscriptScrollTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD99427DAE64871659D80447 /* TranscriptScrollTests.swift */; };
 		27EF4155691E79DCF59BB731 /* FirstLaunchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EF64E6A3CFA4AFF2EA6A88D /* FirstLaunchView.swift */; };
+		C0398EFC7FF4C86B79EADDED /* FirstRunAndThreadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25CC024AB111627E6AA726E3 /* FirstRunAndThreadTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -102,6 +103,7 @@
 		97AEEE355705A642C7D55C11 /* RouteReceipt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteReceipt.swift; sourceTree = "<group>"; };
 		FD99427DAE64871659D80447 /* TranscriptScrollTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptScrollTests.swift; sourceTree = "<group>"; };
 		0EF64E6A3CFA4AFF2EA6A88D /* FirstLaunchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstLaunchView.swift; sourceTree = "<group>"; };
+		25CC024AB111627E6AA726E3 /* FirstRunAndThreadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstRunAndThreadTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -168,6 +170,7 @@
 				8E152315242DF50CD0966A74 /* ChatLifecycleTests.swift */,
 				D8A79F801F4849CBD50C8A61 /* ConversationStoreTests.swift */,
 				3AD4110CCB21039F8900BB91 /* CredentialStoreTests.swift */,
+				25CC024AB111627E6AA726E3 /* FirstRunAndThreadTests.swift */,
 				12F38C9DD8AA4D34367BAFDE /* MarkdownRenderingTests.swift */,
 				261CF6528CA739E9E0D7D553 /* OpenAICompatibleProviderTests.swift */,
 				CF05080FED6F4E97C82B3C4F /* OpenRouterAccountTests.swift */,
@@ -297,6 +300,7 @@
 				5E28F56096A496E7096ED069 /* ChatLifecycleTests.swift in Sources */,
 				2663961FFDA2EEAEF58529A8 /* ConversationStoreTests.swift in Sources */,
 				F4E9D5D8ED49654292FFA71E /* CredentialStoreTests.swift in Sources */,
+				C0398EFC7FF4C86B79EADDED /* FirstRunAndThreadTests.swift in Sources */,
 				20B8954947389B3467C1A7CB /* MarkdownRenderingTests.swift in Sources */,
 				B1447F8C483CFBAC90E2C3FD /* OpenAICompatibleProviderTests.swift in Sources */,
 				0F77A8625C270B1375083539 /* OpenRouterAccountTests.swift in Sources */,

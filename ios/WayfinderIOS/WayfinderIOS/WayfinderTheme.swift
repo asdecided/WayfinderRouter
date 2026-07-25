@@ -63,6 +63,16 @@ enum WayfinderTheme {
     darkIncreasedContrast: 0x9C_D2_F2
   )
 
+  /// Recoverable problems. Deliberately *not* `routeCloud`: an amber that
+  /// means "this ran in hosted cloud" cannot also mean "something broke"
+  /// without destroying the boundary language it exists to carry.
+  static let warningUIColor = dynamicColor(
+    light: 0xA3_3A_12,
+    dark: 0xFF_9A_76,
+    lightIncreasedContrast: 0x7A_2A_0C,
+    darkIncreasedContrast: 0xFF_C0_AC
+  )
+
   // MARK: - Surfaces and chrome
 
   /// Drawer scrim. Designed per appearance instead of one black opacity that
@@ -97,6 +107,7 @@ enum WayfinderTheme {
   static var routeLocal: Color { Color(uiColor: routeLocalUIColor) }
   static var routeCloud: Color { Color(uiColor: routeCloudUIColor) }
   static var routeLocalNetwork: Color { Color(uiColor: routeLocalNetworkUIColor) }
+  static var warning: Color { Color(uiColor: warningUIColor) }
   static var scrim: Color { Color(uiColor: scrimUIColor) }
   static var hairline: Color { Color(uiColor: hairlineUIColor) }
   static var shadow: Color { Color(uiColor: shadowUIColor) }

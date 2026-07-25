@@ -7,6 +7,21 @@ struct APIKeysView: View {
 
   var body: some View {
     List {
+      // Save and remove failures are raised from this screen and from the
+      // editor sheet above it, so the notice has to live here too (UX-015).
+      if let credentialNotice = appModel.credentialNotice {
+        Section {
+          Label(credentialNotice, systemImage: "exclamationmark.triangle.fill")
+            .font(.footnote)
+            .foregroundStyle(WayfinderTheme.warning)
+          Button("Dismiss") {
+            appModel.credentialNotice = nil
+          }
+          .font(.footnote.weight(.semibold))
+          .frame(minHeight: WayfinderMetrics.minimumHitTarget)
+        }
+      }
+
       Section {
         ForEach(APIKeyProviderDescriptor.supported) { provider in
           APIKeyProviderRow(
@@ -102,10 +117,14 @@ private struct APIKeyProviderRow: View {
       HStack {
         Button(isConfigured ? "Replace Key" : "Add Key", action: edit)
           .buttonStyle(.bordered)
+          .frame(minHeight: WayfinderMetrics.minimumHitTarget)
 
         if isConfigured {
           Button("Remove", role: .destructive, action: remove)
             .buttonStyle(.borderless)
+            // Three provider rows each expose a "Remove"; name the provider
+            // so the actions rotor can tell them apart.
+            .accessibilityLabel("Remove \(provider.displayName) key")
         }
       }
     }

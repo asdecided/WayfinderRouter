@@ -19,6 +19,35 @@ struct RootView: View {
     }
     // Storage failures are recoverable and are surfaced inline in Chat
     // (UX-015); this screen no longer interrupts with a blocking alert.
+    .safeAreaInset(edge: .top, spacing: 0) {
+      // Storage failures are raised from Threads and Settings too, so the
+      // notice cannot live inside Chat or those failures are silent.
+      if let notice = appModel.persistenceNotice {
+        InlineNotice(
+          message: notice,
+          canRetry: appModel.persistenceRetry != nil,
+          isRetrying: appModel.isRetryingPersistence,
+          retry: { Task { await appModel.retryPersistence() } },
+          dismiss: appModel.dismissPersistenceNotice
+        )
+        .padding(.horizontal, WayfinderSpacing.small)
+        .padding(.bottom, WayfinderSpacing.xSmall)
+        .background(.bar)
+        .transition(.move(edge: .top).combined(with: .opacity))
+      }
+    }
+    .wayfinderAnimation(
+      WayfinderMotion.reveal,
+      value: appModel.persistenceNotice,
+      reduceMotion: reduceMotion
+    )
+    // Attached once, above every section, so feedback and announcements do
+    // not depend on which screen happens to be on top.
+    .wayfinderFeedback(appModel.feedbackEvent)
+    .onChange(of: appModel.feedbackEvent) { _, event in
+      guard let announcement = event?.kind.announcement else { return }
+      AccessibilityNotification.Announcement(announcement).post()
+    }
     .fullScreenCover(isPresented: firstRunBinding) {
       FirstLaunchView()
     }
@@ -37,7 +66,7 @@ struct RootView: View {
       let width = min(340, proxy.size.width * 0.86)
 
       ZStack(alignment: .leading) {
-        sectionStack
+        sectionStack(canOpenDrawer: true)
           .allowsHitTesting(!showsSidebar)
           .accessibilityHidden(showsSidebar)
 
@@ -70,7 +99,7 @@ struct RootView: View {
   /// pushed detail survives a round trip through the drawer. WF-DESIGN-0020
   /// permits exactly this hidden-container mechanism; WF-ROADMAP-0016 and
   /// WF-ADR-0047 require the state to be preserved (UX-020).
-  private var sectionStack: some View {
+  private func sectionStack(canOpenDrawer: Bool) -> some View {
     // A `TabView` is the mechanism the contract names, but every style of it
     // adds visible navigation: `.page` lets the user swipe between sections —
     // which would also fight the drawer's drag — and the default draws a tab
@@ -79,21 +108,21 @@ struct RootView: View {
     // none of them is reachable except by choosing it.
     ZStack {
       section(.chat) {
-        ChatTabView(openSidebar: openSidebar)
+        ChatTabView(openSidebar: canOpenDrawer ? openSidebar : nil)
       }
       section(.threads) {
         NavigationStack {
-          ThreadsView(openSidebar: openSidebar)
+          ThreadsView(openSidebar: canOpenDrawer ? openSidebar : nil)
         }
       }
       section(.destinations) {
         NavigationStack {
-          DestinationsView(openSidebar: openSidebar)
+          DestinationsView(openSidebar: canOpenDrawer ? openSidebar : nil)
         }
       }
       section(.settings) {
         NavigationStack {
-          SettingsView(openSidebar: openSidebar)
+          SettingsView(openSidebar: canOpenDrawer ? openSidebar : nil)
         }
       }
     }
@@ -117,7 +146,7 @@ struct RootView: View {
       AppSidebarView(select: select, close: nil)
         .navigationSplitViewColumnWidth(min: 260, ideal: 300, max: 340)
     } detail: {
-      sectionStack
+      sectionStack(canOpenDrawer: false)
     }
     .navigationSplitViewStyle(.balanced)
   }
@@ -135,9 +164,19 @@ struct RootView: View {
         guard showsSidebar else { return }
         let travelled = -value.translation.width
         let velocity = -value.predictedEndTranslation.width
-        dragTranslation = 0
-        if travelled > width / 3 || velocity > width {
-          closeSidebar()
+        // Releasing below the threshold must spring back, not teleport: the
+        // drawer position is driven by `dragTranslation`, which `showsSidebar`
+        // does not cover, so resetting it has to carry its own animation.
+        withAnimation(
+          WayfinderMotion.resolved(
+            WayfinderMotion.drawer,
+            reduceMotion: reduceMotion
+          )
+        ) {
+          dragTranslation = 0
+          if travelled > width / 3 || velocity > width {
+            showsSidebar = false
+          }
         }
       }
   }
@@ -337,7 +376,9 @@ private struct AppSidebarView: View {
           .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(thread.title)
+        .accessibilityLabel(
+          thread.isPinned ? "\(thread.title), pinned" : thread.title
+        )
         .accessibilityValue(subtitle(for: thread))
         .accessibilityAction(named: thread.isPinned ? "Unpin" : "Pin") {
           Task { await appModel.setPinned(!thread.isPinned, threadID: thread.id) }
