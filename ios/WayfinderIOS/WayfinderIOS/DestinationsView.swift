@@ -6,37 +6,25 @@ struct DestinationsView: View {
   var openSidebar: (() -> Void)?
 
   var body: some View {
-    List {
-      Section {
-        Text(
-          "Choose a destination explicitly in Chat. Connecting a key does not silently add it to Automatic."
-        )
-        .font(.footnote)
-        .foregroundStyle(.secondary)
-      }
-
-      if let modelInventoryNotice = appModel.modelInventoryNotice {
-        Section {
-          Label(modelInventoryNotice, systemImage: "exclamationmark.triangle")
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-        }
-      }
-
-      if !onDeviceDestinations.isEmpty {
-        Section("On this device") {
-          ForEach(onDeviceDestinations) { destination in
-            destinationRow(destination, systemImage: "iphone")
+    Group {
+      if appModel.destinations.isEmpty {
+        // The no-destination state the roadmap requires to be useful, not
+        // blank: skipping the first-launch chooser lands here.
+        ContentUnavailableView {
+          Label("No destinations yet", systemImage: "point.3.connected.trianglepath.dotted")
+        } description: {
+          Text(
+            "Add an API key or connect an account, and it will appear here. Wayfinder never adds one to Automatic routing on its own."
+          )
+        } actions: {
+          Button("Open Settings") {
+            appModel.selectedTab = .settings
           }
         }
-      }
-
-      if !hostedDestinations.isEmpty {
-        Section("Direct cloud") {
-          ForEach(hostedDestinations) { destination in
-            destinationRow(destination, systemImage: "cloud")
-          }
-        }
+      } else if filteredDestinations.isEmpty {
+        ContentUnavailableView.search(text: searchText)
+      } else {
+        list
       }
     }
     .navigationTitle("Destinations")
@@ -66,9 +54,44 @@ struct DestinationsView: View {
     }
   }
 
+  private var list: some View {
+    List {
+      Section {
+        Text(
+          "Choose a destination explicitly in Chat. Connecting a key does not silently add it to Automatic."
+        )
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+      }
+
+      if let modelInventoryNotice = appModel.modelInventoryNotice {
+        Section {
+          Label(modelInventoryNotice, systemImage: "exclamationmark.triangle")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+        }
+      }
+
+      if !onDeviceDestinations.isEmpty {
+        Section("On this device") {
+          ForEach(onDeviceDestinations) { destination in
+            destinationRow(destination)
+          }
+        }
+      }
+
+      if !hostedDestinations.isEmpty {
+        Section("Direct cloud") {
+          ForEach(hostedDestinations) { destination in
+            destinationRow(destination)
+          }
+        }
+      }
+    }
+  }
+
   private func destinationRow(
-    _ destination: RoutingDestination,
-    systemImage: String
+    _ destination: RoutingDestination
   ) -> some View {
     Button {
       appModel.selectDestination(destination.id)
@@ -82,13 +105,20 @@ struct DestinationsView: View {
             .foregroundStyle(.secondary)
         }
       } icon: {
-        Image(systemName: systemImage)
-          .foregroundStyle(WayfinderTheme.accent)
+        // Boundary identity, not ambient accent: the glyph and the colour
+        // both come from where the destination actually executes.
+        Image(systemName: destination.boundary.routeSymbolName)
+          .foregroundStyle(destination.boundary.routeColor)
       }
     }
     .buttonStyle(.plain)
+    .frame(minHeight: WayfinderMetrics.minimumHitTarget)
     .badge(readinessLabel(for: destination))
     .disabled(destination.readiness != .ready)
+    .accessibilityLabel(destination.displayName)
+    .accessibilityValue(
+      "\(destination.boundary.receiptPhrase.replacingOccurrences(of: "Ran ", with: "Runs ")). \(readinessLabel(for: destination))"
+    )
   }
 
   private var onDeviceDestinations: [RoutingDestination] {
