@@ -71,36 +71,45 @@ struct RootView: View {
   /// permits exactly this hidden-container mechanism; WF-ROADMAP-0016 and
   /// WF-ADR-0047 require the state to be preserved (UX-020).
   private var sectionStack: some View {
-    TabView(selection: sectionBinding) {
-      ChatTabView(openSidebar: openSidebar)
-        .tag(AppTab.chat)
-
-      NavigationStack {
-        ThreadsView(openSidebar: openSidebar)
+    // A `TabView` is the mechanism the contract names, but every style of it
+    // adds visible navigation: `.page` lets the user swipe between sections —
+    // which would also fight the drawer's drag — and the default draws a tab
+    // bar. A ZStack is the "or equivalent" the contract allows: all four
+    // sections stay in the hierarchy, so their stacks keep their state, and
+    // none of them is reachable except by choosing it.
+    ZStack {
+      section(.chat) {
+        ChatTabView(openSidebar: openSidebar)
       }
-      .tag(AppTab.threads)
-
-      NavigationStack {
-        DestinationsView(openSidebar: openSidebar)
+      section(.threads) {
+        NavigationStack {
+          ThreadsView(openSidebar: openSidebar)
+        }
       }
-      .tag(AppTab.destinations)
-
-      NavigationStack {
-        SettingsView(openSidebar: openSidebar)
+      section(.destinations) {
+        NavigationStack {
+          DestinationsView(openSidebar: openSidebar)
+        }
       }
-      .tag(AppTab.settings)
+      section(.settings) {
+        NavigationStack {
+          SettingsView(openSidebar: openSidebar)
+        }
+      }
     }
-    .tabViewStyle(.page(indexDisplayMode: .never))
-    // The container is a state holder, never visible navigation: no tab bar,
-    // no page indicator, and no swipe between sections.
-    .ignoresSafeArea(.container, edges: .bottom)
   }
 
-  private var sectionBinding: Binding<AppTab> {
-    Binding(
-      get: { appModel.selectedTab },
-      set: { appModel.selectedTab = $0 }
-    )
+  @ViewBuilder
+  private func section(
+    _ tab: AppTab,
+    @ViewBuilder content: () -> some View
+  ) -> some View {
+    let isSelected = appModel.selectedTab == tab
+    content()
+      .opacity(isSelected ? 1 : 0)
+      .allowsHitTesting(isSelected)
+      .accessibilityHidden(!isSelected)
+      .zIndex(isSelected ? 1 : 0)
   }
 
   private var regularWidthLayout: some View {
@@ -400,11 +409,12 @@ private struct SidebarDestinationButton: View {
     Button(action: action) {
       Label(title, systemImage: systemImage)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, WayfinderSpacing.small)
+        .padding(.vertical, WayfinderSpacing.xSmall)
+        .frame(minHeight: WayfinderMetrics.minimumHitTarget)
         .background(
           isSelected ? Color.primary.opacity(0.07) : Color.clear,
-          in: RoundedRectangle(cornerRadius: 10)
+          in: RoundedRectangle(cornerRadius: WayfinderRadius.small)
         )
         .contentShape(Rectangle())
     }

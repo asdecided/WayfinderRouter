@@ -54,7 +54,7 @@ struct AccountsView: View {
             )
           }
         }
-        .padding(.vertical, 5)
+        .padding(.vertical, WayfinderSpacing.hairline)
       } footer: {
         Text(
           "OpenRouter issues a user-controlled key after sign-in. Wayfinder stores it only in this device's Keychain. Connecting does not change Automatic routing."

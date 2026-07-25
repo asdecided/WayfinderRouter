@@ -109,7 +109,7 @@ private struct APIKeyProviderRow: View {
         }
       }
     }
-    .padding(.vertical, 5)
+    .padding(.vertical, WayfinderSpacing.hairline)
     .accessibilityElement(children: .contain)
   }
 }

@@ -13,6 +13,7 @@ import SwiftUI
 struct FirstLaunchView: View {
   @Environment(AppModel.self) private var appModel
   @Environment(\.dismiss) private var dismiss
+  @ScaledMetric(relativeTo: .largeTitle) private var markSize: CGFloat = 34
 
   var body: some View {
     NavigationStack {
@@ -129,7 +130,7 @@ struct FirstLaunchView: View {
   private var header: some View {
     VStack(alignment: .leading, spacing: WayfinderSpacing.xSmall) {
       WayfinderMark()
-        .font(.system(size: 34, weight: .semibold))
+        .font(.system(size: markSize, weight: .semibold))
 
       Text("Welcome to Wayfinder")
         .font(.largeTitle.weight(.bold))
