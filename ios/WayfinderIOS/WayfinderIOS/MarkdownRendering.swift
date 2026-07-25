@@ -61,12 +61,24 @@ struct MarkdownBlockNode: Equatable, Identifiable, Sendable {
 struct MarkdownDocument: Equatable, Sendable {
   var nodes: [MarkdownBlockNode]
 
-  /// The source prefix consumed by every block except the last one. While a
-  /// reply streams, only the final block can still change, so this prefix is
-  /// what an incremental re-parse is allowed to reuse.
+  /// The source prefix that a later parse of appended text may reuse.
+  ///
+  /// Appending can only change the *final* line of the source, so a block is
+  /// settled once every line it inspected sits before that line. Inspection,
+  /// not consumption, is the test: a list looks one line past a blank to
+  /// decide whether the list continues, so `- a` followed by a blank is not
+  /// settled until the line after the blank is frozen — otherwise typing
+  /// `- b` beneath it would merge two blocks the reuse had already split.
   var closedSource: String
 
-  static let empty = MarkdownDocument(nodes: [], closedSource: "")
+  /// How many leading nodes `closedSource` accounts for.
+  var closedNodeCount: Int
+
+  static let empty = MarkdownDocument(
+    nodes: [],
+    closedSource: "",
+    closedNodeCount: 0
+  )
 
   var isEmpty: Bool { nodes.isEmpty }
 
@@ -94,20 +106,22 @@ struct MarkdownDocument: Equatable, Sendable {
   ) -> MarkdownDocument {
     guard let previous,
       !previous.closedSource.isEmpty,
+      previous.closedNodeCount > 0,
       source.count > previous.closedSource.count,
       source.hasPrefix(previous.closedSource)
     else {
       return parse(source)
     }
 
-    let closed = Array(previous.nodes.dropLast())
+    let closed = Array(previous.nodes.prefix(previous.closedNodeCount))
     let tail = String(source.dropFirst(previous.closedSource.count))
     var parser = MarkdownParser(source: tail)
     let parsed = parser.parse(idOffset: closed.count)
 
     return MarkdownDocument(
       nodes: closed + parsed.nodes,
-      closedSource: previous.closedSource + parsed.closedSource
+      closedSource: previous.closedSource + parsed.closedSource,
+      closedNodeCount: closed.count + parsed.closedNodeCount
     )
   }
 }
@@ -119,47 +133,77 @@ private struct MarkdownParser {
   private var index = 0
   /// Index of the first line of the block currently being emitted.
   private var blockStartLine = 0
+  /// Highest line index any rule has looked at, including lookahead. This is
+  /// what decides whether a block is settled — see `closedSource`.
+  private var highWaterLine = 0
 
   init(source: String) {
     lines = source.split(separator: "\n", omittingEmptySubsequences: false)
   }
 
+  /// The only way this parser reads a line. Routing every read through one
+  /// accessor is what keeps the high-water mark honest.
+  private mutating func sourceLine(_ offset: Int) -> Substring {
+    highWaterLine = max(highWaterLine, offset)
+    return lines[offset]
+  }
+
   mutating func parse(idOffset: Int) -> MarkdownDocument {
     var nodes: [MarkdownBlockNode] = []
-    var lastBlockStartLine = 0
+    var startLines: [Int] = []
+    var inspectedThrough: [Int] = []
 
     while index < lines.count {
       blockStartLine = index
       guard let block = nextBlock() else {
         continue
       }
-      lastBlockStartLine = blockStartLine
+      startLines.append(blockStartLine)
+      inspectedThrough.append(highWaterLine)
       nodes.append(
         MarkdownBlockNode(id: idOffset + nodes.count, block: block)
       )
     }
 
-    let closedSource: String
-    if nodes.isEmpty {
-      closedSource = ""
-    } else {
-      closedSource = lines[0..<lastBlockStartLine]
-        .map(String.init)
-        .joined(separator: "\n")
-      // The separator that terminates the last closed line belongs to the
-      // prefix too, otherwise the reused and re-parsed halves would fuse.
+    // Appending text can only mutate the final line, so a block is settled
+    // once everything it inspected lies strictly before that line.
+    let volatileLine = lines.count - 1
+    var closedNodeCount = 0
+    while closedNodeCount < nodes.count,
+      inspectedThrough[closedNodeCount] < volatileLine
+    {
+      closedNodeCount += 1
     }
+
+    // When every block is settled the remainder is blank lines only; there is
+    // no following block to close against, so the next parse starts fresh.
+    guard closedNodeCount > 0, closedNodeCount < nodes.count else {
+      return MarkdownDocument(
+        nodes: nodes,
+        closedSource: "",
+        closedNodeCount: 0
+      )
+    }
+
+    let closedLines = startLines[closedNodeCount]
+    let closedSource =
+      lines[0..<closedLines]
+      .map(String.init)
+      .joined(separator: "\n")
 
     return MarkdownDocument(
       nodes: nodes,
-      closedSource: lastBlockStartLine == 0 ? "" : closedSource + "\n"
+      // The separator terminating the last closed line belongs to the prefix
+      // too, otherwise the reused and re-parsed halves would fuse.
+      closedSource: closedSource + "\n",
+      closedNodeCount: closedNodeCount
     )
   }
 
   // MARK: Block dispatch
 
   private mutating func nextBlock() -> MarkdownBlock? {
-    let line = lines[index]
+    let line = sourceLine(index)
 
     if line.trimmingCharacters(in: .whitespaces).isEmpty {
       index += 1
@@ -224,7 +268,7 @@ private struct MarkdownParser {
     var isClosed = false
 
     while index < lines.count {
-      let line = lines[index]
+      let line = sourceLine(index)
       if let closing = fenceInfo(line),
         closing.character == fence.character,
         closing.length >= fence.length,
@@ -282,7 +326,7 @@ private struct MarkdownParser {
     var paragraphs: [String] = []
     var current: [String] = []
 
-    while index < lines.count, isQuote(lines[index]) {
+    while index < lines.count, isQuote(sourceLine(index)) {
       var content = lines[index].drop(while: { $0 == " " }).dropFirst()
       if content.first == " " { content = content.dropFirst() }
       let text = String(content)
@@ -345,7 +389,7 @@ private struct MarkdownParser {
   }
 
   private mutating func listBlock() -> MarkdownBlock {
-    guard let first = listMarker(lines[index]) else {
+    guard let first = listMarker(sourceLine(index)) else {
       return paragraphBlock()
     }
 
@@ -356,12 +400,12 @@ private struct MarkdownParser {
     var raw: [(indent: Int, ordinal: Int, text: String)] = []
 
     while index < lines.count {
-      let line = lines[index]
+      let line = sourceLine(index)
       guard let marker = listMarker(line), marker.isOrdered == isOrdered else {
         // A blank line only ends the list if the next line is not an item.
         if line.trimmingCharacters(in: .whitespaces).isEmpty,
           index + 1 < lines.count,
-          let following = listMarker(lines[index + 1]),
+          let following = listMarker(sourceLine(index + 1)),
           following.isOrdered == isOrdered
         {
           index += 1
@@ -422,9 +466,9 @@ private struct MarkdownParser {
 
   private mutating func tableBlock() -> MarkdownBlock? {
     guard index + 1 < lines.count else { return nil }
-    let headerLine = lines[index]
+    let headerLine = sourceLine(index)
     guard headerLine.contains(where: { $0 == "|" }) else { return nil }
-    guard let alignments = delimiterAlignments(lines[index + 1]) else {
+    guard let alignments = delimiterAlignments(sourceLine(index + 1)) else {
       return nil
     }
     let header = splitRow(headerLine)
@@ -432,7 +476,7 @@ private struct MarkdownParser {
 
     index += 2
     var rows: [[AttributedString]] = []
-    while index < lines.count, lines[index].contains(where: { $0 == "|" }) {
+    while index < lines.count, sourceLine(index).contains(where: { $0 == "|" }) {
       let cells = splitRow(lines[index])
       guard !cells.isEmpty else { break }
       var normalized = cells.map(MarkdownInline.parse)
@@ -490,7 +534,7 @@ private struct MarkdownParser {
     var body: [String] = []
 
     while index < lines.count {
-      let line = lines[index]
+      let line = sourceLine(index)
       if line.trimmingCharacters(in: .whitespaces).isEmpty { break }
       if !body.isEmpty {
         // A construct that can begin a block interrupts the paragraph.

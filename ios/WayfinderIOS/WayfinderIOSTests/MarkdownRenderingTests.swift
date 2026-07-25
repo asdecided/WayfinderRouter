@@ -312,6 +312,76 @@ final class MarkdownStreamingTests: XCTestCase {
     }
   }
 
+  /// The case that proved "everything but the last block is settled" wrong.
+  /// A list ends because the next line is not yet an item; one more character
+  /// turns that line into an item and the list absorbs it. Reuse must not have
+  /// already frozen the list as a separate block.
+  func testABlockThatLaterAbsorbsTheFollowingLineIsNotReusedEarly() {
+    var document: MarkdownDocument?
+    for source in [
+      "1. Read the file\n2",
+      "1. Read the file\n2.",
+      "1. Read the file\n2. ",
+      "1. Read the file\n2. Change it",
+    ] {
+      document = MarkdownDocument.parse(source, reusing: document)
+      XCTAssertEqual(
+        document?.nodes,
+        MarkdownDocument.parse(source).nodes,
+        "incremental parse diverged at \(source.debugDescription)"
+      )
+    }
+
+    guard case .list(let list) = document?.nodes.first?.block else {
+      return XCTFail("expected one list")
+    }
+    XCTAssertEqual(document?.nodes.count, 1)
+    XCTAssertEqual(list.items.map(\.marker), ["1.", "2."])
+  }
+
+  /// A list continues across a blank line, so it inspects a line beyond the
+  /// one that ended it. That lookahead has to count as "not settled yet".
+  func testAListThatContinuesAcrossABlankLineIsNotReusedEarly() {
+    var document: MarkdownDocument?
+    for source in ["- a\n\n-", "- a\n\n- ", "- a\n\n- b"] {
+      document = MarkdownDocument.parse(source, reusing: document)
+      XCTAssertEqual(
+        document?.nodes,
+        MarkdownDocument.parse(source).nodes,
+        "incremental parse diverged at \(source.debugDescription)"
+      )
+    }
+    XCTAssertEqual(document?.nodes.count, 1, "the list split into two blocks")
+  }
+
+  func testIncrementalParseMatchesAFullParseAcrossVariedStructures() {
+    let documents = [
+      "intro\n\n- a\n- b\n\n- c\n\ntail",
+      "1. one\n   1. inner\n2. two\n\npara",
+      "before\n\n| a | b |\n|---|--:|\n| 1 | 2 |\n\nafter",
+      "> one\n> two\n\n> three\n\nend",
+      "a\n\n```py\nx=1\n```\n\n```\ny\n```\n\nz",
+      "a\n\n---\n\nb\n***\nc",
+      "# H1\ntext\n## H2\n\n- l1\n- l2",
+      "a\n\nb\n\n\n",
+      "- a\n\n- b\n\ntext | pipe\n---\nmore",
+    ]
+
+    for source in documents {
+      var accumulated = ""
+      var document: MarkdownDocument?
+      for character in source {
+        accumulated.append(character)
+        document = MarkdownDocument.parse(accumulated, reusing: document)
+        XCTAssertEqual(
+          document?.nodes,
+          MarkdownDocument.parse(accumulated).nodes,
+          "diverged in \(source.debugDescription) at \(accumulated.count) chars"
+        )
+      }
+    }
+  }
+
   func testReparsingUnchangedContentIsStable() {
     let first = MarkdownDocument.parse(reply)
     let second = MarkdownDocument.parse(reply, reusing: first)

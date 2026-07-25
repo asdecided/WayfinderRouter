@@ -25,8 +25,11 @@ enum WayfinderTheme {
   /// The shipped literal (#15AB75) sits at ~2.9:1 on white, below the 4.5:1
   /// floor for the small text it tints, so the light variants are darkened
   /// and the dark variants lightened until every text-bearing use passes AA.
+  /// The light value clears 4.5:1 against `secondarySystemBackground`
+  /// (#F2F2F7), not just against white — the receipt chip and composer sit on
+  /// the raised surface, where an accent tuned only for white falls to 4.3:1.
   static let accentUIColor = dynamicColor(
-    light: 0x0E_82_59,
+    light: 0x0D_7B_54,
     dark: 0x35_C4_8C,
     lightIncreasedContrast: 0x09_55_39,
     darkIncreasedContrast: 0x5F_E0_AF
