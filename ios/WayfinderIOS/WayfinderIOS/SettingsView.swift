@@ -44,7 +44,7 @@ struct SettingsView: View {
 
       Section("Runtime") {
         LabeledContent("Router", value: "Embedded Rust core")
-        LabeledContent("Provider execution", value: "Deterministic preview")
+        LabeledContent("Provider execution", value: "Direct and on-device")
         LabeledContent("Mac required", value: "No")
       }
 

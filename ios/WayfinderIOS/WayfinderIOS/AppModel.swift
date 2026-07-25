@@ -146,6 +146,8 @@ final class AppModel {
     providerID: "openrouter",
     readiness: .checking
   )
+  var appleFoundationModelsAvailability: AppleFoundationModelsAvailability =
+    .unsupported
   var modelInventoryNotice: String?
   var isRefreshingModelInventory = false
   var isRestoringConversations = false
@@ -159,6 +161,7 @@ final class AppModel {
   private let conversationStore: any ConversationStore
   private let credentialStore: any CredentialStore
   private let openRouterAccountController: any ProviderAccountController
+  private let appleFoundationModelsProvider: any AppleFoundationModelsProvider
   private let providerExecutor: any ProviderExecutor
   private let providerModelCatalog: any ProviderModelCatalog
   private let compiledDestinations: [RoutingDestination]
@@ -172,6 +175,8 @@ final class AppModel {
     conversationStore: any ConversationStore = InMemoryConversationStore(),
     credentialStore: any CredentialStore = KeychainCredentialStore(),
     openRouterAccountController: (any ProviderAccountController)? = nil,
+    appleFoundationModelsProvider: any AppleFoundationModelsProvider =
+      UnavailableAppleFoundationModelsProvider(),
     providerExecutor: any ProviderExecutor = DeterministicMockProvider(),
     providerModelCatalog: any ProviderModelCatalog = EmptyProviderModelCatalog(),
     destinations: [RoutingDestination] = .previewCandidates,
@@ -186,6 +191,7 @@ final class AppModel {
         configuration: .openRouter,
         credentialStore: credentialStore
       )
+    self.appleFoundationModelsProvider = appleFoundationModelsProvider
     self.providerExecutor = providerExecutor
     self.providerModelCatalog = providerModelCatalog
     compiledDestinations = destinations
@@ -242,8 +248,8 @@ final class AppModel {
     hasRestoredCredentialStatuses = await refreshCredentialStatuses()
     if hasRestoredCredentialStatuses {
       openRouterAccountState = await openRouterAccountController.refresh()
-      await refreshModelInventory()
     }
+    await refreshModelInventory()
   }
 
   func beginOpenRouterAuthorization() async -> AuthorizationChallenge? {
@@ -344,6 +350,7 @@ final class AppModel {
     isRefreshingModelInventory = true
     defer { isRefreshingModelInventory = false }
 
+    async let appleAvailability = appleFoundationModelsProvider.availability()
     let results = await providerModelCatalog.refresh()
     var failedProviderNames: [String] = []
 
@@ -362,6 +369,7 @@ final class AppModel {
       }
     }
 
+    appleFoundationModelsAvailability = await appleAvailability
     rebuildDestinations()
     if failedProviderNames.isEmpty {
       modelInventoryNotice = nil
@@ -966,6 +974,11 @@ final class AppModel {
 
   private func updateDestinationReadiness() {
     destinations = destinations.map { destination in
+      if destination.id == NativeAppleFoundationModelsProvider.destinationID {
+        return destination.withAppleAvailability(
+          appleFoundationModelsAvailability
+        )
+      }
       guard let credentialID = destination.credentialID else {
         return destination
       }
@@ -1272,6 +1285,27 @@ struct RoutingDestination: Identifiable, Hashable {
       credentialID: credentialID
     )
   }
+
+  func withAppleAvailability(
+    _ availability: AppleFoundationModelsAvailability
+  ) -> Self {
+    RoutingDestination(
+      id: id,
+      providerID: providerID,
+      providerName: providerName,
+      modelID: modelID,
+      displayName: displayName,
+      detail: availability.detail,
+      routeTier: routeTier,
+      boundary: boundary,
+      boundaryLabel: boundaryLabel,
+      billingClass: billingClass,
+      readiness: availability.readiness,
+      automaticEligible: automaticEligible,
+      contextWindow: contextWindow,
+      credentialID: credentialID
+    )
+  }
 }
 
 extension [RoutingDestination] {
@@ -1311,6 +1345,23 @@ extension [RoutingDestination] {
   ]
 
   static let liveDirectProviders: [RoutingDestination] = [
+    RoutingDestination(
+      id: NativeAppleFoundationModelsProvider.destinationID,
+      providerID: "apple-foundation-models",
+      providerName: "Apple Foundation Models",
+      modelID: "system-default",
+      displayName: "Apple On-Device",
+      detail: "Checking this device…",
+      routeTier: "local",
+      boundary: .onDevice,
+      boundaryLabel: "On this device",
+      billingClass: .onDevice,
+      readiness: .checking,
+      automaticEligible: false,
+      contextWindow: nil,
+      credentialID: nil
+    ),
+  ] + [
     OpenAICompatibleConfiguration.openAIPlatform,
     OpenAICompatibleConfiguration.moonshotPlatform,
     OpenAICompatibleConfiguration.openRouter,

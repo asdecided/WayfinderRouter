@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		014B0F0F1659B0478F68FAF3 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A28A0256D98D907F1BAF7A34 /* RootView.swift */; };
+		0E85558185ACD9CE067729BD /* AppleFoundationModelsProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD1784496CB4D262A2DFD3F1 /* AppleFoundationModelsProvider.swift */; };
 		0F77A8625C270B1375083539 /* OpenRouterAccountTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF05080FED6F4E97C82B3C4F /* OpenRouterAccountTests.swift */; };
 		165C905840F4DCF56C27BF8F /* ConversationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D89C6EA7388FA2CCF9F5865E /* ConversationStore.swift */; };
 		16E260B200C5AD48A0F88E40 /* AuthorizationCodePKCETests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5802A399EFEE02A09B5C7492 /* AuthorizationCodePKCETests.swift */; };
@@ -30,6 +31,7 @@
 		CD7EFB8AE4D72853B02822C9 /* AuthorizationCodePKCE.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A8F8648A591ACB6DD8AA3 /* AuthorizationCodePKCE.swift */; };
 		D060F612A4C672A8932A47B9 /* APIKeysView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B75781C7C160DEB4257207 /* APIKeysView.swift */; };
 		DDF893703A284EDEF6594AE6 /* WayfinderTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B27149D56F517F17D1F971B /* WayfinderTheme.swift */; };
+		EBB5FC47BA62D841C32D9A8F /* AppleFoundationModelsProviderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70CB5BEDA315456CABBAE00D /* AppleFoundationModelsProviderTests.swift */; };
 		EBF78778DA2B68EDA8347CAF /* WayfinderIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A2C2884452C3AECE92EE0E1 /* WayfinderIOSApp.swift */; };
 		F4E9D5D8ED49654292FFA71E /* CredentialStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AD4110CCB21039F8900BB91 /* CredentialStoreTests.swift */; };
 /* End PBXBuildFile section */
@@ -61,12 +63,14 @@
 		5F6D147CFBC7918BCCD92B9E /* WayfinderIOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = WayfinderIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		64B75781C7C160DEB4257207 /* APIKeysView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIKeysView.swift; sourceTree = "<group>"; };
 		6AA05C69CF6E5D026498FA04 /* OpenAICompatibleProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAICompatibleProvider.swift; sourceTree = "<group>"; };
+		70CB5BEDA315456CABBAE00D /* AppleFoundationModelsProviderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleFoundationModelsProviderTests.swift; sourceTree = "<group>"; };
 		83D516988396183A30C27411 /* ProviderModelCatalogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderModelCatalogTests.swift; sourceTree = "<group>"; };
 		8A7B4FB8866C8CE81BA3E3A9 /* CredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialStore.swift; sourceTree = "<group>"; };
 		910171253EA965875F0C979A /* WayfinderIOSTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = WayfinderIOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9B27149D56F517F17D1F971B /* WayfinderTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WayfinderTheme.swift; sourceTree = "<group>"; };
 		9E92E195F328A16C8A4C9159 /* ChatExecution.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatExecution.swift; sourceTree = "<group>"; };
 		A28A0256D98D907F1BAF7A34 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		AD1784496CB4D262A2DFD3F1 /* AppleFoundationModelsProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleFoundationModelsProvider.swift; sourceTree = "<group>"; };
 		BE0BB131143C117BDF129E06 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		C17D8ECF221517590115EA9F /* AppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelTests.swift; sourceTree = "<group>"; };
 		CF05080FED6F4E97C82B3C4F /* OpenRouterAccountTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenRouterAccountTests.swift; sourceTree = "<group>"; };
@@ -91,6 +95,7 @@
 			children = (
 				45F5FA0D2F24CB2485DC0541 /* AccountsView.swift */,
 				64B75781C7C160DEB4257207 /* APIKeysView.swift */,
+				AD1784496CB4D262A2DFD3F1 /* AppleFoundationModelsProvider.swift */,
 				0D3D621AD229ED0AF9703D04 /* AppModel.swift */,
 				1F3A8F8648A591ACB6DD8AA3 /* AuthorizationCodePKCE.swift */,
 				9E92E195F328A16C8A4C9159 /* ChatExecution.swift */,
@@ -122,6 +127,7 @@
 		89636497AC4E9DD7FC0A1574 /* WayfinderIOSTests */ = {
 			isa = PBXGroup;
 			children = (
+				70CB5BEDA315456CABBAE00D /* AppleFoundationModelsProviderTests.swift */,
 				C17D8ECF221517590115EA9F /* AppModelTests.swift */,
 				5802A399EFEE02A09B5C7492 /* AuthorizationCodePKCETests.swift */,
 				D8A79F801F4849CBD50C8A61 /* ConversationStoreTests.swift */,
@@ -234,6 +240,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AD9F05EEA94FD7440F0DD8A9 /* AppModelTests.swift in Sources */,
+				EBB5FC47BA62D841C32D9A8F /* AppleFoundationModelsProviderTests.swift in Sources */,
 				16E260B200C5AD48A0F88E40 /* AuthorizationCodePKCETests.swift in Sources */,
 				2663961FFDA2EEAEF58529A8 /* ConversationStoreTests.swift in Sources */,
 				F4E9D5D8ED49654292FFA71E /* CredentialStoreTests.swift in Sources */,
@@ -250,6 +257,7 @@
 				D060F612A4C672A8932A47B9 /* APIKeysView.swift in Sources */,
 				5B2A7371A127D18927D51B6C /* AccountsView.swift in Sources */,
 				A7AFF77BAFD88E83930B3DC6 /* AppModel.swift in Sources */,
+				0E85558185ACD9CE067729BD /* AppleFoundationModelsProvider.swift in Sources */,
 				CD7EFB8AE4D72853B02822C9 /* AuthorizationCodePKCE.swift in Sources */,
 				2FDE760EEAA633A74BF8B379 /* ChatExecution.swift in Sources */,
 				383CBBDE76DCB1296EE2B2FF /* ChatTabView.swift in Sources */,
