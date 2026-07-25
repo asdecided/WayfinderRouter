@@ -48,6 +48,7 @@ enum ProviderExecutionError: LocalizedError, Equatable, Sendable {
   case requestTooLarge
   case responseTooLarge
   case interrupted
+  case appleModelUnavailable(AppleFoundationModelsAvailability)
   case rejected(String)
 
   var errorDescription: String? {
@@ -70,6 +71,8 @@ enum ProviderExecutionError: LocalizedError, Equatable, Sendable {
       "The provider response exceeded Wayfinder's safety limit."
     case .interrupted:
       "The provider stopped before completing this reply."
+    case .appleModelUnavailable(let availability):
+      availability.detail
     case .rejected(let message):
       message
     }

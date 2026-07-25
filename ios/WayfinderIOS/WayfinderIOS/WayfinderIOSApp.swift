@@ -6,9 +6,14 @@ struct WayfinderIOSApp: App {
 
   init() {
     let credentialStore = KeychainCredentialStore()
-    let provider = OpenAICompatibleProvider(
+    let cloudProvider = OpenAICompatibleProvider(
       configurations: OpenAICompatibleConfiguration.supported,
       credentialStore: credentialStore
+    )
+    let appleProvider = NativeAppleFoundationModelsProvider()
+    let provider = RoutedProviderExecutor(
+      appleProvider: appleProvider,
+      fallback: cloudProvider
     )
     let providerModelCatalog = OpenAICompatibleModelCatalog(
       configurations: OpenAICompatibleConfiguration.supported,
@@ -23,6 +28,7 @@ struct WayfinderIOSApp: App {
             modelContainer: container
           ),
           credentialStore: credentialStore,
+          appleFoundationModelsProvider: appleProvider,
           providerExecutor: provider,
           providerModelCatalog: providerModelCatalog,
           destinations: .liveDirectProviders
@@ -33,6 +39,7 @@ struct WayfinderIOSApp: App {
         initialValue: AppModel(
           conversationStore: InMemoryConversationStore(),
           credentialStore: credentialStore,
+          appleFoundationModelsProvider: appleProvider,
           providerExecutor: provider,
           providerModelCatalog: providerModelCatalog,
           destinations: .liveDirectProviders,
