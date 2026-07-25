@@ -102,6 +102,86 @@ final class AppModelTests: XCTestCase {
     XCTAssertNil(model.selectedDestinationID)
   }
 
+  func testDiscoveredModelPublishesReadyWithoutEnteringAutomatic() async {
+    let store = InMemoryCredentialStore()
+    let model = AppModel(
+      credentialStore: store,
+      providerModelCatalog: StubProviderModelCatalog(
+        results: [
+          ProviderModelInventoryResult(
+            providerID: "moonshot-platform",
+            state: .loaded([
+              DiscoveredProviderModel(
+                providerID: "moonshot-platform",
+                modelID: "kimi-k2.5",
+                displayName: "Kimi K2.5",
+                contextWindow: 262_144
+              )
+            ])
+          )
+        ]
+      ),
+      destinations: .liveDirectProviders
+    )
+
+    _ = await model.saveAPIKey(
+      "moonshot-key",
+      for: APIKeyProviderDescriptor.supported[1]
+    )
+
+    let discovered = model.destinations.first {
+      $0.id == "moonshot-platform:kimi-k2.5"
+    }
+    XCTAssertEqual(discovered?.readiness, .ready)
+    XCTAssertEqual(discovered?.contextWindow, 262_144)
+    XCTAssertEqual(discovered?.automaticEligible, false)
+    XCTAssertNil(model.selectedDestinationID)
+  }
+
+  func testRemovingKeyRemovesItsDiscoveredModels() async {
+    let store = InMemoryCredentialStore()
+    let catalog = MutableProviderModelCatalog(
+      results: [
+        ProviderModelInventoryResult(
+          providerID: "moonshot-platform",
+          state: .loaded([
+            DiscoveredProviderModel(
+              providerID: "moonshot-platform",
+              modelID: "kimi-k2.5",
+              displayName: "Kimi K2.5",
+              contextWindow: 262_144
+            )
+          ])
+        )
+      ]
+    )
+    let model = AppModel(
+      credentialStore: store,
+      providerModelCatalog: catalog,
+      destinations: .liveDirectProviders
+    )
+    _ = await model.saveAPIKey(
+      "moonshot-key",
+      for: APIKeyProviderDescriptor.supported[1]
+    )
+    model.selectDestination("moonshot-platform:kimi-k2.5")
+    await catalog.setResults([
+      ProviderModelInventoryResult(
+        providerID: "moonshot-platform",
+        state: .notConfigured
+      )
+    ])
+
+    await model.removeAPIKey(for: APIKeyProviderDescriptor.supported[1])
+
+    XCTAssertFalse(
+      model.destinations.contains {
+        $0.id == "moonshot-platform:kimi-k2.5"
+      }
+    )
+    XCTAssertNil(model.selectedDestinationID)
+  }
+
   func testPinnedDirectDestinationRoutesOnlyAfterExplicitSelection() async {
     let store = InMemoryCredentialStore()
     let provider = DeterministicMockProvider(
@@ -563,5 +643,29 @@ private actor CapturingProvider: ProviderExecutor {
 
   func capturedRequests() -> [ProviderExecutionRequest] {
     requests
+  }
+}
+
+private struct StubProviderModelCatalog: ProviderModelCatalog {
+  let results: [ProviderModelInventoryResult]
+
+  func refresh() async -> [ProviderModelInventoryResult] {
+    results
+  }
+}
+
+private actor MutableProviderModelCatalog: ProviderModelCatalog {
+  private var results: [ProviderModelInventoryResult]
+
+  init(results: [ProviderModelInventoryResult]) {
+    self.results = results
+  }
+
+  func refresh() -> [ProviderModelInventoryResult] {
+    results
+  }
+
+  func setResults(_ results: [ProviderModelInventoryResult]) {
+    self.results = results
   }
 }
