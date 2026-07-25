@@ -397,3 +397,4 @@ Kimi account auth is optional and does not gate the release.
 - WF-DESIGN-0020
 - `docs/apple-platform-capability-matrix.md`
 - `docs/qualifications/WF-QUAL-0001-kimi-account-auth.md`
+- `docs/mobile-ux-audit.md`
