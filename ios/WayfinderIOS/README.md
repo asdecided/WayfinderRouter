@@ -32,9 +32,12 @@ inventory and never expose raw provider errors.
 
 Apple On-Device reports live framework readiness, streams ordered output,
 supports cancellation, and never enters Automatic merely because it is
-available. Context is left unspecified because the public framework does not
-currently expose a reliable context-window value. Optional Mac pairing lands
-in a later review boundary. Cloud presets use Chat Completions; an
+available. The native capability snapshot reports framework-backed text,
+streaming, and supported-language count. Context remains unspecified because
+the public framework does not expose a reliable context-window value. The
+versioned, content-free physical-device gate is documented in
+`docs/ios-apple-foundation-models-live-integration.md`. Optional Mac pairing
+lands in a later review boundary. Cloud presets use Chat Completions; an
 OpenAI-specific Responses API adapter remains a separate provider decision.
 
 ## Build
