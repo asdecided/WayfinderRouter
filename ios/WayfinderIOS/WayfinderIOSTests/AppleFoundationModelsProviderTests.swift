@@ -74,6 +74,27 @@ final class AppleFoundationModelsProviderTests: XCTestCase {
     )
   }
 
+  func testCapabilitiesReportOnlyFrameworkBackedFacts() async {
+    let runtime = FakeAppleFoundationModelsRuntime(
+      availability: .available,
+      snapshots: [],
+      capabilities: AppleFoundationModelsCapabilitySnapshot(
+        supportsText: true,
+        supportsStreaming: true,
+        supportedLanguageCount: 12,
+        contextWindow: nil
+      )
+    )
+    let provider = NativeAppleFoundationModelsProvider(runtime: runtime)
+
+    let capabilities = await provider.capabilities()
+
+    XCTAssertTrue(capabilities.supportsText)
+    XCTAssertTrue(capabilities.supportsStreaming)
+    XCTAssertEqual(capabilities.supportedLanguageCount, 12)
+    XCTAssertNil(capabilities.contextWindow)
+  }
+
   func testConversationHistoryIsNormalizedWithoutPersistingASession() async
     throws
   {
@@ -299,20 +320,27 @@ private actor FakeAppleFoundationModelsRuntime:
   private let currentAvailability: AppleFoundationModelsAvailability
   private let snapshots: [String]
   private let delay: Duration
+  private let capabilitySnapshot: AppleFoundationModelsCapabilitySnapshot
   private var calls: [Call] = []
 
   init(
     availability: AppleFoundationModelsAvailability,
     snapshots: [String],
-    delay: Duration = .zero
+    delay: Duration = .zero,
+    capabilities: AppleFoundationModelsCapabilitySnapshot = .unavailable
   ) {
     currentAvailability = availability
     self.snapshots = snapshots
     self.delay = delay
+    capabilitySnapshot = capabilities
   }
 
   func availability() -> AppleFoundationModelsAvailability {
     currentAvailability
+  }
+
+  func capabilities() -> AppleFoundationModelsCapabilitySnapshot {
+    capabilitySnapshot
   }
 
   func responseSnapshots(
