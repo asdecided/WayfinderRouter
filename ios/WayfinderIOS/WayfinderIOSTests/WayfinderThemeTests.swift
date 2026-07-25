@@ -1,4 +1,5 @@
 import UIKit
+import WayfinderRoutingBridge
 import XCTest
 
 @testable import WayfinderIOS

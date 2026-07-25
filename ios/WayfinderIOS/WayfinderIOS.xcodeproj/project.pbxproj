@@ -37,6 +37,9 @@
 		F4E9D5D8ED49654292FFA71E /* CredentialStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AD4110CCB21039F8900BB91 /* CredentialStoreTests.swift */; };
 		9A7F60920A4C838903EB5494 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7375918F7C357DF1BF11545F /* Assets.xcassets */; };
 		75374729F624DC6AA2AB9C72 /* WayfinderThemeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C5986A2A84636B64159FE7 /* WayfinderThemeTests.swift */; };
+		36AF071C8F7CE243E509F5B2 /* MarkdownRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DD5A33043D525912C69CEBC /* MarkdownRendering.swift */; };
+		05E82E625C01CD5ABD2F9BB0 /* MarkdownView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58EF24813B3BA8027B7E4CE4 /* MarkdownView.swift */; };
+		20B8954947389B3467C1A7CB /* MarkdownRenderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12F38C9DD8AA4D34367BAFDE /* MarkdownRenderingTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -82,6 +85,9 @@
 		D8A79F801F4849CBD50C8A61 /* ConversationStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationStoreTests.swift; sourceTree = "<group>"; };
 		7375918F7C357DF1BF11545F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B2C5986A2A84636B64159FE7 /* WayfinderThemeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WayfinderThemeTests.swift; sourceTree = "<group>"; };
+		8DD5A33043D525912C69CEBC /* MarkdownRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownRendering.swift; sourceTree = "<group>"; };
+		58EF24813B3BA8027B7E4CE4 /* MarkdownView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownView.swift; sourceTree = "<group>"; };
+		12F38C9DD8AA4D34367BAFDE /* MarkdownRenderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownRenderingTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -110,6 +116,8 @@
 				D89C6EA7388FA2CCF9F5865E /* ConversationStore.swift */,
 				8A7B4FB8866C8CE81BA3E3A9 /* CredentialStore.swift */,
 				375A787B3245E247D326C13E /* DestinationsView.swift */,
+				8DD5A33043D525912C69CEBC /* MarkdownRendering.swift */,
+				58EF24813B3BA8027B7E4CE4 /* MarkdownView.swift */,
 				6AA05C69CF6E5D026498FA04 /* OpenAICompatibleProvider.swift */,
 				199D09FCEAB826F397ABEAF1 /* OpenRouterAccount.swift */,
 				45626E28DD8157BEF5D16EF7 /* ProviderModelCatalog.swift */,
@@ -140,6 +148,7 @@
 				5802A399EFEE02A09B5C7492 /* AuthorizationCodePKCETests.swift */,
 				D8A79F801F4849CBD50C8A61 /* ConversationStoreTests.swift */,
 				3AD4110CCB21039F8900BB91 /* CredentialStoreTests.swift */,
+				12F38C9DD8AA4D34367BAFDE /* MarkdownRenderingTests.swift */,
 				261CF6528CA739E9E0D7D553 /* OpenAICompatibleProviderTests.swift */,
 				CF05080FED6F4E97C82B3C4F /* OpenRouterAccountTests.swift */,
 				83D516988396183A30C27411 /* ProviderModelCatalogTests.swift */,
@@ -266,6 +275,7 @@
 				16E260B200C5AD48A0F88E40 /* AuthorizationCodePKCETests.swift in Sources */,
 				2663961FFDA2EEAEF58529A8 /* ConversationStoreTests.swift in Sources */,
 				F4E9D5D8ED49654292FFA71E /* CredentialStoreTests.swift in Sources */,
+				20B8954947389B3467C1A7CB /* MarkdownRenderingTests.swift in Sources */,
 				B1447F8C483CFBAC90E2C3FD /* OpenAICompatibleProviderTests.swift in Sources */,
 				0F77A8625C270B1375083539 /* OpenRouterAccountTests.swift in Sources */,
 				32B23F52E639A8EFBDA0D975 /* ProviderModelCatalogTests.swift in Sources */,
@@ -277,16 +287,18 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				D060F612A4C672A8932A47B9 /* APIKeysView.swift in Sources */,
 				5B2A7371A127D18927D51B6C /* AccountsView.swift in Sources */,
-				A7AFF77BAFD88E83930B3DC6 /* AppModel.swift in Sources */,
+				D060F612A4C672A8932A47B9 /* APIKeysView.swift in Sources */,
 				0E85558185ACD9CE067729BD /* AppleFoundationModelsProvider.swift in Sources */,
+				A7AFF77BAFD88E83930B3DC6 /* AppModel.swift in Sources */,
 				CD7EFB8AE4D72853B02822C9 /* AuthorizationCodePKCE.swift in Sources */,
 				2FDE760EEAA633A74BF8B379 /* ChatExecution.swift in Sources */,
 				383CBBDE76DCB1296EE2B2FF /* ChatTabView.swift in Sources */,
 				165C905840F4DCF56C27BF8F /* ConversationStore.swift in Sources */,
 				505322426BA37D7C41706A05 /* CredentialStore.swift in Sources */,
 				C04837E936D39B59FC3DAEDE /* DestinationsView.swift in Sources */,
+				36AF071C8F7CE243E509F5B2 /* MarkdownRendering.swift in Sources */,
+				05E82E625C01CD5ABD2F9BB0 /* MarkdownView.swift in Sources */,
 				4516AED0EA2C6143C441CAC1 /* OpenAICompatibleProvider.swift in Sources */,
 				AECF557711C7CD3BC8C373BF /* OpenRouterAccount.swift in Sources */,
 				81347D868AF6B843F8845DCD /* ProviderModelCatalog.swift in Sources */,
