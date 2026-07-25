@@ -1135,12 +1135,16 @@ extension [RoutingDestination] {
   ]
 
   static let liveDirectProviders: [RoutingDestination] = [
+    OpenAICompatibleConfiguration.openAIPlatform,
+    OpenAICompatibleConfiguration.moonshotPlatform,
+    OpenAICompatibleConfiguration.openRouter,
+  ].map { configuration in
     RoutingDestination(
-      id: OpenAICompatibleConfiguration.openAIPlatform.destinationID,
-      providerID: OpenAICompatibleConfiguration.openAIPlatform.providerID,
-      providerName: "OpenAI Platform",
-      modelID: OpenAICompatibleConfiguration.openAIPlatform.modelID,
-      displayName: OpenAICompatibleConfiguration.openAIPlatform.displayName,
+      id: configuration.destinationID,
+      providerID: configuration.providerID,
+      providerName: configuration.providerName,
+      modelID: configuration.modelID,
+      displayName: configuration.displayName,
       detail: "Direct API · API key required",
       routeTier: "cloud",
       boundary: .hosted,
@@ -1148,8 +1152,8 @@ extension [RoutingDestination] {
       billingClass: .apiMetered,
       readiness: .signedOut,
       automaticEligible: false,
-      contextWindow: nil,
-      credentialID: OpenAICompatibleConfiguration.openAIPlatform.credentialID
+      contextWindow: configuration.contextWindow,
+      credentialID: configuration.credentialID
     )
-  ]
+  }
 }
