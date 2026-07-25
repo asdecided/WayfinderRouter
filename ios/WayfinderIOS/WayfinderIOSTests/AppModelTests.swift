@@ -51,26 +51,33 @@ final class AppModelTests: XCTestCase {
       for: APIKeyProviderDescriptor.supported[0]
     )
 
-    XCTAssertEqual(model.destinations.first?.readiness, .ready)
-    XCTAssertEqual(model.destinations.first?.automaticEligible, false)
+    let destination = model.destinations.first {
+      $0.id == OpenAICompatibleConfiguration.openAIPlatform.destinationID
+    }
+    XCTAssertEqual(destination?.readiness, .ready)
+    XCTAssertEqual(destination?.automaticEligible, false)
     XCTAssertNil(model.selectedDestinationID)
   }
 
   func testEveryCompiledDirectPresetStartsPinnedAndUsesItsOwnCredential() {
+    let hostedDestinations =
+      [RoutingDestination].liveDirectProviders.filter {
+        $0.boundary == .hosted
+      }
     XCTAssertEqual(
       Set(
-        [RoutingDestination].liveDirectProviders.map(\.id)
+        hostedDestinations.map(\.id)
       ),
       Set(OpenAICompatibleConfiguration.supported.map(\.destinationID))
     )
     XCTAssertTrue(
-      [RoutingDestination].liveDirectProviders.allSatisfy {
+      hostedDestinations.allSatisfy {
         !$0.automaticEligible && $0.readiness == .signedOut
       }
     )
     XCTAssertEqual(
       Set(
-        [RoutingDestination].liveDirectProviders.compactMap(\.credentialID)
+        hostedDestinations.compactMap(\.credentialID)
       ),
       Set(OpenAICompatibleConfiguration.supported.map(\.credentialID))
     )
@@ -96,7 +103,9 @@ final class AppModelTests: XCTestCase {
     )
     XCTAssertTrue(
       model.destinations.filter {
-        $0.id != OpenAICompatibleConfiguration.moonshotPlatform.destinationID
+        $0.boundary == .hosted
+          && $0.id
+            != OpenAICompatibleConfiguration.moonshotPlatform.destinationID
       }.allSatisfy { $0.readiness == .signedOut }
     )
     XCTAssertNil(model.selectedDestinationID)
