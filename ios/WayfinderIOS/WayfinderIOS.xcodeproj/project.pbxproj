@@ -40,6 +40,8 @@
 		36AF071C8F7CE243E509F5B2 /* MarkdownRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DD5A33043D525912C69CEBC /* MarkdownRendering.swift */; };
 		05E82E625C01CD5ABD2F9BB0 /* MarkdownView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58EF24813B3BA8027B7E4CE4 /* MarkdownView.swift */; };
 		20B8954947389B3467C1A7CB /* MarkdownRenderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12F38C9DD8AA4D34367BAFDE /* MarkdownRenderingTests.swift */; };
+		B05F4D8E22F0E3DB9130228A /* Instrumentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = E55909C4415E30876974F00E /* Instrumentation.swift */; };
+		5E28F56096A496E7096ED069 /* ChatLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E152315242DF50CD0966A74 /* ChatLifecycleTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -88,6 +90,8 @@
 		8DD5A33043D525912C69CEBC /* MarkdownRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownRendering.swift; sourceTree = "<group>"; };
 		58EF24813B3BA8027B7E4CE4 /* MarkdownView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownView.swift; sourceTree = "<group>"; };
 		12F38C9DD8AA4D34367BAFDE /* MarkdownRenderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownRenderingTests.swift; sourceTree = "<group>"; };
+		E55909C4415E30876974F00E /* Instrumentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Instrumentation.swift; sourceTree = "<group>"; };
+		8E152315242DF50CD0966A74 /* ChatLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatLifecycleTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -116,6 +120,7 @@
 				D89C6EA7388FA2CCF9F5865E /* ConversationStore.swift */,
 				8A7B4FB8866C8CE81BA3E3A9 /* CredentialStore.swift */,
 				375A787B3245E247D326C13E /* DestinationsView.swift */,
+				E55909C4415E30876974F00E /* Instrumentation.swift */,
 				8DD5A33043D525912C69CEBC /* MarkdownRendering.swift */,
 				58EF24813B3BA8027B7E4CE4 /* MarkdownView.swift */,
 				6AA05C69CF6E5D026498FA04 /* OpenAICompatibleProvider.swift */,
@@ -146,6 +151,7 @@
 				70CB5BEDA315456CABBAE00D /* AppleFoundationModelsProviderTests.swift */,
 				C17D8ECF221517590115EA9F /* AppModelTests.swift */,
 				5802A399EFEE02A09B5C7492 /* AuthorizationCodePKCETests.swift */,
+				8E152315242DF50CD0966A74 /* ChatLifecycleTests.swift */,
 				D8A79F801F4849CBD50C8A61 /* ConversationStoreTests.swift */,
 				3AD4110CCB21039F8900BB91 /* CredentialStoreTests.swift */,
 				12F38C9DD8AA4D34367BAFDE /* MarkdownRenderingTests.swift */,
@@ -273,6 +279,7 @@
 				EBB5FC47BA62D841C32D9A8F /* AppleFoundationModelsProviderTests.swift in Sources */,
 				AD9F05EEA94FD7440F0DD8A9 /* AppModelTests.swift in Sources */,
 				16E260B200C5AD48A0F88E40 /* AuthorizationCodePKCETests.swift in Sources */,
+				5E28F56096A496E7096ED069 /* ChatLifecycleTests.swift in Sources */,
 				2663961FFDA2EEAEF58529A8 /* ConversationStoreTests.swift in Sources */,
 				F4E9D5D8ED49654292FFA71E /* CredentialStoreTests.swift in Sources */,
 				20B8954947389B3467C1A7CB /* MarkdownRenderingTests.swift in Sources */,
@@ -297,6 +304,7 @@
 				165C905840F4DCF56C27BF8F /* ConversationStore.swift in Sources */,
 				505322426BA37D7C41706A05 /* CredentialStore.swift in Sources */,
 				C04837E936D39B59FC3DAEDE /* DestinationsView.swift in Sources */,
+				B05F4D8E22F0E3DB9130228A /* Instrumentation.swift in Sources */,
 				36AF071C8F7CE243E509F5B2 /* MarkdownRendering.swift in Sources */,
 				05E82E625C01CD5ABD2F9BB0 /* MarkdownView.swift in Sources */,
 				4516AED0EA2C6143C441CAC1 /* OpenAICompatibleProvider.swift in Sources */,

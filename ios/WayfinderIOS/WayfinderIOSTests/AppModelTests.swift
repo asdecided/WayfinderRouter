@@ -476,7 +476,11 @@ final class AppModelTests: XCTestCase {
     XCTAssertEqual(model.executionPhase, .idle)
   }
 
-  func testRetryPreservesFailedAttemptAndCreatesNewAttempt() async {
+  /// UX-001. This previously asserted that retry appended a second copy of the
+  /// user's prompt. That behaviour misrepresented the user's actions in the
+  /// persisted history, so the expectation is inverted: a retry regenerates
+  /// the failed reply in place.
+  func testRetryRegeneratesTheFailedReplyInPlace() async {
     let provider = DeterministicMockProvider(
       configuration: .init(
         outcome: .failure(afterChunks: [], message: "Preview failed."),
@@ -491,17 +495,75 @@ final class AppModelTests: XCTestCase {
     await model.retry(messageID: failedID)
 
     let messages = model.activeThread?.messages ?? []
-    XCTAssertEqual(messages.count, 4)
-    XCTAssertEqual(
-      messages.filter { $0.role == .assistant }.map(\.status),
-      [.failed, .failed]
-    )
+    XCTAssertEqual(messages.map(\.role), [.user, .assistant])
     XCTAssertEqual(
       messages.filter { $0.role == .user }.map(\.content),
-      [
-        "Try this", "Try this",
-      ])
-    XCTAssertEqual(messages.first { $0.id == failedID }?.status, .failed)
+      ["Try this"],
+      "retry duplicated the user turn"
+    )
+    XCTAssertEqual(messages.last?.id, failedID, "the reply moved to a new slot")
+    XCTAssertEqual(messages.last?.status, .failed)
+  }
+
+  func testSuccessfulRetryReplacesTheFailedReplyWithItsAnswer() async {
+    let provider = SwitchableMockProvider(
+      first: .failure(afterChunks: ["half "], message: "Preview failed."),
+      second: .response(chunks: ["A ", "complete ", "answer."])
+    )
+    let model = AppModel(providerExecutor: provider)
+    model.draft = "Try this"
+    await model.sendMessage()
+    let failedID = try! XCTUnwrap(model.activeThread?.messages.last?.id)
+    XCTAssertEqual(model.activeThread?.messages.last?.status, .failed)
+
+    await model.retry(messageID: failedID)
+
+    let messages = model.activeThread?.messages ?? []
+    XCTAssertEqual(messages.count, 2)
+    XCTAssertEqual(messages.last?.id, failedID)
+    XCTAssertEqual(messages.last?.content, "A complete answer.")
+    XCTAssertEqual(messages.last?.status, .completed)
+  }
+
+  func testRetryLeavesAnUnsentDraftAlone() async {
+    // The audited build assigned the prompt to `draft` to re-send it, which
+    // silently destroyed whatever the user was typing.
+    let provider = DeterministicMockProvider(
+      configuration: .init(
+        outcome: .failure(afterChunks: [], message: "Preview failed."),
+        delay: .zero
+      )
+    )
+    let model = AppModel(providerExecutor: provider)
+    model.draft = "Try this"
+    await model.sendMessage()
+    let failedID = try! XCTUnwrap(model.activeThread?.messages.last?.id)
+    model.draft = "a different thought"
+
+    await model.retry(messageID: failedID)
+
+    XCTAssertEqual(model.draft, "a different thought")
+  }
+
+  func testRetryDoesNotResendThePromptToTheProvider() async {
+    // Regenerating must ask the provider the original question exactly once.
+    let provider = SwitchableMockProvider(
+      first: .failure(afterChunks: [], message: "Preview failed."),
+      second: .response(chunks: ["ok"])
+    )
+    let model = AppModel(providerExecutor: provider)
+    model.draft = "Only once"
+    await model.sendMessage()
+    let failedID = try! XCTUnwrap(model.activeThread?.messages.last?.id)
+
+    await model.retry(messageID: failedID)
+
+    let lastRequest = await provider.lastRequestMessages
+    XCTAssertEqual(
+      lastRequest.filter { $0.content == "Only once" }.count,
+      1,
+      "the prompt was sent twice in one request"
+    )
   }
 
   func testRestoreMarksPendingAssistantMessageInterrupted() async {
@@ -653,6 +715,52 @@ private actor CapturingProvider: ProviderExecutor {
   func capturedRequests() -> [ProviderExecutionRequest] {
     requests
   }
+}
+
+/// Answers the first request one way and every later request another, so a
+/// retry can be observed producing a different outcome from the attempt it
+/// replaces.
+private actor SwitchableMockProvider: ProviderExecutor {
+  private let first: DeterministicMockProvider.Outcome
+  private let second: DeterministicMockProvider.Outcome
+  private var requestCount = 0
+  private(set) var lastRequestMessages: [ProviderExecutionMessage] = []
+
+  init(
+    first: DeterministicMockProvider.Outcome,
+    second: DeterministicMockProvider.Outcome
+  ) {
+    self.first = first
+    self.second = second
+  }
+
+  func stream(
+    _ request: ProviderExecutionRequest
+  ) -> AsyncThrowingStream<ProviderExecutionEvent, Error> {
+    lastRequestMessages = request.messages
+    let outcome = requestCount == 0 ? first : second
+    requestCount += 1
+
+    let (stream, continuation) =
+      AsyncThrowingStream<ProviderExecutionEvent, Error>.makeStream()
+
+    switch outcome {
+    case .response(let chunks):
+      for chunk in chunks {
+        continuation.yield(.delta(chunk))
+      }
+      continuation.yield(.completed)
+      continuation.finish()
+    case .failure(let chunks, let message):
+      for chunk in chunks {
+        continuation.yield(.delta(chunk))
+      }
+      continuation.finish(throwing: ProviderExecutionError.rejected(message))
+    }
+    return stream
+  }
+
+  func cancel(requestID: UUID) {}
 }
 
 private struct StubProviderModelCatalog: ProviderModelCatalog {

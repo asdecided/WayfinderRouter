@@ -5,6 +5,9 @@ struct WayfinderIOSApp: App {
   @State private var appModel: AppModel
 
   init() {
+    let signpost = WayfinderSignposts.launch.beginInterval("appInit")
+    defer { WayfinderSignposts.launch.endInterval("appInit", signpost) }
+
     let credentialStore = KeychainCredentialStore()
     let cloudProvider = OpenAICompatibleProvider(
       configurations: OpenAICompatibleConfiguration.supported,

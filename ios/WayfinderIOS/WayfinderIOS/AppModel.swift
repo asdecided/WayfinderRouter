@@ -59,6 +59,19 @@ enum PrivacyPostureOption: String, CaseIterable, Identifiable {
   }
 }
 
+/// A storage operation that failed and can be tried again (UX-015).
+enum PersistenceRetryAction: Equatable {
+  case saveThread(ConversationThreadSnapshot)
+  case saveDraft
+  case restoreConversations
+  case openThread(UUID)
+  case refreshThreads
+  case deleteThread(UUID)
+  case deleteAllThreads
+  case applyRetention
+  case exportConversations
+}
+
 struct RoutePreview: Equatable, Identifiable {
   let destinationID: String
   let destinationName: String
@@ -140,6 +153,13 @@ final class AppModel {
   var threads: [ConversationThreadSnapshot] = []
   var activeThreadID: UUID?
   var persistenceNotice: String?
+  /// The operation a failed persistence path can re-attempt.
+  ///
+  /// The audited build surfaced nine distinct storage-failure strings through
+  /// blocking alerts with no way forward (UX-015). Each failure now carries
+  /// the work that failed, so the notice can offer Try Again inline.
+  private(set) var persistenceRetry: PersistenceRetryAction?
+  private(set) var isRetryingPersistence = false
   var credentialNotice: String?
   var accountNotice: String?
   var openRouterAccountState = ProviderAccountState(
@@ -170,6 +190,13 @@ final class AppModel {
   private var hasRestoredConversations = false
   private var hasRestoredCredentialStatuses = false
   private var draftSaveTask: Task<Void, Never>?
+  private let checkpointPolicy: StreamingCheckpointPolicy
+  private let clock = ContinuousClock()
+  private var deltasSinceCheckpoint = 0
+  private var lastCheckpoint: ContinuousClock.Instant?
+  /// Which terminal state an in-flight turn should settle into once its
+  /// cancellation lands: the user pressing Stop, or navigating away.
+  private var stopReason: ConversationMessageStatus = .stopped
 
   init(
     conversationStore: any ConversationStore = InMemoryConversationStore(),
@@ -181,8 +208,10 @@ final class AppModel {
     providerModelCatalog: any ProviderModelCatalog = EmptyProviderModelCatalog(),
     destinations: [RoutingDestination] = .previewCandidates,
     initialPersistenceNotice: String? = nil,
+    checkpointPolicy: StreamingCheckpointPolicy = .standard,
     now: @escaping () -> Date = Date.init
   ) {
+    self.checkpointPolicy = checkpointPolicy
     self.conversationStore = conversationStore
     self.credentialStore = credentialStore
     self.openRouterAccountController =
@@ -386,7 +415,17 @@ final class AppModel {
 
     hasRestoredConversations = true
     isRestoringConversations = true
-    defer { isRestoringConversations = false }
+
+    let signpost = WayfinderSignposts.conversation.beginInterval(
+      "restoreConversations"
+    )
+    defer {
+      WayfinderSignposts.conversation.endInterval(
+        "restoreConversations",
+        signpost
+      )
+      isRestoringConversations = false
+    }
 
     do {
       threads = try await conversationStore.listThreads()
@@ -407,8 +446,10 @@ final class AppModel {
       await applyRetentionPolicy()
       await interruptPendingMessages()
     } catch {
-      persistenceNotice =
-        "Wayfinder could not restore saved conversations. New chats remain available."
+      recordPersistenceFailure(
+        "Wayfinder could not restore saved conversations. New chats remain available.",
+        retry: .restoreConversations
+      )
     }
   }
 
@@ -422,9 +463,22 @@ final class AppModel {
       return
     }
 
+    await runTurn(prompt: prompt, regenerating: nil)
+  }
+
+  /// Runs one routed turn.
+  ///
+  /// `regenerating` names an existing assistant message to answer into. Retry
+  /// uses it so a second attempt replaces the failed turn where it stands
+  /// rather than appending a duplicate exchange (UX-001).
+  private func runTurn(
+    prompt: String,
+    regenerating assistantMessageID: UUID?
+  ) async {
     let requestID = UUID()
     executionPhase = .routing(requestID)
     submittedPrompt = prompt
+    stopReason = .stopped
 
     do {
       let routingRequest = RoutingRequest(
@@ -491,18 +545,30 @@ final class AppModel {
         executionSummary: destination.boundaryLabel
       )
       let providerMessages = providerHistory(appending: prompt)
-      let assistantMessageID = await beginTurn(
-        prompt: prompt,
-        receipt: receipt
-      )
+      let turn: TurnSlot
+      if let assistantMessageID {
+        guard
+          let reset = await resetAssistantMessage(
+            id: assistantMessageID,
+            receipt: receipt
+          )
+        else {
+          executionPhase = .idle
+          return
+        }
+        turn = reset
+      } else {
+        turn = await beginTurn(prompt: prompt, receipt: receipt)
+      }
 
       if executionPhase == .stopping(requestID) {
-        await finishMessage(id: assistantMessageID, status: .stopped)
+        await finishMessage(turn, status: stopReason)
         executionPhase = .idle
         return
       }
 
       executionPhase = .streaming(requestID)
+      beginStreamingCheckpointWindow()
       let stream = await providerExecutor.stream(
         ProviderExecutionRequest(
           id: requestID,
@@ -521,28 +587,25 @@ final class AppModel {
 
           switch event {
           case .delta(let delta):
-            await appendDelta(delta, to: assistantMessageID)
+            await appendDelta(delta, to: turn)
           case .completed:
             reachedTerminalEvent = true
-            await finishMessage(
-              id: assistantMessageID,
-              status: .completed
-            )
+            await finishMessage(turn, status: .completed)
           }
         }
 
         if !reachedTerminalEvent {
           let status: ConversationMessageStatus =
-            executionPhase == .stopping(requestID) ? .stopped : .interrupted
-          await finishMessage(id: assistantMessageID, status: status)
+            executionPhase == .stopping(requestID) ? stopReason : .interrupted
+          await finishMessage(turn, status: status)
         }
       } catch is CancellationError {
         let status: ConversationMessageStatus =
-          executionPhase == .stopping(requestID) ? .stopped : .interrupted
-        await finishMessage(id: assistantMessageID, status: status)
+          executionPhase == .stopping(requestID) ? stopReason : .interrupted
+        await finishMessage(turn, status: status)
       } catch {
         await failMessage(
-          id: assistantMessageID,
+          turn,
           message: userFacingExecutionError(error)
         )
       }
@@ -566,14 +629,31 @@ final class AppModel {
   }
 
   func stopGenerating() async {
+    await interruptActiveTurn(as: .stopped)
+  }
+
+  /// Cancels an in-flight turn and states how it should settle.
+  ///
+  /// Stopping is the user's decision; navigating away is not, so the two are
+  /// recorded differently rather than both reading "You stopped this response".
+  private func interruptActiveTurn(
+    as reason: ConversationMessageStatus
+  ) async {
     guard let requestID = executionPhase.requestID else {
       return
     }
 
+    stopReason = reason
     executionPhase = .stopping(requestID)
     await providerExecutor.cancel(requestID: requestID)
   }
 
+  /// Regenerates a failed, stopped, or interrupted reply in place.
+  ///
+  /// The audited build re-injected the prompt as a brand-new user message, so
+  /// the transcript — and the persisted history — showed the user asking twice
+  /// (UX-001). The second attempt now replaces the first where it stands, and
+  /// the composer draft is left untouched.
   func retry(messageID: UUID) async {
     guard
       !executionPhase.isActive,
@@ -590,8 +670,7 @@ final class AppModel {
       return
     }
 
-    draft = prompt
-    await sendMessage()
+    await runTurn(prompt: prompt, regenerating: messageID)
   }
 
   func clearPreview() {
@@ -602,11 +681,10 @@ final class AppModel {
     selectedDestinationID = id
   }
 
+  /// Navigation stays available while a reply streams (UX-008). The in-flight
+  /// turn is cancelled and settles as interrupted against its own thread.
   func startNewChat() async {
-    guard !executionPhase.isActive else {
-      return
-    }
-
+    await interruptActiveTurn(as: .interrupted)
     await persistActiveDraft()
     draft = ""
     submittedPrompt = nil
@@ -617,15 +695,12 @@ final class AppModel {
   }
 
   func selectThread(id: UUID) async {
-    guard !executionPhase.isActive else {
-      return
-    }
-
     guard id != activeThreadID else {
       selectedTab = .chat
       return
     }
 
+    await interruptActiveTurn(as: .interrupted)
     await persistActiveDraft()
 
     do {
@@ -640,7 +715,10 @@ final class AppModel {
       selectedTab = .chat
       await persistWorkspace()
     } catch {
-      persistenceNotice = "Wayfinder could not open that conversation."
+      recordPersistenceFailure(
+        "Wayfinder could not open that conversation.",
+        retry: .openThread(id)
+      )
     }
   }
 
@@ -673,7 +751,10 @@ final class AppModel {
     do {
       return try await conversationStore.exportData()
     } catch {
-      persistenceNotice = "Wayfinder could not prepare the conversation export."
+      recordPersistenceFailure(
+        "Wayfinder could not prepare the conversation export.",
+        retry: .exportConversations
+      )
       return nil
     }
   }
@@ -692,7 +773,10 @@ final class AppModel {
       await refreshThreads()
       await persistWorkspace()
     } catch {
-      persistenceNotice = "Wayfinder could not delete that conversation."
+      recordPersistenceFailure(
+        "Wayfinder could not delete that conversation.",
+        retry: .deleteThread(id)
+      )
     }
   }
 
@@ -706,14 +790,27 @@ final class AppModel {
       routePreviewState = .idle
       await persistWorkspace()
     } catch {
-      persistenceNotice = "Wayfinder could not clear saved conversations."
+      recordPersistenceFailure(
+        "Wayfinder could not clear saved conversations.",
+        retry: .deleteAllThreads
+      )
     }
+  }
+
+  /// Identifies the assistant message a running turn writes into.
+  ///
+  /// Turns address their thread explicitly rather than through `activeThread`,
+  /// so a turn still finalises correctly if the user navigates away from the
+  /// conversation while it is in flight (UX-008).
+  private struct TurnSlot: Equatable {
+    let threadID: UUID
+    let messageID: UUID
   }
 
   private func beginTurn(
     prompt: String,
     receipt: StoredRouteReceipt
-  ) async -> UUID {
+  ) async -> TurnSlot {
     let timestamp = now()
     let userMessage = ConversationMessageSnapshot(
       id: UUID(),
@@ -757,12 +854,41 @@ final class AppModel {
       await refreshThreads()
       await persistWorkspace()
     } catch {
-      persistenceNotice =
-        "This turn is visible now, but Wayfinder could not save it."
+      recordPersistenceFailure(
+        "This turn is visible now, but Wayfinder could not save it.",
+        retry: .saveThread(thread)
+      )
       upsertInMemory(thread)
     }
 
-    return assistantMessage.id
+    return TurnSlot(threadID: thread.id, messageID: assistantMessage.id)
+  }
+
+  /// Clears an existing assistant message so a retry can answer into its slot.
+  private func resetAssistantMessage(
+    id messageID: UUID,
+    receipt: StoredRouteReceipt
+  ) async -> TurnSlot? {
+    guard var thread = activeThread,
+      let index = thread.messages.firstIndex(where: { $0.id == messageID })
+    else {
+      return nil
+    }
+
+    let message = thread.messages[index]
+    thread.messages[index] = ConversationMessageSnapshot(
+      id: message.id,
+      role: message.role,
+      content: "",
+      createdAt: message.createdAt,
+      status: .pending,
+      routeReceipt: receipt
+    )
+    thread.updatedAt = now()
+
+    let slot = TurnSlot(threadID: thread.id, messageID: messageID)
+    await saveUpdatedThread(thread)
+    return slot
   }
 
   private func persistFailedTurn(
@@ -809,15 +935,23 @@ final class AppModel {
     await saveUpdatedThread(thread)
   }
 
+  /// Applies one streamed delta.
+  ///
+  /// This is the hot path: it touches memory only. Encoding the thread and
+  /// writing it to SwiftData here — as the audited build did — made every
+  /// token cost a full-thread re-encode plus two saves (UX-021).
   private func appendDelta(
     _ delta: String,
-    to messageID: UUID
+    to turn: TurnSlot
   ) async {
-    guard !delta.isEmpty, var thread = activeThread,
-      let index = thread.messages.firstIndex(where: { $0.id == messageID })
+    guard !delta.isEmpty,
+      var thread = thread(id: turn.threadID),
+      let index = thread.messages.firstIndex(where: { $0.id == turn.messageID })
     else {
       return
     }
+
+    WayfinderSignposts.streaming.emitEvent("applyDelta")
 
     let message = thread.messages[index]
     thread.messages[index] = ConversationMessageSnapshot(
@@ -829,15 +963,20 @@ final class AppModel {
       routeReceipt: message.routeReceipt
     )
     thread.updatedAt = now()
-    await saveUpdatedThread(thread)
+    upsertInMemory(thread)
+
+    deltasSinceCheckpoint += 1
+    if shouldCheckpoint() {
+      await checkpoint(thread)
+    }
   }
 
   private func finishMessage(
-    id messageID: UUID,
+    _ turn: TurnSlot,
     status: ConversationMessageStatus
   ) async {
-    guard var thread = activeThread,
-      let index = thread.messages.firstIndex(where: { $0.id == messageID })
+    guard var thread = thread(id: turn.threadID),
+      let index = thread.messages.firstIndex(where: { $0.id == turn.messageID })
     else {
       return
     }
@@ -856,15 +995,16 @@ final class AppModel {
       routeReceipt: message.routeReceipt
     )
     thread.updatedAt = now()
+    // Terminal states always reach storage, whatever the checkpoint cadence.
     await saveUpdatedThread(thread)
   }
 
   private func failMessage(
-    id messageID: UUID,
+    _ turn: TurnSlot,
     message failureMessage: String
   ) async {
-    guard var thread = activeThread,
-      let index = thread.messages.firstIndex(where: { $0.id == messageID })
+    guard var thread = thread(id: turn.threadID),
+      let index = thread.messages.firstIndex(where: { $0.id == turn.messageID })
     else {
       return
     }
@@ -882,17 +1022,113 @@ final class AppModel {
     await saveUpdatedThread(thread)
   }
 
+  // MARK: - Streaming checkpoints
+
+  private func beginStreamingCheckpointWindow() {
+    deltasSinceCheckpoint = 0
+    lastCheckpoint = clock.now
+  }
+
+  private func shouldCheckpoint() -> Bool {
+    if deltasSinceCheckpoint >= checkpointPolicy.deltaInterval {
+      return true
+    }
+    guard let lastCheckpoint else {
+      return true
+    }
+    return clock.now - lastCheckpoint >= checkpointPolicy.minimumInterval
+  }
+
+  /// A mid-stream write. Unlike a terminal save it does not touch the
+  /// workspace record, which cannot have changed while a reply is arriving.
+  private func checkpoint(_ thread: ConversationThreadSnapshot) async {
+    deltasSinceCheckpoint = 0
+    lastCheckpoint = clock.now
+
+    let state = WayfinderSignposts.streaming.beginInterval("checkpoint")
+    defer { WayfinderSignposts.streaming.endInterval("checkpoint", state) }
+
+    do {
+      try await conversationStore.save(thread: thread)
+    } catch {
+      recordPersistenceFailure(
+        "This reply is visible now, but Wayfinder could not save it.",
+        retry: .saveThread(thread)
+      )
+    }
+  }
+
   private func saveUpdatedThread(
     _ thread: ConversationThreadSnapshot
   ) async {
     upsertInMemory(thread)
+    deltasSinceCheckpoint = 0
+    lastCheckpoint = clock.now
 
     do {
       try await conversationStore.save(thread: thread)
       await persistWorkspace()
     } catch {
-      persistenceNotice =
-        "This turn is visible now, but Wayfinder could not save it."
+      recordPersistenceFailure(
+        "This turn is visible now, but Wayfinder could not save it.",
+        retry: .saveThread(thread)
+      )
+    }
+  }
+
+  private func thread(id: UUID) -> ConversationThreadSnapshot? {
+    threads.first { $0.id == id }
+  }
+
+  // MARK: - Persistence recovery
+
+  private func recordPersistenceFailure(
+    _ message: String,
+    retry: PersistenceRetryAction?
+  ) {
+    persistenceNotice = message
+    persistenceRetry = retry
+  }
+
+  func dismissPersistenceNotice() {
+    persistenceNotice = nil
+    persistenceRetry = nil
+  }
+
+  /// Re-attempts the operation that produced the current notice. The notice
+  /// clears only if the retry succeeds; otherwise it is replaced by whatever
+  /// the second attempt reported.
+  func retryPersistence() async {
+    guard let action = persistenceRetry, !isRetryingPersistence else {
+      return
+    }
+
+    isRetryingPersistence = true
+    defer { isRetryingPersistence = false }
+
+    persistenceNotice = nil
+    persistenceRetry = nil
+
+    switch action {
+    case .saveThread(let thread):
+      await saveUpdatedThread(thread)
+    case .saveDraft:
+      await saveDraft()
+    case .restoreConversations:
+      hasRestoredConversations = false
+      await restoreConversations()
+    case .openThread(let id):
+      await selectThread(id: id)
+    case .refreshThreads:
+      await refreshThreads()
+    case .deleteThread(let id):
+      await deleteThread(id: id)
+    case .deleteAllThreads:
+      await deleteAllThreads()
+    case .applyRetention:
+      await applyRetentionPolicy()
+    case .exportConversations:
+      _ = await exportConversations()
     }
   }
 
@@ -1111,7 +1347,10 @@ final class AppModel {
       try await conversationStore.save(thread: thread)
       upsertInMemory(thread)
     } catch {
-      persistenceNotice = "Wayfinder could not save the current draft."
+      recordPersistenceFailure(
+        "Wayfinder could not save the current draft.",
+        retry: .saveDraft
+      )
     }
   }
 
@@ -1126,7 +1365,10 @@ final class AppModel {
     do {
       try await conversationStore.save(workspace: workspace)
     } catch {
-      persistenceNotice = "Wayfinder could not save the current draft."
+      recordPersistenceFailure(
+        "Wayfinder could not save the current draft.",
+        retry: .saveDraft
+      )
     }
   }
 
@@ -1134,7 +1376,10 @@ final class AppModel {
     do {
       threads = try await conversationStore.listThreads()
     } catch {
-      persistenceNotice = "Wayfinder could not refresh saved conversations."
+      recordPersistenceFailure(
+        "Wayfinder could not refresh saved conversations.",
+        retry: .refreshThreads
+      )
     }
   }
 
@@ -1161,19 +1406,51 @@ final class AppModel {
         await persistWorkspace()
       }
     } catch {
-      persistenceNotice = "Wayfinder could not apply conversation retention."
+      recordPersistenceFailure(
+        "Wayfinder could not apply conversation retention.",
+        retry: .applyRetention
+      )
     }
   }
 
+  /// Replaces a thread in the in-memory list.
+  ///
+  /// Sorting on every call was fine when this ran once per turn; it now runs
+  /// once per streamed delta. The active thread is almost always already in
+  /// its correct position, so the ordered case skips the sort entirely.
   private func upsertInMemory(_ thread: ConversationThreadSnapshot) {
-    threads.removeAll { $0.id == thread.id }
-    threads.append(thread)
-    threads.sort {
-      if $0.updatedAt == $1.updatedAt {
-        return $0.id.uuidString < $1.id.uuidString
+    if let index = threads.firstIndex(where: { $0.id == thread.id }) {
+      threads[index] = thread
+      if isCorrectlyOrdered(at: index) {
+        return
       }
-      return $0.updatedAt > $1.updatedAt
+    } else {
+      threads.append(thread)
     }
+
+    threads.sort(by: Self.isOrderedBefore)
+  }
+
+  private func isCorrectlyOrdered(at index: Int) -> Bool {
+    if index > 0, !Self.isOrderedBefore(threads[index - 1], threads[index]) {
+      return false
+    }
+    if index + 1 < threads.count,
+      !Self.isOrderedBefore(threads[index], threads[index + 1])
+    {
+      return false
+    }
+    return true
+  }
+
+  private static func isOrderedBefore(
+    _ lhs: ConversationThreadSnapshot,
+    _ rhs: ConversationThreadSnapshot
+  ) -> Bool {
+    if lhs.updatedAt == rhs.updatedAt {
+      return lhs.id.uuidString < rhs.id.uuidString
+    }
+    return lhs.updatedAt > rhs.updatedAt
   }
 
   private func restorePreview(from thread: ConversationThreadSnapshot) {
