@@ -4,6 +4,55 @@ User-visible changes to Wayfinder, by release. Follows the spirit of
 [Keep a Changelog](https://keepachangelog.com/): user impact over implementation
 details, release history over commit history.
 
+## Mobile v0.2.0 — Unreleased
+
+### Added
+
+- **Rendered replies, message actions, and a first-launch chooser on iPhone and
+  iPad** (WF-DESIGN-0020, WF-ROADMAP-0016, `docs/mobile-ux-audit.md`). Assistant
+  turns now render markdown — headings, lists, links, inline code, fenced code
+  with a copy affordance, quotes, and tables — built on `AttributedString`
+  rather than a third-party package. Any turn can be copied or shared from a
+  context menu. First launch offers the roadmap's chooser (Use Apple On-Device
+  when the device reports it available, Connect an Account, Add an API Key),
+  every option skippable into a useful no-destination state, and Chat now states
+  whether a destination is actually ready — so saving an API key finally has a
+  visible consequence outside the key screens. Conversations gain search,
+  rename, pin, and relative timestamps. Route receipts adopt the contract's
+  "Ran …" execution grammar and explain the routing score in words alongside
+  the reason codes and fallback truth the routing core already returned.
+
+### Changed
+
+- **Retry regenerates a failed reply in place** rather than re-sending the
+  prompt as a new user turn, so the persisted history no longer shows the user
+  asking twice. Streaming writes are checkpointed instead of re-encoding and
+  saving the whole conversation on every token, while an interrupted reply still
+  reconciles correctly on the next launch. Typing stays available while a reply
+  streams, and starting a new chat or switching conversations is no longer
+  blocked during generation.
+
+- **Storage failures are recoverable in place.** Every persistence failure now
+  carries the operation that failed and offers Try Again inline; no blocking
+  alert remains for a recoverable failure.
+
+- **The mobile client has a design system.** Light, dark, and increased-contrast
+  appearances are each designed rather than derived, with contrast ratios
+  asserted in tests; route boundary carries the macOS local/hosted colour
+  semantics paired with per-boundary glyphs so colour never carries the
+  distinction alone. The app ships an icon and a launch screen for the first
+  time. Every state change animates with a spring and degrades to a crossfade
+  under Reduce Motion, and one haptic vocabulary drives both touch feedback and
+  VoiceOver announcements.
+
+- **Accessibility.** Assistant turns announce "Wayfinder" symmetrically with
+  "You", streaming start/completion/failure are announced, the drawer has an
+  explicit close control, a rotor navigates between turns, and every composer
+  control meets the 44 pt minimum and scales with Dynamic Type.
+
+Device-only and Xcode-only verification for this work is enumerated, unclaimed,
+in `docs/mobile-fidelity.md`.
+
 ## Desktop v0.1.0 — Unreleased
 
 ### Added
