@@ -114,6 +114,20 @@ approved HTTPS redirect or reviewed custom scheme. Cancellation, denial,
 callback mismatch, timeout, and token exchange failure are distinct terminal
 states. A general `WKWebView` is not an authentication agent.
 
+The shared authorization-code controller owns the pending verifier and state,
+token exchange, and Keychain write. SwiftUI receives only a bounded challenge:
+the provider ID, authorization URL, callback scheme, and an opaque
+authorization ID. The verifier and returned credential never enter view or
+`AppModel` state.
+
+Provider-specific adapters supply reviewed endpoints, callback shape, scopes,
+request encoding, and the response field containing the resulting credential.
+The controller accepts HTTPS authorization and exchange endpoints only, bounds
+the exchange response, rejects duplicate callback parameters, and clears
+pending authorization on every terminal result. Adding this engine does not
+approve any provider account flow; each adapter still requires its own
+qualification artifact and compiled configuration.
+
 ## Device authorization
 
 Documented RFC 8628 providers expose verification URL, user code, expiry, and
