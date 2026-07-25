@@ -7,7 +7,7 @@ struct WayfinderIOSApp: App {
   init() {
     let credentialStore = KeychainCredentialStore()
     let provider = OpenAICompatibleProvider(
-      configuration: .openAIPlatform,
+      configurations: OpenAICompatibleConfiguration.supported,
       credentialStore: credentialStore
     )
 
