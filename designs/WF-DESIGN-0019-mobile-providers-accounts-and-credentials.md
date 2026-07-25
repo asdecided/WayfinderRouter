@@ -213,6 +213,12 @@ The adapter streams ordered output, supports cancellation, persists no native
 session, and translates only parameters supported by the framework. Under
 On-Device Only it can never fall back to a hosted or paired destination.
 
+The implemented adapter treats `LanguageModelSession.streamResponse` values as
+aggregated snapshots and emits only their ordered suffixes. It bounds message
+count, per-message bytes, total request bytes, instructions, and response
+bytes. Because the public framework does not expose a stable context-window
+value, the destination publishes no fabricated context limit.
+
 Apple on-device is eligible for appropriate local/easy work when available; it
 is not injected into existing routes. Onboarding may recommend it only with
 visible confirmation.
