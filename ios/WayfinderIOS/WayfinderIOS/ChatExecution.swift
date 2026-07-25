@@ -1,9 +1,36 @@
 import Foundation
 
+enum ProviderExecutionMessageRole: String, Equatable, Sendable {
+  case system
+  case user
+  case assistant
+}
+
+struct ProviderExecutionMessage: Equatable, Sendable {
+  let role: ProviderExecutionMessageRole
+  let content: String
+}
+
 struct ProviderExecutionRequest: Equatable, Sendable {
   let id: UUID
   let prompt: String
   let destinationID: String
+  let messages: [ProviderExecutionMessage]
+
+  init(
+    id: UUID,
+    prompt: String,
+    destinationID: String,
+    messages: [ProviderExecutionMessage]? = nil
+  ) {
+    self.id = id
+    self.prompt = prompt
+    self.destinationID = destinationID
+    self.messages =
+      messages ?? [
+        ProviderExecutionMessage(role: .user, content: prompt)
+      ]
+  }
 }
 
 enum ProviderExecutionEvent: Equatable, Sendable {
@@ -12,10 +39,37 @@ enum ProviderExecutionEvent: Equatable, Sendable {
 }
 
 enum ProviderExecutionError: LocalizedError, Equatable, Sendable {
+  case authenticationRequired
+  case permissionDenied
+  case usageLimited
+  case networkUnavailable
+  case timedOut
+  case invalidResponse
+  case requestTooLarge
+  case responseTooLarge
+  case interrupted
   case rejected(String)
 
   var errorDescription: String? {
     switch self {
+    case .authenticationRequired:
+      "Add or replace this provider's API key in Settings."
+    case .permissionDenied:
+      "This API key cannot use the selected model."
+    case .usageLimited:
+      "This provider is currently rate limited or out of API credit."
+    case .networkUnavailable:
+      "Wayfinder could not reach this provider. Check your connection."
+    case .timedOut:
+      "The provider took too long to respond."
+    case .invalidResponse:
+      "The provider returned a response Wayfinder could not read."
+    case .requestTooLarge:
+      "This message is too large to send."
+    case .responseTooLarge:
+      "The provider response exceeded Wayfinder's safety limit."
+    case .interrupted:
+      "The provider stopped before completing this reply."
     case .rejected(let message):
       message
     }

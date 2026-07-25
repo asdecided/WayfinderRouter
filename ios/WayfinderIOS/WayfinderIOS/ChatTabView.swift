@@ -67,6 +67,8 @@ struct ChatView: View {
         ComposerView(
           draft: $appModel.draft,
           privacyPosture: $appModel.privacyPosture,
+          selectedDestinationID: $appModel.selectedDestinationID,
+          destinations: appModel.destinations,
           canSubmit: appModel.canSendMessage,
           isGenerating: appModel.executionPhase.isActive,
           submit: {
@@ -351,7 +353,9 @@ private struct RouteReceiptSheet: View {
 
         Section {
           Label(
-            "This response used the deterministic Phase 2 provider. No network request was made.",
+            receipt.destinationID.hasSuffix("-preview")
+              ? "This response used the deterministic preview provider. No network request was made."
+              : "This response was sent directly from this device to the selected provider.",
             systemImage: "checkmark.shield"
           )
           .foregroundStyle(.secondary)
@@ -375,6 +379,8 @@ private struct RouteReceiptSheet: View {
 private struct ComposerView: View {
   @Binding var draft: String
   @Binding var privacyPosture: PrivacyPostureOption
+  @Binding var selectedDestinationID: String?
+  let destinations: [RoutingDestination]
   let canSubmit: Bool
   let isGenerating: Bool
   let submit: () -> Void
@@ -410,9 +416,25 @@ private struct ComposerView: View {
         .accessibilityLabel("Add")
         .accessibilityHint("Attachments are not available in this build")
 
-        Label("Automatic", systemImage: "point.3.connected.trianglepath.dotted")
+        Menu {
+          Picker("Destination", selection: $selectedDestinationID) {
+            Text("Automatic — Wayfinder chooses")
+              .tag(nil as String?)
+            ForEach(destinations) { destination in
+              Text(destination.displayName)
+                .tag(Optional(destination.id))
+            }
+          }
+        } label: {
+          Label(
+            selectedDestinationName,
+            systemImage: "point.3.connected.trianglepath.dotted"
+          )
           .font(.subheadline.weight(.medium))
           .foregroundStyle(.secondary)
+        }
+        .accessibilityLabel("Destination")
+        .accessibilityValue(selectedDestinationName)
 
         Spacer(minLength: 8)
 
@@ -459,5 +481,13 @@ private struct ComposerView: View {
         .stroke(Color.primary.opacity(0.08), lineWidth: 1)
     }
     .shadow(color: .black.opacity(0.08), radius: 14, y: 5)
+  }
+
+  private var selectedDestinationName: String {
+    guard let selectedDestinationID else {
+      return "Automatic"
+    }
+    return destinations.first(where: { $0.id == selectedDestinationID })?
+      .displayName ?? "Destination"
   }
 }

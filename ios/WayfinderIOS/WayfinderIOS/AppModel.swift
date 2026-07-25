@@ -145,25 +145,8 @@ final class AppModel {
   var retentionPolicy: ConversationRetentionPolicy = .forever
   var executionPhase: ChatExecutionPhase = .idle
   var credentialStatuses: [ProviderCredentialStatus] = []
-
-  let destinations: [PreviewDestination] = [
-    PreviewDestination(
-      id: "device-preview",
-      displayName: "On-device preview",
-      detail: "Routing candidate only",
-      routeTier: "local",
-      boundary: .onDevice,
-      boundaryLabel: "On this device"
-    ),
-    PreviewDestination(
-      id: "hosted-preview",
-      displayName: "Hosted preview",
-      detail: "Routing candidate only",
-      routeTier: "cloud",
-      boundary: .hosted,
-      boundaryLabel: "Hosted cloud"
-    ),
-  ]
+  var destinations: [RoutingDestination]
+  var selectedDestinationID: String?
 
   private let routingEngine: RoutingEngine
   private let conversationStore: any ConversationStore
@@ -178,12 +161,14 @@ final class AppModel {
     conversationStore: any ConversationStore = InMemoryConversationStore(),
     credentialStore: any CredentialStore = KeychainCredentialStore(),
     providerExecutor: any ProviderExecutor = DeterministicMockProvider(),
+    destinations: [RoutingDestination] = .previewCandidates,
     initialPersistenceNotice: String? = nil,
     now: @escaping () -> Date = Date.init
   ) {
     self.conversationStore = conversationStore
     self.credentialStore = credentialStore
     self.providerExecutor = providerExecutor
+    self.destinations = destinations
     self.persistenceNotice = initialPersistenceNotice
     self.now = now
 
@@ -215,6 +200,14 @@ final class AppModel {
 
   var configuredCredentialCount: Int {
     credentialStatuses.count(where: \.isConfigured)
+  }
+
+  var selectedDestinationName: String {
+    guard let selectedDestinationID else {
+      return "Automatic"
+    }
+    return destinations.first(where: { $0.id == selectedDestinationID })?
+      .displayName ?? "Destination"
   }
 
   func isCredentialConfigured(_ id: CredentialID) -> Bool {
@@ -307,32 +300,49 @@ final class AppModel {
     submittedPrompt = prompt
 
     do {
-      let plan = try routingEngine.plan(
-        request: RoutingRequest(
-          schemaVersion: 1,
-          requestId: requestID.uuidString,
-          prompt: prompt,
-          privacyPosture: privacyPosture.bridgeValue,
-          requirements: RoutingRequirements(
-            contextTokens: nil,
-            imageInput: false,
-            tools: false,
-            streaming: true
-          )
-        ),
-        candidates: destinations.map(\.bridgeSnapshot)
+      let routingRequest = RoutingRequest(
+        schemaVersion: 1,
+        requestId: requestID.uuidString,
+        prompt: prompt,
+        privacyPosture: privacyPosture.bridgeValue,
+        requirements: RoutingRequirements(
+          contextTokens: nil,
+          imageInput: false,
+          tools: false,
+          streaming: true
+        )
       )
+      let plan: RoutePlan
+      if let selectedDestinationID,
+        let pinnedDestination = destinations.first(where: {
+          $0.id == selectedDestinationID
+        })
+      {
+        let pinnedEngine = try RoutingEngine(
+          configuration: RoutingConfiguration(
+            tiers: [RoutingTier(minScore: 0, model: "pinned")]
+          )
+        )
+        plan = try pinnedEngine.plan(
+          request: routingRequest,
+          candidates: [pinnedDestination.pinnedBridgeSnapshot]
+        )
+      } else {
+        plan = try routingEngine.plan(
+          request: routingRequest,
+          candidates: destinations.map(\.bridgeSnapshot)
+        )
+      }
 
       guard
         let selectedID = plan.selectedDestinationId,
         let destination = destinations.first(where: { $0.id == selectedID })
       else {
-        routePreviewState = .unavailable(
-          "No destination is eligible under \(privacyPosture.title)."
-        )
+        let message = unavailableDestinationMessage()
+        routePreviewState = .unavailable(message)
         await persistFailedTurn(
           prompt: prompt,
-          message: "No eligible destination is available under \(privacyPosture.title)."
+          message: message
         )
         executionPhase = .idle
         return
@@ -353,6 +363,7 @@ final class AppModel {
         recommendation: plan.recommendation,
         executionSummary: destination.boundaryLabel
       )
+      let providerMessages = providerHistory(appending: prompt)
       let assistantMessageID = await beginTurn(
         prompt: prompt,
         receipt: receipt
@@ -369,7 +380,8 @@ final class AppModel {
         ProviderExecutionRequest(
           id: requestID,
           prompt: prompt,
-          destinationID: destination.id
+          destinationID: destination.id,
+          messages: providerMessages
         )
       )
       var reachedTerminalEvent = false
@@ -457,6 +469,10 @@ final class AppModel {
 
   func clearPreview() {
     routePreviewState = .idle
+  }
+
+  func selectDestination(_ id: String?) {
+    selectedDestinationID = id
   }
 
   func startNewChat() async {
@@ -784,7 +800,7 @@ final class AppModel {
     {
       return description
     }
-    return "The preview provider could not finish this reply."
+    return "The provider could not finish this reply."
   }
 
   private func refreshCredentialStatuses() async -> Bool {
@@ -799,6 +815,7 @@ final class AppModel {
         )
       }
       credentialStatuses = statuses
+      updateDestinationReadiness()
       credentialNotice = nil
       return true
     } catch {
@@ -814,6 +831,83 @@ final class AppModel {
       return description
     }
     return "Wayfinder could not update the iOS Keychain."
+  }
+
+  private func updateDestinationReadiness() {
+    destinations = destinations.map { destination in
+      guard let credentialID = destination.credentialID else {
+        return destination
+      }
+      let isConfigured =
+        credentialStatuses.first(where: { $0.id == credentialID })?
+        .isConfigured ?? false
+      return destination.withReadiness(isConfigured ? .ready : .signedOut)
+    }
+  }
+
+  private func unavailableDestinationMessage() -> String {
+    if let selectedDestinationID,
+      let destination = destinations.first(where: {
+        $0.id == selectedDestinationID
+      })
+    {
+      if destination.readiness == .signedOut {
+        return
+          "Add the \(destination.providerName) API key in Settings before using \(destination.displayName)."
+      }
+      return "\(destination.displayName) is not currently available under \(privacyPosture.title)."
+    }
+    return
+      "No Automatic destination is eligible under \(privacyPosture.title). Choose a destination or update routing."
+  }
+
+  private func providerHistory(
+    appending prompt: String
+  ) -> [ProviderExecutionMessage] {
+    var history: [ProviderExecutionMessage] = []
+    var pendingUser: ConversationMessageSnapshot?
+
+    for message in activeThread?.messages ?? [] {
+      switch message.role {
+      case .system:
+        if message.status == .completed {
+          history.append(
+            ProviderExecutionMessage(
+              role: .system,
+              content: message.content
+            )
+          )
+        }
+      case .user:
+        pendingUser = message
+      case .assistant:
+        defer { pendingUser = nil }
+        guard
+          message.status == .completed,
+          let pendingUser,
+          pendingUser.status == .completed
+        else {
+          continue
+        }
+        history.append(
+          ProviderExecutionMessage(
+            role: .user,
+            content: pendingUser.content
+          )
+        )
+        history.append(
+          ProviderExecutionMessage(
+            role: .assistant,
+            content: message.content
+          )
+        )
+      }
+    }
+
+    history.append(
+      ProviderExecutionMessage(role: .user, content: prompt)
+    )
+    return history
   }
 
   private func persistActiveDraft() async {
@@ -926,25 +1020,54 @@ final class AppModel {
   }
 }
 
-struct PreviewDestination: Identifiable, Hashable {
+struct RoutingDestination: Identifiable, Hashable {
   let id: String
+  let providerID: String
+  let providerName: String
+  let modelID: String
   let displayName: String
   let detail: String
   let routeTier: String
   let boundary: ExecutionBoundary
   let boundaryLabel: String
+  let billingClass: BillingClass
+  let readiness: ProviderReadiness
+  let automaticEligible: Bool
+  let contextWindow: UInt64?
+  let credentialID: CredentialID?
 
   var bridgeSnapshot: DestinationSnapshot {
     DestinationSnapshot(
       id: id,
-      providerId: "preview",
-      modelId: id,
+      providerId: providerID,
+      modelId: modelID,
       displayName: displayName,
       routeTier: routeTier,
       executionBoundary: boundary,
-      readiness: .ready,
-      billingClass: boundary == .onDevice ? .onDevice : .unknown,
-      contextWindow: 32_768,
+      readiness: readiness,
+      billingClass: billingClass,
+      contextWindow: contextWindow,
+      capabilities: DestinationCapabilities(
+        text: true,
+        streaming: true,
+        imageInput: false,
+        tools: false
+      ),
+      automaticEligible: automaticEligible
+    )
+  }
+
+  var pinnedBridgeSnapshot: DestinationSnapshot {
+    DestinationSnapshot(
+      id: id,
+      providerId: providerID,
+      modelId: modelID,
+      displayName: displayName,
+      routeTier: "pinned",
+      executionBoundary: boundary,
+      readiness: readiness,
+      billingClass: billingClass,
+      contextWindow: contextWindow,
       capabilities: DestinationCapabilities(
         text: true,
         streaming: true,
@@ -954,4 +1077,79 @@ struct PreviewDestination: Identifiable, Hashable {
       automaticEligible: true
     )
   }
+
+  func withReadiness(_ readiness: ProviderReadiness) -> Self {
+    RoutingDestination(
+      id: id,
+      providerID: providerID,
+      providerName: providerName,
+      modelID: modelID,
+      displayName: displayName,
+      detail: detail,
+      routeTier: routeTier,
+      boundary: boundary,
+      boundaryLabel: boundaryLabel,
+      billingClass: billingClass,
+      readiness: readiness,
+      automaticEligible: automaticEligible,
+      contextWindow: contextWindow,
+      credentialID: credentialID
+    )
+  }
+}
+
+extension [RoutingDestination] {
+  static let previewCandidates: [RoutingDestination] = [
+    RoutingDestination(
+      id: "device-preview",
+      providerID: "preview",
+      providerName: "Preview",
+      modelID: "device-preview",
+      displayName: "On-device preview",
+      detail: "Deterministic test provider",
+      routeTier: "local",
+      boundary: .onDevice,
+      boundaryLabel: "On this device",
+      billingClass: .onDevice,
+      readiness: .ready,
+      automaticEligible: true,
+      contextWindow: 32_768,
+      credentialID: nil
+    ),
+    RoutingDestination(
+      id: "hosted-preview",
+      providerID: "preview",
+      providerName: "Preview",
+      modelID: "hosted-preview",
+      displayName: "Hosted preview",
+      detail: "Deterministic test provider",
+      routeTier: "cloud",
+      boundary: .hosted,
+      boundaryLabel: "Hosted cloud",
+      billingClass: .unknown,
+      readiness: .ready,
+      automaticEligible: true,
+      contextWindow: 32_768,
+      credentialID: nil
+    ),
+  ]
+
+  static let liveDirectProviders: [RoutingDestination] = [
+    RoutingDestination(
+      id: OpenAICompatibleConfiguration.openAIPlatform.destinationID,
+      providerID: OpenAICompatibleConfiguration.openAIPlatform.providerID,
+      providerName: "OpenAI Platform",
+      modelID: OpenAICompatibleConfiguration.openAIPlatform.modelID,
+      displayName: OpenAICompatibleConfiguration.openAIPlatform.displayName,
+      detail: "Direct API · API key required",
+      routeTier: "cloud",
+      boundary: .hosted,
+      boundaryLabel: "Hosted cloud",
+      billingClass: .apiMetered,
+      readiness: .signedOut,
+      automaticEligible: false,
+      contextWindow: nil,
+      credentialID: OpenAICompatibleConfiguration.openAIPlatform.credentialID
+    )
+  ]
 }

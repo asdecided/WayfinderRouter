@@ -13,11 +13,13 @@
 		2663961FFDA2EEAEF58529A8 /* ConversationStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8A79F801F4849CBD50C8A61 /* ConversationStoreTests.swift */; };
 		2FDE760EEAA633A74BF8B379 /* ChatExecution.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E92E195F328A16C8A4C9159 /* ChatExecution.swift */; };
 		383CBBDE76DCB1296EE2B2FF /* ChatTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25109E76A4BFCC3FD9297E97 /* ChatTabView.swift */; };
+		4516AED0EA2C6143C441CAC1 /* OpenAICompatibleProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AA05C69CF6E5D026498FA04 /* OpenAICompatibleProvider.swift */; };
 		505322426BA37D7C41706A05 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A7B4FB8866C8CE81BA3E3A9 /* CredentialStore.swift */; };
 		5289F042BE903630416D2DC7 /* ThreadsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DA6AA772008E2B7C904EA80 /* ThreadsView.swift */; };
 		A7AFF77BAFD88E83930B3DC6 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D3D621AD229ED0AF9703D04 /* AppModel.swift */; };
 		A95064FBE316BC583A492270 /* WayfinderRoutingBridge in Frameworks */ = {isa = PBXBuildFile; productRef = 2B873E1C9EC13707AC9AB4B1 /* WayfinderRoutingBridge */; };
 		AD9F05EEA94FD7440F0DD8A9 /* AppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C17D8ECF221517590115EA9F /* AppModelTests.swift */; };
+		B1447F8C483CFBAC90E2C3FD /* OpenAICompatibleProviderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 261CF6528CA739E9E0D7D553 /* OpenAICompatibleProviderTests.swift */; };
 		C04837E936D39B59FC3DAEDE /* DestinationsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 375A787B3245E247D326C13E /* DestinationsView.swift */; };
 		D060F612A4C672A8932A47B9 /* APIKeysView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64B75781C7C160DEB4257207 /* APIKeysView.swift */; };
 		DDF893703A284EDEF6594AE6 /* WayfinderTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B27149D56F517F17D1F971B /* WayfinderTheme.swift */; };
@@ -38,6 +40,7 @@
 /* Begin PBXFileReference section */
 		0D3D621AD229ED0AF9703D04 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		25109E76A4BFCC3FD9297E97 /* ChatTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTabView.swift; sourceTree = "<group>"; };
+		261CF6528CA739E9E0D7D553 /* OpenAICompatibleProviderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAICompatibleProviderTests.swift; sourceTree = "<group>"; };
 		375A787B3245E247D326C13E /* DestinationsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationsView.swift; sourceTree = "<group>"; };
 		39BC65B89F3C0433A3716A07 /* WayfinderRoutingBridge */ = {isa = PBXFileReference; lastKnownFileType = folder; name = WayfinderRoutingBridge; path = ../../apple/Packages/WayfinderRoutingBridge; sourceTree = SOURCE_ROOT; };
 		3AD4110CCB21039F8900BB91 /* CredentialStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialStoreTests.swift; sourceTree = "<group>"; };
@@ -45,6 +48,7 @@
 		4DA6AA772008E2B7C904EA80 /* ThreadsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadsView.swift; sourceTree = "<group>"; };
 		5F6D147CFBC7918BCCD92B9E /* WayfinderIOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = WayfinderIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		64B75781C7C160DEB4257207 /* APIKeysView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIKeysView.swift; sourceTree = "<group>"; };
+		6AA05C69CF6E5D026498FA04 /* OpenAICompatibleProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAICompatibleProvider.swift; sourceTree = "<group>"; };
 		8A7B4FB8866C8CE81BA3E3A9 /* CredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialStore.swift; sourceTree = "<group>"; };
 		910171253EA965875F0C979A /* WayfinderIOSTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = WayfinderIOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9B27149D56F517F17D1F971B /* WayfinderTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WayfinderTheme.swift; sourceTree = "<group>"; };
@@ -78,6 +82,7 @@
 				D89C6EA7388FA2CCF9F5865E /* ConversationStore.swift */,
 				8A7B4FB8866C8CE81BA3E3A9 /* CredentialStore.swift */,
 				375A787B3245E247D326C13E /* DestinationsView.swift */,
+				6AA05C69CF6E5D026498FA04 /* OpenAICompatibleProvider.swift */,
 				A28A0256D98D907F1BAF7A34 /* RootView.swift */,
 				BE0BB131143C117BDF129E06 /* SettingsView.swift */,
 				4DA6AA772008E2B7C904EA80 /* ThreadsView.swift */,
@@ -102,6 +107,7 @@
 				C17D8ECF221517590115EA9F /* AppModelTests.swift */,
 				D8A79F801F4849CBD50C8A61 /* ConversationStoreTests.swift */,
 				3AD4110CCB21039F8900BB91 /* CredentialStoreTests.swift */,
+				261CF6528CA739E9E0D7D553 /* OpenAICompatibleProviderTests.swift */,
 			);
 			path = WayfinderIOSTests;
 			sourceTree = "<group>";
@@ -209,6 +215,7 @@
 				AD9F05EEA94FD7440F0DD8A9 /* AppModelTests.swift in Sources */,
 				2663961FFDA2EEAEF58529A8 /* ConversationStoreTests.swift in Sources */,
 				F4E9D5D8ED49654292FFA71E /* CredentialStoreTests.swift in Sources */,
+				B1447F8C483CFBAC90E2C3FD /* OpenAICompatibleProviderTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -223,6 +230,7 @@
 				165C905840F4DCF56C27BF8F /* ConversationStore.swift in Sources */,
 				505322426BA37D7C41706A05 /* CredentialStore.swift in Sources */,
 				C04837E936D39B59FC3DAEDE /* DestinationsView.swift in Sources */,
+				4516AED0EA2C6143C441CAC1 /* OpenAICompatibleProvider.swift in Sources */,
 				014B0F0F1659B0478F68FAF3 /* RootView.swift in Sources */,
 				17923336D4226B2F812CF7CA /* SettingsView.swift in Sources */,
 				5289F042BE903630416D2DC7 /* ThreadsView.swift in Sources */,
