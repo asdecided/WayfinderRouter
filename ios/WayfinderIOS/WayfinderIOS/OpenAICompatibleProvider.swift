@@ -4,18 +4,50 @@ struct OpenAICompatibleConfiguration: Equatable, Sendable {
   static let openAIPlatform = OpenAICompatibleConfiguration(
     destinationID: "openai-platform:gpt-5.6",
     providerID: "openai-platform",
+    providerName: "OpenAI Platform",
     displayName: "GPT-5.6",
     modelID: "gpt-5.6",
     endpoint: URL(string: "https://api.openai.com/v1/chat/completions")!,
-    credentialID: CredentialID(rawValue: "openai-platform.api-key")
+    credentialID: CredentialID(rawValue: "openai-platform.api-key"),
+    contextWindow: nil
   )
+
+  static let moonshotPlatform = OpenAICompatibleConfiguration(
+    destinationID: "moonshot-platform:kimi-k2.6",
+    providerID: "moonshot-platform",
+    providerName: "Moonshot / Kimi Platform",
+    displayName: "Kimi K2.6",
+    modelID: "kimi-k2.6",
+    endpoint: URL(string: "https://api.moonshot.ai/v1/chat/completions")!,
+    credentialID: CredentialID(rawValue: "moonshot-platform.api-key"),
+    contextWindow: 262_144
+  )
+
+  static let openRouter = OpenAICompatibleConfiguration(
+    destinationID: "openrouter:openrouter-auto",
+    providerID: "openrouter",
+    providerName: "OpenRouter",
+    displayName: "OpenRouter Auto",
+    modelID: "openrouter/auto",
+    endpoint: URL(string: "https://openrouter.ai/api/v1/chat/completions")!,
+    credentialID: CredentialID(rawValue: "openrouter.api-key"),
+    contextWindow: nil
+  )
+
+  static let supported = [
+    openAIPlatform,
+    moonshotPlatform,
+    openRouter,
+  ]
 
   let destinationID: String
   let providerID: String
+  let providerName: String
   let displayName: String
   let modelID: String
   let endpoint: URL
   let credentialID: CredentialID
+  let contextWindow: UInt64?
 }
 
 private struct OpenAIChatRequest: Encodable {
@@ -199,7 +231,7 @@ actor OpenAICompatibleProvider: ProviderExecutor {
   static let maximumRequestBytes = 1_048_576
   static let maximumResponseBytes = 4_194_304
 
-  private let configuration: OpenAICompatibleConfiguration
+  private let configurations: [String: OpenAICompatibleConfiguration]
   private let credentialStore: any CredentialStore
   private let httpClient: any HTTPStreamingClient
   private var tasks: [UUID: Task<Void, Never>] = [:]
@@ -209,7 +241,21 @@ actor OpenAICompatibleProvider: ProviderExecutor {
     credentialStore: any CredentialStore,
     httpClient: any HTTPStreamingClient = URLSessionHTTPStreamingClient()
   ) {
-    self.configuration = configuration
+    configurations = [configuration.destinationID: configuration]
+    self.credentialStore = credentialStore
+    self.httpClient = httpClient
+  }
+
+  init(
+    configurations: [OpenAICompatibleConfiguration],
+    credentialStore: any CredentialStore,
+    httpClient: any HTTPStreamingClient = URLSessionHTTPStreamingClient()
+  ) {
+    self.configurations = Dictionary(
+      uniqueKeysWithValues: configurations.map {
+        ($0.destinationID, $0)
+      }
+    )
     self.credentialStore = credentialStore
     self.httpClient = httpClient
   }
@@ -261,7 +307,7 @@ actor OpenAICompatibleProvider: ProviderExecutor {
       Error
     >.Continuation
   ) async throws {
-    guard request.destinationID == configuration.destinationID else {
+    guard let configuration = configurations[request.destinationID] else {
       throw ProviderExecutionError.rejected(
         "The selected destination is not available."
       )
@@ -276,6 +322,7 @@ actor OpenAICompatibleProvider: ProviderExecutor {
     }
 
     let urlRequest = try makeRequest(
+      configuration: configuration,
       messages: request.messages,
       apiKey: apiKey
     )
@@ -324,6 +371,7 @@ actor OpenAICompatibleProvider: ProviderExecutor {
   }
 
   private func makeRequest(
+    configuration: OpenAICompatibleConfiguration,
     messages: [ProviderExecutionMessage],
     apiKey: String
   ) throws -> URLRequest {
