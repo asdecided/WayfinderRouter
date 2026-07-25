@@ -156,6 +156,46 @@ final class OpenAICompatibleProviderTests: XCTestCase {
     XCTAssertEqual(requestCount, 0)
   }
 
+  func testDiscoveredModelUsesItsProviderEndpointAndRequestedModelID() async {
+    let store = InMemoryCredentialStore()
+    try? await store.save(
+      secret: "openrouter-key",
+      for: OpenAICompatibleConfiguration.openRouter.credentialID
+    )
+    let client = StubHTTPStreamingClient(
+      statusCode: 200,
+      chunks: [Data("data: [DONE]\n\n".utf8)]
+    )
+    let provider = OpenAICompatibleProvider(
+      configurations: OpenAICompatibleConfiguration.supported,
+      credentialStore: store,
+      httpClient: client
+    )
+
+    let result = await collect(
+      from: await provider.stream(
+        ProviderExecutionRequest(
+          id: UUID(),
+          prompt: "Hello",
+          destinationID: "openrouter:anthropic/claude-sonnet"
+        )
+      )
+    )
+
+    XCTAssertEqual(result.events, [.completed])
+    XCTAssertNil(result.error)
+    let request = await client.capturedRequest()
+    XCTAssertEqual(
+      request?.url,
+      OpenAICompatibleConfiguration.openRouter.endpoint
+    )
+    let body = try? XCTUnwrap(request?.httpBody)
+    let object = body.flatMap {
+      try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+    }
+    XCTAssertEqual(object?["model"] as? String, "anthropic/claude-sonnet")
+  }
+
   func testMissingCredentialFailsBeforeNetworkRequest() async {
     let client = StubHTTPStreamingClient(statusCode: 200, chunks: [])
     let provider = OpenAICompatibleProvider(
