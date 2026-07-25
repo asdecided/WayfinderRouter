@@ -56,6 +56,52 @@ final class AppModelTests: XCTestCase {
     XCTAssertNil(model.selectedDestinationID)
   }
 
+  func testEveryCompiledDirectPresetStartsPinnedAndUsesItsOwnCredential() {
+    XCTAssertEqual(
+      Set(
+        [RoutingDestination].liveDirectProviders.map(\.id)
+      ),
+      Set(OpenAICompatibleConfiguration.supported.map(\.destinationID))
+    )
+    XCTAssertTrue(
+      [RoutingDestination].liveDirectProviders.allSatisfy {
+        !$0.automaticEligible && $0.readiness == .signedOut
+      }
+    )
+    XCTAssertEqual(
+      Set(
+        [RoutingDestination].liveDirectProviders.compactMap(\.credentialID)
+      ),
+      Set(OpenAICompatibleConfiguration.supported.map(\.credentialID))
+    )
+  }
+
+  func testMoonshotKeyReadiesOnlyMoonshotPreset() async {
+    let store = InMemoryCredentialStore()
+    let model = AppModel(
+      credentialStore: store,
+      destinations: .liveDirectProviders
+    )
+
+    _ = await model.saveAPIKey(
+      "moonshot-key",
+      for: APIKeyProviderDescriptor.supported[1]
+    )
+
+    XCTAssertEqual(
+      model.destinations.first {
+        $0.id == OpenAICompatibleConfiguration.moonshotPlatform.destinationID
+      }?.readiness,
+      .ready
+    )
+    XCTAssertTrue(
+      model.destinations.filter {
+        $0.id != OpenAICompatibleConfiguration.moonshotPlatform.destinationID
+      }.allSatisfy { $0.readiness == .signedOut }
+    )
+    XCTAssertNil(model.selectedDestinationID)
+  }
+
   func testPinnedDirectDestinationRoutesOnlyAfterExplicitSelection() async {
     let store = InMemoryCredentialStore()
     let provider = DeterministicMockProvider(
