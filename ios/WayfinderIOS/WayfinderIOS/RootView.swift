@@ -9,53 +9,33 @@ struct RootView: View {
   /// Live drag offset, in points, while the drawer is being dragged.
   @State private var dragTranslation: CGFloat = 0
 
+  // This file is written deliberately plainly — explicit types, no generic
+  // view helpers, no key-path-as-function. Several rounds of CI were spent on
+  // "failed to produce diagnostic" errors here, which name only the outermost
+  // expression and give nothing to bisect against without a local compiler.
+
   var body: some View {
-    Group {
-      if horizontalSizeClass == .regular {
-        regularWidthLayout
-      } else {
-        compactWidthLayout
+    layout
+      .safeAreaInset(edge: .top, spacing: 0) { persistenceNoticeBar }
+      .modifier(RootFeedback(event: appModel.feedbackEvent))
+      .fullScreenCover(isPresented: firstRunBinding) { FirstLaunchView() }
+      .onChange(of: scenePhase) { _, phase in
+        guard phase != .active else { return }
+        Task { await appModel.saveDraft() }
       }
-    }
-    // Storage failures are recoverable and are surfaced inline in Chat
-    // (UX-015); this screen no longer interrupts with a blocking alert.
-    .safeAreaInset(edge: .top, spacing: 0) {
-      persistenceNoticeBar
-    }
-    .wayfinderAnimation(
-      WayfinderMotion.reveal,
-      value: appModel.persistenceNotice,
-      reduceMotion: reduceMotion
-    )
-    // Attached once, above every section, so feedback and announcements do
-    // not depend on which screen happens to be on top.
-    .wayfinderFeedback(appModel.feedbackEvent)
-    .onChange(of: appModel.feedbackEvent) { _, event in
-      guard let announcement = event?.kind.announcement else { return }
-      AccessibilityNotification.Announcement(announcement).post()
-    }
-    .fullScreenCover(isPresented: firstRunBinding) {
-      FirstLaunchView()
-    }
-    .onChange(of: scenePhase) {
-      guard scenePhase != .active else {
-        return
-      }
-      Task {
-        await appModel.saveDraft()
-      }
+  }
+
+  @ViewBuilder
+  private var layout: some View {
+    if horizontalSizeClass == .regular {
+      regularWidthLayout
+    } else {
+      compactWidthLayout
     }
   }
 
   /// Storage failures are raised from Threads and Settings too, so the notice
   /// cannot live inside Chat or those failures are silent.
-  ///
-  /// Extracted with an explicit transition constant: inlined in the
-  /// `safeAreaInset` builder, the transition expression defeated type
-  /// inference outright.
-  private static let noticeTransition: AnyTransition = .move(edge: .top)
-    .combined(with: .opacity)
-
   @ViewBuilder
   private var persistenceNoticeBar: some View {
     if let notice = appModel.persistenceNotice {
@@ -64,87 +44,24 @@ struct RootView: View {
         canRetry: appModel.persistenceRetry != nil,
         isRetrying: appModel.isRetryingPersistence,
         retry: { Task { await appModel.retryPersistence() } },
-        dismiss: appModel.dismissPersistenceNotice
+        dismiss: { appModel.dismissPersistenceNotice() }
       )
       .padding(.horizontal, WayfinderSpacing.small)
       .padding(.bottom, WayfinderSpacing.xSmall)
       .background(.bar)
-      .transition(Self.noticeTransition)
+      .transition(.opacity)
     }
   }
 
   private var compactWidthLayout: some View {
     GeometryReader { proxy in
-      let width = min(340, proxy.size.width * 0.86)
-
-      ZStack(alignment: .leading) {
-        sectionStack(canOpenDrawer: true)
-          .allowsHitTesting(!showsSidebar)
-          .accessibilityHidden(showsSidebar)
-
-        if showsSidebar || dragTranslation != 0 {
-          WayfinderTheme.scrim
-            .opacity(scrimOpacity(width: width))
-            .ignoresSafeArea()
-            .onTapGesture(perform: closeSidebar)
-            .accessibilityHidden(true)
-
-          AppSidebarView(select: select, close: closeSidebar)
-            .frame(width: width)
-            .offset(x: drawerOffset(width: width))
-            .accessibilityAddTraits(.isModal)
-        }
-      }
-      // The drawer is dismissible by swipe, not only by hitting the scrim,
-      // and the gesture is interruptible: dragging retargets the spring
-      // mid-flight rather than snapping (UX-019).
-      .gesture(drawerDragGesture(width: width))
-    }
-    .wayfinderAnimation(
-      WayfinderMotion.drawer,
-      value: showsSidebar,
-      reduceMotion: reduceMotion
-    )
-  }
-
-  /// Every section keeps its own `NavigationStack`, all of them alive, so
-  /// pushed detail survives a round trip through the drawer. WF-DESIGN-0020
-  /// permits exactly this hidden-container mechanism; WF-ROADMAP-0016 and
-  /// WF-ADR-0047 require the state to be preserved (UX-020).
-  private func sectionStack(canOpenDrawer: Bool) -> some View {
-    // Bound once, with an explicit type. Written inline as
-    // `canOpenDrawer ? openSidebar : nil`, a ternary between a method
-    // reference and `nil` gave the solver nothing to anchor on and it
-    // abandoned the whole enclosing expression.
-    let drawerAction: (() -> Void)? = canOpenDrawer ? openSidebar : nil
-
-    // A `TabView` is the mechanism the contract names, but every style of it
-    // adds visible navigation: `.page` lets the user swipe between sections —
-    // which would also fight the drawer's drag — and the default draws a tab
-    // bar. A ZStack is the "or equivalent" the contract allows: all four
-    // sections stay in the hierarchy, so their stacks keep their state, and
-    // none of them is reachable except by choosing it.
-    return ZStack {
-      ChatTabView(openSidebar: drawerAction)
-        .modifier(SectionVisibility(isSelected: appModel.selectedTab == .chat))
-
-      NavigationStack {
-        ThreadsView(openSidebar: drawerAction)
-      }
-      .modifier(SectionVisibility(isSelected: appModel.selectedTab == .threads))
-
-      NavigationStack {
-        DestinationsView(openSidebar: drawerAction)
-      }
-      .modifier(
-        SectionVisibility(isSelected: appModel.selectedTab == .destinations)
-      )
-
-      NavigationStack {
-        SettingsView(openSidebar: drawerAction)
-      }
-      .modifier(
-        SectionVisibility(isSelected: appModel.selectedTab == .settings)
+      CompactShell(
+        width: min(340, proxy.size.width * 0.86),
+        showsSidebar: $showsSidebar,
+        dragTranslation: $dragTranslation,
+        reduceMotion: reduceMotion,
+        sections: sectionStack(canOpenDrawer: true),
+        select: select
       )
     }
   }
@@ -159,49 +76,39 @@ struct RootView: View {
     .navigationSplitViewStyle(.balanced)
   }
 
-  // MARK: - Drawer gesture
+  /// Every section keeps its own `NavigationStack`, all of them alive, so
+  /// pushed detail survives a round trip through the drawer. WF-DESIGN-0020
+  /// permits this hidden-container mechanism; WF-ROADMAP-0016 and
+  /// WF-ADR-0047 require the state to be preserved (UX-020).
+  ///
+  /// A ZStack rather than a `TabView`: every `TabView` style adds visible
+  /// navigation — `.page` lets the user swipe between sections, which would
+  /// also fight the drawer's drag, and the default draws a tab bar.
+  private func sectionStack(canOpenDrawer: Bool) -> some View {
+    let drawerAction: (() -> Void)? = canOpenDrawer ? { openSidebar() } : nil
+    let selected: AppTab = appModel.selectedTab
 
-  private func drawerDragGesture(width: CGFloat) -> some Gesture {
-    DragGesture(minimumDistance: 12, coordinateSpace: .local)
-      .onChanged { value in
-        guard showsSidebar else { return }
-        // Only closing drags move the drawer; pulling right does nothing.
-        dragTranslation = min(0, value.translation.width)
+    return ZStack {
+      ChatTabView(openSidebar: drawerAction)
+        .modifier(SectionVisibility(isSelected: selected == .chat))
+
+      NavigationStack {
+        ThreadsView(openSidebar: drawerAction)
       }
-      .onEnded { value in
-        guard showsSidebar else { return }
-        let travelled = -value.translation.width
-        let velocity = -value.predictedEndTranslation.width
-        // Releasing below the threshold must spring back, not teleport: the
-        // drawer position is driven by `dragTranslation`, which `showsSidebar`
-        // does not cover, so resetting it has to carry its own animation.
-        withAnimation(
-          WayfinderMotion.resolved(
-            WayfinderMotion.drawer,
-            reduceMotion: reduceMotion
-          )
-        ) {
-          dragTranslation = 0
-          if travelled > width / 3 || velocity > width {
-            showsSidebar = false
-          }
-        }
+      .modifier(SectionVisibility(isSelected: selected == .threads))
+
+      NavigationStack {
+        DestinationsView(openSidebar: drawerAction)
       }
+      .modifier(SectionVisibility(isSelected: selected == .destinations))
+
+      NavigationStack {
+        SettingsView(openSidebar: drawerAction)
+      }
+      .modifier(SectionVisibility(isSelected: selected == .settings))
+    }
   }
 
-  private func drawerOffset(width: CGFloat) -> CGFloat {
-    let base: CGFloat = showsSidebar ? 0 : -width
-    return max(-width, base + dragTranslation)
-  }
-
-  private func scrimOpacity(width: CGFloat) -> Double {
-    guard width > 0 else { return showsSidebar ? 1 : 0 }
-    let revealed = (width + drawerOffset(width: width)) / width
-    return Double(max(0, min(1, revealed)))
-  }
-
-  /// Read-only in effect: the chooser dismisses itself by recording
-  /// completion, so there is no way to reopen it by toggling this.
   private var firstRunBinding: Binding<Bool> {
     Binding(
       get: { !appModel.hasCompletedFirstRun },
@@ -213,14 +120,111 @@ struct RootView: View {
     showsSidebar = true
   }
 
-  private func closeSidebar() {
+  private func select(_ tab: AppTab) {
+    appModel.selectedTab = tab
     dragTranslation = 0
     showsSidebar = false
   }
+}
 
-  private func select(_ tab: AppTab) {
-    appModel.selectedTab = tab
-    closeSidebar()
+/// The iPhone drawer, extracted so `RootView.body` stays small enough to
+/// type-check quickly and so the drag state has one owner.
+private struct CompactShell<Sections: View>: View {
+  let width: CGFloat
+  @Binding var showsSidebar: Bool
+  @Binding var dragTranslation: CGFloat
+  let reduceMotion: Bool
+  let sections: Sections
+  let select: (AppTab) -> Void
+
+  var body: some View {
+    ZStack(alignment: .leading) {
+      sections
+        .allowsHitTesting(!showsSidebar)
+        .accessibilityHidden(showsSidebar)
+
+      if showsSidebar || dragTranslation != 0 {
+        WayfinderTheme.scrim
+          .opacity(scrimOpacity)
+          .ignoresSafeArea()
+          .onTapGesture { close() }
+          .accessibilityHidden(true)
+
+        AppSidebarView(select: select, close: { close() })
+          .frame(width: width)
+          .offset(x: drawerOffset)
+          .accessibilityAddTraits(.isModal)
+      }
+    }
+    // Dismissible by swipe, not only by hitting the scrim, and interruptible:
+    // releasing below the threshold springs back rather than snapping.
+    .gesture(dragGesture)
+    .wayfinderAnimation(
+      WayfinderMotion.drawer,
+      value: showsSidebar,
+      reduceMotion: reduceMotion
+    )
+  }
+
+  private var dragGesture: some Gesture {
+    DragGesture(minimumDistance: 12, coordinateSpace: .local)
+      .onChanged { value in
+        guard showsSidebar else { return }
+        // Only closing drags move the drawer; pulling right does nothing.
+        dragTranslation = min(0, value.translation.width)
+      }
+      .onEnded { value in
+        guard showsSidebar else { return }
+        let travelled = -value.translation.width
+        let velocity = -value.predictedEndTranslation.width
+        let shouldClose = travelled > width / 3 || velocity > width
+        withAnimation(
+          WayfinderMotion.resolved(
+            WayfinderMotion.drawer,
+            reduceMotion: reduceMotion
+          )
+        ) {
+          dragTranslation = 0
+          if shouldClose {
+            showsSidebar = false
+          }
+        }
+      }
+  }
+
+  private var drawerOffset: CGFloat {
+    let base: CGFloat = showsSidebar ? 0 : -width
+    return max(-width, base + dragTranslation)
+  }
+
+  private var scrimOpacity: Double {
+    guard width > 0 else { return showsSidebar ? 1 : 0 }
+    let revealed = (width + drawerOffset) / width
+    return Double(max(0, min(1, revealed)))
+  }
+
+  private func close() {
+    dragTranslation = 0
+    showsSidebar = false
+  }
+}
+
+/// Plays the app's feedback vocabulary and speaks the matching announcement.
+/// A concrete modifier so neither the trigger closure nor its result type has
+/// to be inferred at the call site.
+private struct RootFeedback: ViewModifier {
+  let event: WayfinderFeedbackEvent?
+
+  func body(content: Content) -> some View {
+    content
+      .sensoryFeedback(trigger: event) { _, current in
+        guard let current else { return nil }
+        return current.kind.sensoryFeedback
+      }
+      .onChange(of: event) { _, latest in
+        guard let announcement = latest?.kind.announcement else { return }
+        AccessibilityNotification.Announcement(announcement).post()
+      }
   }
 }
 
