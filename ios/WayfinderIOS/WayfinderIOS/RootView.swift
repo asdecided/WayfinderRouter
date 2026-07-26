@@ -112,48 +112,41 @@ struct RootView: View {
   /// permits exactly this hidden-container mechanism; WF-ROADMAP-0016 and
   /// WF-ADR-0047 require the state to be preserved (UX-020).
   private func sectionStack(canOpenDrawer: Bool) -> some View {
+    // Bound once, with an explicit type. Written inline as
+    // `canOpenDrawer ? openSidebar : nil`, a ternary between a method
+    // reference and `nil` gave the solver nothing to anchor on and it
+    // abandoned the whole enclosing expression.
+    let drawerAction: (() -> Void)? = canOpenDrawer ? openSidebar : nil
+
     // A `TabView` is the mechanism the contract names, but every style of it
     // adds visible navigation: `.page` lets the user swipe between sections —
     // which would also fight the drawer's drag — and the default draws a tab
     // bar. A ZStack is the "or equivalent" the contract allows: all four
     // sections stay in the hierarchy, so their stacks keep their state, and
     // none of them is reachable except by choosing it.
-    ZStack {
-      section(.chat) {
-        ChatTabView(openSidebar: canOpenDrawer ? openSidebar : nil)
-      }
-      section(.threads) {
-        NavigationStack {
-          ThreadsView(openSidebar: canOpenDrawer ? openSidebar : nil)
-        }
-      }
-      section(.destinations) {
-        NavigationStack {
-          DestinationsView(openSidebar: canOpenDrawer ? openSidebar : nil)
-        }
-      }
-      section(.settings) {
-        NavigationStack {
-          SettingsView(openSidebar: canOpenDrawer ? openSidebar : nil)
-        }
-      }
-    }
-  }
+    return ZStack {
+      ChatTabView(openSidebar: drawerAction)
+        .modifier(SectionVisibility(isSelected: appModel.selectedTab == .chat))
 
-  /// Written as an explicit generic returning a single expression. Combining
-  /// `@ViewBuilder` on the function, an opaque parameter type, and a local
-  /// binding defeated the type checker outright — it reported only "failed to
-  /// produce diagnostic" against the enclosing `ZStack`.
-  private func section<Content: View>(
-    _ tab: AppTab,
-    @ViewBuilder content: () -> Content
-  ) -> some View {
-    let isSelected = appModel.selectedTab == tab
-    return content()
-      .opacity(isSelected ? 1 : 0)
-      .allowsHitTesting(isSelected)
-      .accessibilityHidden(!isSelected)
-      .zIndex(isSelected ? 1 : 0)
+      NavigationStack {
+        ThreadsView(openSidebar: drawerAction)
+      }
+      .modifier(SectionVisibility(isSelected: appModel.selectedTab == .threads))
+
+      NavigationStack {
+        DestinationsView(openSidebar: drawerAction)
+      }
+      .modifier(
+        SectionVisibility(isSelected: appModel.selectedTab == .destinations)
+      )
+
+      NavigationStack {
+        SettingsView(openSidebar: drawerAction)
+      }
+      .modifier(
+        SectionVisibility(isSelected: appModel.selectedTab == .settings)
+      )
+    }
   }
 
   private var regularWidthLayout: some View {
@@ -228,6 +221,24 @@ struct RootView: View {
   private func select(_ tab: AppTab) {
     appModel.selectedTab = tab
     closeSidebar()
+  }
+}
+
+/// Hides a section without removing it, so its `NavigationStack` keeps the
+/// state the roadmap requires preserved across drawer switches.
+///
+/// A concrete `ViewModifier` rather than a generic helper returning
+/// `some View`: the generic form left the solver unifying four opaque types
+/// inside one `ZStack` and it gave up without a usable diagnostic.
+private struct SectionVisibility: ViewModifier {
+  let isSelected: Bool
+
+  func body(content: Content) -> some View {
+    content
+      .opacity(isSelected ? 1 : 0)
+      .allowsHitTesting(isSelected)
+      .accessibilityHidden(!isSelected)
+      .zIndex(isSelected ? 1 : 0)
   }
 }
 
