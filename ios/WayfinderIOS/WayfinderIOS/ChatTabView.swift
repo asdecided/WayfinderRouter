@@ -837,13 +837,17 @@ private struct RouteReceiptSheet: View {
         }
 
         Section("Details") {
-          LabeledContent("Destination", value: receipt.destinationName)
-          LabeledContent("Execution", value: receipt.executionSummary)
-          LabeledContent("Routing tier", value: receipt.tierDescription)
-          LabeledContent(
-            "Score",
-            value: receipt.score.formatted(.number.precision(.fractionLength(2)))
-          )
+          // The contract asks receipt rows to combine into one reading unit.
+          // As four separate elements VoiceOver made the user swipe through
+          // "Destination", "Execution", "Routing tier", "Score" one at a time
+          // to assemble a fact that is single by nature: where this ran.
+          VStack(alignment: .leading, spacing: WayfinderSpacing.xSmall) {
+            LabeledContent("Destination", value: receipt.destinationName)
+            LabeledContent("Execution", value: receipt.executionSummary)
+            LabeledContent("Routing tier", value: receipt.tierDescription)
+            LabeledContent("Score", value: formattedScore)
+          }
+          .accessibilityElement(children: .combine)
         }
 
         if let excluded = receipt.excluded, !excluded.isEmpty {
@@ -906,6 +910,10 @@ private struct RouteReceiptSheet: View {
 
   private var boundary: ExecutionBoundary {
     receipt.boundary ?? .hosted
+  }
+
+  private var formattedScore: String {
+    receipt.score.formatted(.number.precision(.fractionLength(2)))
   }
 
   /// What actually crossed the device edge, stated per boundary. The
