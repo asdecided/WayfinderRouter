@@ -20,21 +20,7 @@ struct RootView: View {
     // Storage failures are recoverable and are surfaced inline in Chat
     // (UX-015); this screen no longer interrupts with a blocking alert.
     .safeAreaInset(edge: .top, spacing: 0) {
-      // Storage failures are raised from Threads and Settings too, so the
-      // notice cannot live inside Chat or those failures are silent.
-      if let notice = appModel.persistenceNotice {
-        InlineNotice(
-          message: notice,
-          canRetry: appModel.persistenceRetry != nil,
-          isRetrying: appModel.isRetryingPersistence,
-          retry: { Task { await appModel.retryPersistence() } },
-          dismiss: appModel.dismissPersistenceNotice
-        )
-        .padding(.horizontal, WayfinderSpacing.small)
-        .padding(.bottom, WayfinderSpacing.xSmall)
-        .background(.bar)
-        .transition(.move(edge: .top).combined(with: .opacity))
-      }
+      persistenceNoticeBar
     }
     .wayfinderAnimation(
       WayfinderMotion.reveal,
@@ -58,6 +44,32 @@ struct RootView: View {
       Task {
         await appModel.saveDraft()
       }
+    }
+  }
+
+  /// Storage failures are raised from Threads and Settings too, so the notice
+  /// cannot live inside Chat or those failures are silent.
+  ///
+  /// Extracted with an explicit transition constant: inlined in the
+  /// `safeAreaInset` builder, the transition expression defeated type
+  /// inference outright.
+  private static let noticeTransition: AnyTransition = .move(edge: .top)
+    .combined(with: .opacity)
+
+  @ViewBuilder
+  private var persistenceNoticeBar: some View {
+    if let notice = appModel.persistenceNotice {
+      InlineNotice(
+        message: notice,
+        canRetry: appModel.persistenceRetry != nil,
+        isRetrying: appModel.isRetryingPersistence,
+        retry: { Task { await appModel.retryPersistence() } },
+        dismiss: appModel.dismissPersistenceNotice
+      )
+      .padding(.horizontal, WayfinderSpacing.small)
+      .padding(.bottom, WayfinderSpacing.xSmall)
+      .background(.bar)
+      .transition(Self.noticeTransition)
     }
   }
 

@@ -426,7 +426,9 @@ private struct ScrollToLatestButton: View {
 
 /// A recoverable failure, shown in place with a way forward instead of a
 /// blocking alert (UX-015).
-private struct InlineNotice: View {
+/// Internal rather than file-private: `RootView` presents it above every
+/// section so failures raised from Threads and Settings are not silent.
+struct InlineNotice: View {
   let message: String
   let canRetry: Bool
   let isRetrying: Bool
