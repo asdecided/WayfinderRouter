@@ -176,15 +176,19 @@ final class FirstRunTests: XCTestCase {
   }
 
   func testASaveBeforeTheRestoreDoesNotWithdrawStoredConsent() async {
-    // The write path had to learn the same lesson as the first-run flag: a
-    // workspace save that lands before the restore has read stored consent
-    // would write an empty list over it and silently un-enrol everything.
+    // A workspace save that lands before the restore has read stored consent
+    // carries "not known yet" for these fields. Writing that straight through
+    // erased them. Withholding the value at the model was not enough — the
+    // store still assigned nil over the stored one — so `nil` now means
+    // "leave it alone" in both store implementations. `hasCompletedFirstRun`
+    // had the identical latent defect and is asserted here alongside it.
     let store = InMemoryConversationStore()
     let first = AppModel(
       conversationStore: store,
       destinations: .liveDirectProviders
     )
     await first.restoreConversations()
+    await first.completeFirstRun()
     let hosted = first.destinations.first { $0.boundary == .hosted }!
     await first.setEnrolledInAutomatic(true, destinationID: hosted.id)
 
@@ -200,6 +204,10 @@ final class FirstRunTests: XCTestCase {
       relaunched.destinations.first { $0.id == hosted.id }?.automaticEligible,
       true,
       "an early save withdrew a destination the user had enrolled"
+    )
+    XCTAssertTrue(
+      relaunched.hasCompletedFirstRun,
+      "an early save erased the onboarding answer and would show it again"
     )
   }
 

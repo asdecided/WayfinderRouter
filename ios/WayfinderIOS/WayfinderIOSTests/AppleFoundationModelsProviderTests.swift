@@ -251,7 +251,11 @@ final class AppleFoundationModelsProviderTests: XCTestCase {
     )
     XCTAssertEqual(destination?.boundary, .onDevice)
     XCTAssertEqual(destination?.billingClass, .onDevice)
-    XCTAssertEqual(destination?.automaticEligible, false)
+    // On-device is enrolled in Automatic by construction: it sends nothing
+    // anywhere, so it is the one destination where a default costs the user
+    // nothing to consent to. This asserted `false` while every destination
+    // was ineligible and Automatic could therefore never route at all.
+    XCTAssertEqual(destination?.automaticEligible, true)
     XCTAssertNil(destination?.contextWindow)
     XCTAssertNil(model.selectedDestinationID)
   }

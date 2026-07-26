@@ -400,8 +400,16 @@ actor SwiftDataConversationStore: ConversationStore {
       record.draft = workspace.draft
       record.retentionDays = workspace.retentionDays
       record.updatedAt = workspace.updatedAt
-      record.hasCompletedFirstRun = workspace.hasCompletedFirstRun
-      record.automaticDestinationIDs = workspace.automaticDestinationIDs
+      // On these two, `nil` means "the caller does not know yet", never
+      // "clear it". A draft save that lands before the restore has read them
+      // carries nil, and assigning it straight through erased the user's
+      // onboarding answer and every destination they had enrolled.
+      if let hasCompletedFirstRun = workspace.hasCompletedFirstRun {
+        record.hasCompletedFirstRun = hasCompletedFirstRun
+      }
+      if let automaticDestinationIDs = workspace.automaticDestinationIDs {
+        record.automaticDestinationIDs = automaticDestinationIDs
+      }
     } else {
       modelContext.insert(
         WayfinderConversationSchemaV1.WorkspaceRecord(
@@ -537,7 +545,15 @@ actor InMemoryConversationStore: ConversationStore {
   }
 
   func save(workspace: ConversationWorkspaceSnapshot) {
-    self.workspace = workspace
+    // Same merge rule as the SwiftData store, or the two disagree about what
+    // `nil` means and the tests stop describing the shipping behaviour.
+    var merged = workspace
+    merged.hasCompletedFirstRun =
+      workspace.hasCompletedFirstRun ?? self.workspace.hasCompletedFirstRun
+    merged.automaticDestinationIDs =
+      workspace.automaticDestinationIDs
+      ?? self.workspace.automaticDestinationIDs
+    self.workspace = merged
   }
 
   func exportData() throws -> Data {
