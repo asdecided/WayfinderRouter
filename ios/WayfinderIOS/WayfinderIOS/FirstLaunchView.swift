@@ -1,4 +1,5 @@
 import SwiftUI
+import WayfinderRoutingBridge
 
 /// The first-launch chooser specified by WF-ROADMAP-0016 (UX-013).
 ///
