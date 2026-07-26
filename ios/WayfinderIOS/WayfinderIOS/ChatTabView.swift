@@ -381,8 +381,12 @@ private struct SuggestionRow: View {
     ScrollView(.horizontal, showsIndicators: false) {
       HStack(spacing: WayfinderSpacing.xSmall) {
         ForEach(suggestions, id: \.self) { suggestion in
-          Button(suggestion) {
+          Button {
             use(suggestion)
+          } label: {
+            Text(suggestion)
+              .frame(minHeight: WayfinderMetrics.minimumHitTarget)
+              .contentShape(Rectangle())
           }
           .buttonStyle(.bordered)
           .buttonBorderShape(.capsule)
@@ -537,6 +541,7 @@ private struct UserMessage: View {
 private struct AssistantMessage: View {
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var document = MarkdownDocument.empty
+  @State private var didCopy = false
 
   let message: ConversationMessageSnapshot
   let isStreaming: Bool
@@ -586,6 +591,11 @@ private struct AssistantMessage: View {
     } else if message.content.isEmpty {
       Text(statusDescription)
         .foregroundStyle(.secondary)
+    } else if document.isEmpty {
+      // The parse lands in `onChange`, one body pass behind the content.
+      // Without this the spinner disappears into nothing for a frame.
+      Text(message.content)
+        .textSelection(.enabled)
     } else {
       MarkdownTextView(document: document, isStreaming: isStreaming)
     }
@@ -611,13 +621,36 @@ private struct AssistantMessage: View {
       }
 
       if canRetry {
-        Button("Retry") {
+        Button {
           retry(message.id)
+        } label: {
+          // The frame and shape belong inside the label: applied outside the
+          // Button they enlarge the layout slot and centre the control in it,
+          // leaving the tap target the size of the text.
+          Text("Retry")
+            .font(.footnote.weight(.semibold))
+            .frame(minHeight: WayfinderMetrics.minimumHitTarget)
+            .contentShape(Rectangle())
         }
-        .font(.footnote.weight(.semibold))
-        .frame(minHeight: WayfinderMetrics.minimumHitTarget)
         .accessibilityHint("Regenerates this reply in place")
       }
+
+      // Copy needs a real control, not only a context menu on a container
+      // VoiceOver does not stop on.
+      Button {
+        UIPasteboard.general.string = message.content
+        didCopy = true
+      } label: {
+        Label(didCopy ? "Copied" : "Copy", systemImage: didCopy ? "checkmark" : "doc.on.doc")
+          .font(.footnote.weight(.medium))
+          .labelStyle(.titleAndIcon)
+          .frame(minHeight: WayfinderMetrics.minimumHitTarget)
+          .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .foregroundStyle(didCopy ? WayfinderTheme.accent : Color.secondary)
+      .wayfinderFeedback(.copied, trigger: didCopy) { _, copied in copied }
+      .accessibilityLabel(didCopy ? "Reply copied" : "Copy reply")
     }
   }
 
@@ -843,8 +876,15 @@ private struct RouteReceiptSheet: View {
 
 private struct ComposerView: View {
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
-  @ScaledMetric(relativeTo: .body) private var controlSize: CGFloat =
+  /// 44 pt is a *minimum*, not a metric to scale: multiplying it by the
+  /// Dynamic Type factor produced a 137 pt control at AX5, which is what
+  /// forced the row to wrap in the first place. Glyph controls stay at the
+  /// floor and grow only modestly; the text label beside them scales freely.
+  @ScaledMetric(relativeTo: .body) private var scaledControl: CGFloat =
     WayfinderMetrics.minimumHitTarget
+  private var controlSize: CGFloat {
+    min(scaledControl, WayfinderMetrics.maximumControlSize)
+  }
 
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -876,7 +916,10 @@ private struct ComposerView: View {
       // five of them plus a label cannot share one row on any iPhone width.
       // WF-DESIGN-0020 forbids hiding send, privacy, or navigation, so the
       // row wraps rather than truncating.
-      if dynamicTypeSize.isAccessibilitySize {
+      // `.xxxLarge` is not an accessibility size but already overflows on a
+      // narrow device, so the wrap is keyed on width need, not on the
+      // accessibility flag.
+      if dynamicTypeSize >= .xxLarge {
         VStack(alignment: .leading, spacing: WayfinderSpacing.xSmall) {
           routingControls
           actionControls

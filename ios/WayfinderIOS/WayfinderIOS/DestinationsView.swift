@@ -56,6 +56,25 @@ struct DestinationsView: View {
 
   private var list: some View {
     List {
+      // The shipping app always compiles destinations, so an empty list is
+      // unreachable; "nothing is ready" is the state a user actually lands in
+      // after skipping the first-launch chooser.
+      if appModel.readyDestinations.isEmpty {
+        Section {
+          Label(
+            "No destination is connected yet. Add an API key or connect an account to start a conversation.",
+            systemImage: "exclamationmark.circle"
+          )
+          .font(.footnote)
+          .foregroundStyle(WayfinderTheme.warning)
+
+          Button("Open Settings") {
+            appModel.selectedTab = .settings
+          }
+          .font(.footnote.weight(.semibold))
+        }
+      }
+
       Section {
         Text(
           "Choose a destination explicitly in Chat. Connecting a key does not silently add it to Automatic."

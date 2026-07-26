@@ -17,6 +17,11 @@ struct RootView: View {
   var body: some View {
     layout
       .safeAreaInset(edge: .top, spacing: 0) { persistenceNoticeBar }
+      .wayfinderAnimation(
+        WayfinderMotion.reveal,
+        value: appModel.persistenceNotice,
+        reduceMotion: reduceMotion
+      )
       .modifier(RootFeedback(event: appModel.feedbackEvent))
       .fullScreenCover(isPresented: firstRunBinding) { FirstLaunchView() }
       .onChange(of: scenePhase) { _, phase in
@@ -49,7 +54,12 @@ struct RootView: View {
       .padding(.horizontal, WayfinderSpacing.small)
       .padding(.bottom, WayfinderSpacing.xSmall)
       .background(.bar)
-      .transition(.opacity)
+      .transition(.move(edge: .top).combined(with: .opacity))
+      // The notice sits outside CompactShell, so the drawer's modality does
+      // not cover it: without this its buttons stay reachable through the
+      // scrim, which the contract forbids.
+      .allowsHitTesting(!showsSidebar)
+      .accessibilityHidden(showsSidebar)
     }
   }
 

@@ -115,13 +115,20 @@ private struct APIKeyProviderRow: View {
       }
 
       HStack {
-        Button(isConfigured ? "Replace Key" : "Add Key", action: edit)
-          .buttonStyle(.bordered)
-          .frame(minHeight: WayfinderMetrics.minimumHitTarget)
+        Button(action: edit) {
+          Text(isConfigured ? "Replace Key" : "Add Key")
+            .frame(minHeight: WayfinderMetrics.minimumHitTarget)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.bordered)
 
         if isConfigured {
-          Button("Remove", role: .destructive, action: remove)
-            .buttonStyle(.borderless)
+          Button(role: .destructive, action: remove) {
+            Text("Remove")
+              .frame(minHeight: WayfinderMetrics.minimumHitTarget)
+              .contentShape(Rectangle())
+          }
+          .buttonStyle(.borderless)
             // Three provider rows each expose a "Remove"; name the provider
             // so the actions rotor can tell them apart.
             .accessibilityLabel("Remove \(provider.displayName) key")

@@ -106,12 +106,14 @@
       threads: [ConversationThreadSnapshot] = [],
       isRestoring: Bool = false,
       phase: ChatExecutionPhase = .idle,
-      notice: String? = nil
+      notice: String? = nil,
+      hasCompletedFirstRun: Bool = true
     ) -> AppModel {
       let model = AppModel(
         conversationStore: InMemoryConversationStore(),
         credentialStore: InMemoryCredentialStore(),
         destinations: .previewCandidates,
+        hasCompletedFirstRun: hasCompletedFirstRun,
         now: { now }
       )
       model.threads = threads
@@ -159,8 +161,7 @@
               PreviewFixtures.user("Explain a difficult idea simply"),
               PreviewFixtures.assistant(
                 "Here's the plan, in three parts.\n\n## Steps\n\n1. Read the ex",
-                status: .streaming,
-                receipt: nil
+                status: .streaming
               ),
             ])
           ],
@@ -177,8 +178,7 @@
             PreviewFixtures.user("Draft a thoughtful reply"),
             PreviewFixtures.assistant(
               "The provider stopped before completing this",
-              status: .failed,
-              receipt: nil
+              status: .failed
             ),
           ])
         ])
@@ -219,7 +219,9 @@
   /// WF-DESIGN-0020 forbids Dynamic Type hiding send, privacy, or navigation.
   /// This is the size at which the composer stops fitting on one row.
   #Preview("Chat · AX5") {
-    ChatTabView()
+    // With `openSidebar`, so the navigation control this preview exists to
+    // vouch for is actually present.
+    ChatTabView(openSidebar: {})
       .environment(
         PreviewFixtures.model(threads: [
           PreviewFixtures.thread([
@@ -238,7 +240,7 @@
 
   #Preview("First launch") {
     FirstLaunchView()
-      .environment(PreviewFixtures.model())
+      .environment(PreviewFixtures.model(hasCompletedFirstRun: false))
   }
 
   #Preview("Threads · populated") {

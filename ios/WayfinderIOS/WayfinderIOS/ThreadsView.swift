@@ -9,7 +9,13 @@ struct ThreadsView: View {
   var openSidebar: (() -> Void)?
 
   private var results: [ConversationThreadSnapshot] {
-    appModel.threads(matching: searchText)
+    // Every section stays mounted to preserve its stack, so this body runs on
+    // each streamed delta. With a query left in the field it would otherwise
+    // scan the full text of every thread, per token, while invisible.
+    guard appModel.selectedTab == .threads else {
+      return []
+    }
+    return appModel.threads(matching: searchText)
   }
 
   var body: some View {

@@ -9,6 +9,21 @@ struct AccountsView: View {
 
   var body: some View {
     List {
+      // Recoverable sign-in failures render in place with a way forward.
+      // A modal OK-only alert was still here after UX-015 converted every
+      // other surface; cancelling a sign-in could even raise it.
+      if let accountNotice = appModel.accountNotice {
+        Section {
+          Label(accountNotice, systemImage: "exclamationmark.triangle.fill")
+            .font(.footnote)
+            .foregroundStyle(WayfinderTheme.warning)
+          Button("Dismiss") {
+            appModel.accountNotice = nil
+          }
+          .font(.footnote.weight(.semibold))
+        }
+      }
+
       Section {
         VStack(alignment: .leading, spacing: 12) {
           HStack(alignment: .firstTextBaseline) {
@@ -33,8 +48,12 @@ struct AccountsView: View {
           }
 
           if appModel.openRouterAccountState.readiness == .ready {
-            Button("Disconnect", role: .destructive) {
+            Button(role: .destructive) {
               showsDisconnectConfirmation = true
+            } label: {
+              Text("Disconnect")
+                .frame(minHeight: WayfinderMetrics.minimumHitTarget)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
           } else {
@@ -108,23 +127,6 @@ struct AccountsView: View {
       Text(
         "Wayfinder will remove the OpenRouter credential from this iPhone. Existing conversations are unaffected."
       )
-    }
-    .alert(
-      "Account connection",
-      isPresented: Binding(
-        get: { appModel.accountNotice != nil },
-        set: { isPresented in
-          if !isPresented {
-            appModel.accountNotice = nil
-          }
-        }
-      )
-    ) {
-      Button("OK") {
-        appModel.accountNotice = nil
-      }
-    } message: {
-      Text(appModel.accountNotice ?? "")
     }
   }
 

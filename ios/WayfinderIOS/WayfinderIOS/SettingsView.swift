@@ -116,7 +116,10 @@ struct SettingsView: View {
     } message: {
       Text("This permanently removes saved threads and the current draft.")
     }
-    .task(id: appModel.threads.count) {
+    // Built when Settings is actually on screen. Keyed on thread count it
+    // re-encoded every conversation each time a new chat began, from Chat.
+    .task(id: appModel.selectedTab == .settings ? appModel.threads.count : -1) {
+      guard appModel.selectedTab == .settings else { return }
       exportedConversations = await appModel.exportConversations()
     }
   }

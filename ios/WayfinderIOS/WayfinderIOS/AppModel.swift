@@ -61,10 +61,14 @@ enum PrivacyPostureOption: String, CaseIterable, Identifiable {
 
 /// A storage operation that failed and can be tried again (UX-015).
 enum PersistenceRetryAction: Equatable {
-  case saveThread(ConversationThreadSnapshot)
-  /// Re-saves whatever the conversation looks like *now*, for failures whose
-  /// captured snapshot may since have been superseded.
-  case saveActiveThread
+  /// Re-saves the named conversation as it stands *now*.
+  ///
+  /// Never a snapshot. A captured snapshot is stale the moment the reply
+  /// moves on, and because a successful save used not to clear the notice,
+  /// a Try Again left on screen after the failure healed would write an
+  /// empty `.pending` turn back over a completed reply — in memory and on
+  /// disk. Naming the thread makes a late retry a no-op instead.
+  case saveThread(UUID)
   case saveDraft
   case restoreConversations
   case openThread(UUID)
@@ -166,7 +170,12 @@ final class AppModel {
   /// The most recent meaningful state change, for haptics and VoiceOver.
   private(set) var feedbackEvent: WayfinderFeedbackEvent?
   /// Whether the first-launch chooser has been answered or skipped (UX-013).
-  private(set) var hasCompletedFirstRun = true
+  ///
+  /// Defaults to "not yet". Defaulting to `true` meant a restore that threw
+  /// left the flag untouched, so a fresh install whose store failed to open
+  /// silently skipped onboarding — and the next successful save persisted
+  /// that as fact.
+  private(set) var hasCompletedFirstRun = false
   var credentialNotice: String?
   var accountNotice: String?
   var openRouterAccountState = ProviderAccountState(
@@ -205,6 +214,9 @@ final class AppModel {
   /// cancellation lands: the user pressing Stop, or navigating away.
   private var stopReason: ConversationMessageStatus = .stopped
   private var feedbackSequence = 0
+  /// False until a workspace has actually been read, so a failed restore
+  /// never persists a first-run answer it never received.
+  private var hasLoadedFirstRunState = false
 
   init(
     conversationStore: any ConversationStore = InMemoryConversationStore(),
@@ -216,6 +228,7 @@ final class AppModel {
     providerModelCatalog: any ProviderModelCatalog = EmptyProviderModelCatalog(),
     destinations: [RoutingDestination] = .previewCandidates,
     initialPersistenceNotice: String? = nil,
+    hasCompletedFirstRun: Bool = false,
     checkpointPolicy: StreamingCheckpointPolicy = .standard,
     now: @escaping () -> Date = Date.init
   ) {
@@ -234,6 +247,7 @@ final class AppModel {
     compiledDestinations = destinations
     self.destinations = destinations
     self.persistenceNotice = initialPersistenceNotice
+    self.hasCompletedFirstRun = hasCompletedFirstRun
     self.now = now
 
     do {
@@ -442,6 +456,7 @@ final class AppModel {
         days: workspace.retentionDays
       )
       hasCompletedFirstRun = workspace.hasCompletedFirstRun ?? false
+      hasLoadedFirstRunState = true
       activeThreadID = workspace.activeThreadID
 
       if let activeThread {
@@ -881,7 +896,7 @@ final class AppModel {
     } catch {
       recordPersistenceFailure(
         "This turn is visible now, but Wayfinder could not save it.",
-        retry: .saveThread(thread)
+        retry: .saveThread(thread.id)
       )
       upsertInMemory(thread)
     }
@@ -1083,7 +1098,7 @@ final class AppModel {
       // Re-saving the live thread is the only correct retry.
       recordPersistenceFailure(
         "This reply is visible now, but Wayfinder could not save it.",
-        retry: .saveActiveThread
+        retry: .saveThread(thread.id)
       )
     }
   }
@@ -1098,10 +1113,13 @@ final class AppModel {
     do {
       try await conversationStore.save(thread: thread)
       await persistWorkspace()
+      // Clearing on success is what stops a healed failure leaving a live
+      // Try Again on screen.
+      clearPersistenceFailure(for: thread.id)
     } catch {
       recordPersistenceFailure(
         "This turn is visible now, but Wayfinder could not save it.",
-        retry: .saveThread(thread)
+        retry: .saveThread(thread.id)
       )
     }
   }
@@ -1128,6 +1146,16 @@ final class AppModel {
     persistenceRetry = retry
   }
 
+  /// Drops a notice once the work it described has since succeeded.
+  private func clearPersistenceFailure(for threadID: UUID) {
+    guard case .saveThread(let pending)? = persistenceRetry, pending == threadID
+    else {
+      return
+    }
+    persistenceNotice = nil
+    persistenceRetry = nil
+  }
+
   func dismissPersistenceNotice() {
     persistenceNotice = nil
     persistenceRetry = nil
@@ -1148,10 +1176,8 @@ final class AppModel {
     persistenceRetry = nil
 
     switch action {
-    case .saveThread(let thread):
-      await saveUpdatedThread(thread)
-    case .saveActiveThread:
-      if let thread = activeThread {
+    case .saveThread(let id):
+      if let thread = thread(id: id) {
         await saveUpdatedThread(thread)
       }
     case .saveDraft:
@@ -1417,7 +1443,7 @@ final class AppModel {
       draft: activeThreadID == nil ? draft : "",
       retentionDays: retentionPolicy.days,
       updatedAt: now(),
-      hasCompletedFirstRun: hasCompletedFirstRun
+      hasCompletedFirstRun: hasLoadedFirstRunState ? hasCompletedFirstRun : nil
     )
 
     do {
@@ -1536,6 +1562,7 @@ final class AppModel {
       return
     }
     hasCompletedFirstRun = true
+    hasLoadedFirstRunState = true
     await persistWorkspace()
   }
 
@@ -1585,7 +1612,7 @@ final class AppModel {
     } catch {
       recordPersistenceFailure(
         "Wayfinder could not rename that conversation.",
-        retry: .saveThread(thread)
+        retry: .saveThread(thread.id)
       )
     }
   }
@@ -1603,7 +1630,7 @@ final class AppModel {
     } catch {
       recordPersistenceFailure(
         "Wayfinder could not update that conversation.",
-        retry: .saveThread(thread)
+        retry: .saveThread(thread.id)
       )
     }
   }

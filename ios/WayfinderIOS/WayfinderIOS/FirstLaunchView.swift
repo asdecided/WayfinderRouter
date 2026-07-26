@@ -33,7 +33,11 @@ struct FirstLaunchView: View {
                 systemImage: "iphone",
                 boundary: .onDevice
               ) {
-                appModel.selectedTab = .destinations
+                // Selects the destination rather than merely navigating to a
+                // list; the verb promised use.
+                appModel.selectDestination(
+                  NativeAppleFoundationModelsProvider.destinationID
+                )
                 finish()
               }
             }
@@ -146,10 +150,13 @@ struct FirstLaunchView: View {
   }
 
   private func finish() {
+    // Recorded before dismissing: dismissing first left the presentation
+    // binding still reading "not completed" at the instant SwiftUI wrote to
+    // it, making whether the cover stayed down a race.
     Task {
       await appModel.completeFirstRun()
+      dismiss()
     }
-    dismiss()
   }
 }
 

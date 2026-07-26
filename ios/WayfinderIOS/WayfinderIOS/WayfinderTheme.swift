@@ -205,6 +205,9 @@ enum WayfinderRadius {
 /// Minimum hit target, per the HIG. Composer controls scale from this floor.
 enum WayfinderMetrics {
   static let minimumHitTarget: CGFloat = 44
+  /// Ceiling for glyph controls under Dynamic Type. Without it a scaled
+  /// 44 pt floor reaches 137 pt at AX5 and no composer row can fit.
+  static let maximumControlSize: CGFloat = 64
   static let readableWidth: CGFloat = 760
 }
 

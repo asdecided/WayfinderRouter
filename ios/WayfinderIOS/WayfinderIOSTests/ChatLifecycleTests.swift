@@ -259,6 +259,69 @@ final class ChatStreamingPersistenceTests: XCTestCase {
     XCTAssertEqual(persisted?.messages.last?.content, "ok")
   }
 
+  /// The previous covering test failed the store for *both* writes, so the
+  /// terminal save simply overwrote the stale payload and the bug hid. This
+  /// heals the store mid-turn, which is the reachable case.
+  func testARetryThatHealedMidTurnDoesNotResurrectTheEmptyTurn() async {
+    let store = FailableConversationStore()
+    await store.setFailing(true)
+    let model = AppModel(
+      conversationStore: store,
+      providerExecutor: DeterministicMockProvider(
+        configuration: .init(
+          outcome: .response(chunks: ["a ", "complete ", "answer"]),
+          delay: .zero
+        )
+      )
+    )
+    model.draft = "Save me"
+
+    // The turn begins while storage is down, so the captured state is an
+    // empty, pending reply.
+    await store.setFailing(false)
+    await model.sendMessage()
+
+    let liveReply = model.activeThread?.messages.last
+    XCTAssertEqual(liveReply?.content, "a complete answer")
+    XCTAssertEqual(liveReply?.status, .completed)
+
+    // Whatever notice survived must not be able to undo the finished reply.
+    await model.retryPersistence()
+
+    XCTAssertEqual(
+      model.activeThread?.messages.last?.content,
+      "a complete answer",
+      "a retry erased the completed reply from the transcript"
+    )
+    XCTAssertEqual(model.activeThread?.messages.last?.status, .completed)
+    let persisted = await store.storedThreads().first
+    XCTAssertEqual(persisted?.messages.last?.content, "a complete answer")
+  }
+
+  func testASuccessfulSaveClearsAStaleNotice() async {
+    let store = FailableConversationStore()
+    await store.setFailing(true)
+    let model = AppModel(
+      conversationStore: store,
+      providerExecutor: DeterministicMockProvider(
+        configuration: .init(outcome: .response(chunks: ["ok"]), delay: .zero)
+      )
+    )
+    model.draft = "Save me"
+    await model.sendMessage()
+    XCTAssertNotNil(model.persistenceNotice)
+
+    await store.setFailing(false)
+    model.draft = "Another"
+    await model.sendMessage()
+
+    XCTAssertNil(
+      model.persistenceNotice,
+      "a healed failure left a live Try Again on screen"
+    )
+    XCTAssertNil(model.persistenceRetry)
+  }
+
   func testAFailedRetryKeepsAnActionableNotice() async {
     let store = FailableConversationStore()
     await store.setFailing(true)
