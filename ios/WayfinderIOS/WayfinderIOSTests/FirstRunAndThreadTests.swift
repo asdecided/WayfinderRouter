@@ -16,6 +16,33 @@ final class FirstRunTests: XCTestCase {
     XCTAssertFalse(model.hasCompletedFirstRun)
   }
 
+  func testTheChooserStaysDownUntilTheRestoreHasAnswered() async {
+    // `hasCompletedFirstRun` reads "not yet" for the whole of a cold launch,
+    // because the stored value only arrives from the restore. Presenting on
+    // it alone flashed onboarding at every returning user, every launch.
+    let store = InMemoryConversationStore()
+    let first = AppModel(conversationStore: store)
+    await first.restoreConversations()
+    await first.completeFirstRun()
+
+    let relaunched = AppModel(conversationStore: store)
+    XCTAssertFalse(
+      relaunched.shouldPresentFirstRun,
+      "the cover was presented before the restore could say otherwise"
+    )
+
+    await relaunched.restoreConversations()
+    XCTAssertFalse(relaunched.shouldPresentFirstRun)
+  }
+
+  func testAGenuineFirstLaunchStillPresentsTheChooser() async {
+    let model = AppModel(conversationStore: InMemoryConversationStore())
+
+    await model.restoreConversations()
+
+    XCTAssertTrue(model.shouldPresentFirstRun)
+  }
+
   func testCompletingFirstRunSurvivesRelaunch() async {
     let store = InMemoryConversationStore()
     let first = AppModel(conversationStore: store)
@@ -91,6 +118,22 @@ final class FirstRunTests: XCTestCase {
     XCTAssertTrue(
       model.readyDestinations.allSatisfy { !$0.automaticEligible },
       "a saved key silently entered Automatic routing"
+    )
+  }
+
+  func testTheShippingBuildAdmitsItHasNoAutomaticDestination() {
+    // Every shipping destination is built `automaticEligible: false`, so the
+    // routing core hard-excludes all of them and an unpinned turn can only
+    // fail. The app used to describe Automatic as if it were routing anyway.
+    // Copy now branches on this, so the claim tracks the fact rather than
+    // asserting it — and if eligibility is ever switched on, the promise
+    // comes back on its own and this test is what says so.
+    let model = AppModel(destinations: .liveDirectProviders)
+
+    XCTAssertFalse(
+      model.hasAutomaticDestination,
+      "the copy branch that promises Automatic routing is now reachable — "
+        + "check that Automatic can actually select a destination"
     )
   }
 }

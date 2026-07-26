@@ -6,8 +6,6 @@ struct RootView: View {
   @Environment(\.scenePhase) private var scenePhase
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var showsSidebar = false
-  /// Live drag offset, in points, while the drawer is being dragged.
-  @State private var dragTranslation: CGFloat = 0
 
   // This file is written deliberately plainly — explicit types, no generic
   // view helpers, no key-path-as-function. Several rounds of CI were spent on
@@ -68,7 +66,6 @@ struct RootView: View {
       CompactShell(
         width: min(340, proxy.size.width * 0.86),
         showsSidebar: $showsSidebar,
-        dragTranslation: $dragTranslation,
         reduceMotion: reduceMotion,
         sections: sectionStack(canOpenDrawer: true),
         select: select
@@ -121,7 +118,7 @@ struct RootView: View {
 
   private var firstRunBinding: Binding<Bool> {
     Binding(
-      get: { !appModel.hasCompletedFirstRun },
+      get: { appModel.shouldPresentFirstRun },
       set: { _ in }
     )
   }
@@ -132,7 +129,6 @@ struct RootView: View {
 
   private func select(_ tab: AppTab) {
     appModel.selectedTab = tab
-    dragTranslation = 0
     showsSidebar = false
   }
 }
@@ -142,10 +138,13 @@ struct RootView: View {
 private struct CompactShell<Sections: View>: View {
   let width: CGFloat
   @Binding var showsSidebar: Bool
-  @Binding var dragTranslation: CGFloat
   let reduceMotion: Bool
   let sections: Sections
   let select: (AppTab) -> Void
+
+  /// Live drag offset, in points, while the drawer is being dragged. Owned
+  /// here, with the gesture that writes it, rather than by `RootView`.
+  @State private var dragTranslation: CGFloat = 0
 
   var body: some View {
     ZStack(alignment: .leading) {
@@ -153,18 +152,24 @@ private struct CompactShell<Sections: View>: View {
         .allowsHitTesting(!showsSidebar)
         .accessibilityHidden(showsSidebar)
 
-      if showsSidebar || dragTranslation != 0 {
-        WayfinderTheme.scrim
-          .opacity(scrimOpacity)
-          .ignoresSafeArea()
-          .onTapGesture { close() }
-          .accessibilityHidden(true)
+      // Scrim and drawer stay in the hierarchy in both states. Gating their
+      // existence on `showsSidebar` meant the drawer was inserted already at
+      // its open offset, with no previous value for the animation to run
+      // from, and was removed outright on close: it popped in and out rather
+      // than sliding either way.
+      WayfinderTheme.scrim
+        .opacity(scrimOpacity)
+        .ignoresSafeArea()
+        .allowsHitTesting(showsSidebar)
+        .onTapGesture { close() }
+        .accessibilityHidden(true)
 
-        AppSidebarView(select: select, close: { close() })
-          .frame(width: width)
-          .offset(x: drawerOffset)
-          .accessibilityAddTraits(.isModal)
-      }
+      AppSidebarView(select: selectAndReset, close: { close() })
+        .frame(width: width)
+        .offset(x: drawerOffset)
+        .allowsHitTesting(showsSidebar)
+        .accessibilityHidden(!showsSidebar)
+        .accessibilityAddTraits(.isModal)
     }
     // Dismissible by swipe, not only by hitting the scrim, and interruptible:
     // releasing below the threshold springs back rather than snapping.
@@ -174,6 +179,18 @@ private struct CompactShell<Sections: View>: View {
       value: showsSidebar,
       reduceMotion: reduceMotion
     )
+    .onChange(of: showsSidebar) { _, isOpen in
+      // Opening a modal that was already on screen is not a screen change
+      // VoiceOver detects on its own, so without this its cursor stays on
+      // whatever it was reading behind the now-hidden section (UX-027).
+      guard isOpen else { return }
+      AccessibilityNotification.ScreenChanged().post()
+    }
+  }
+
+  private func selectAndReset(_ tab: AppTab) {
+    dragTranslation = 0
+    select(tab)
   }
 
   private var dragGesture: some Gesture {

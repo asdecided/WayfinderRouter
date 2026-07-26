@@ -117,6 +117,48 @@ final class RouteReceiptTests: XCTestCase {
     )
   }
 
+  func testAPinnedRunNeverCreditsWayfinderWithTheChoice() {
+    // The only path that produces a reply in this build is a pinned one, and
+    // the routing core marks it with the "pinned" recommendation. Rendering
+    // that through the ordinary tier copy said "Wayfinder chose the pinned
+    // tier" about a destination the user picked by hand.
+    let receipt = StoredRouteReceipt(
+      destinationID: "openai",
+      destinationName: "GPT-5.6",
+      score: 0.32,
+      recommendation: StoredRouteReceipt.pinnedRecommendation,
+      executionSummary: "Hosted cloud",
+      boundaryID: ExecutionBoundary.hosted.storageID
+    )
+
+    XCTAssertTrue(receipt.wasPinnedByUser)
+    XCTAssertFalse(
+      receipt.scoreExplanation.contains("Wayfinder chose"),
+      "the receipt attributed the user's decision to the router"
+    )
+    XCTAssertTrue(receipt.scoreExplanation.contains("You chose this destination"))
+    XCTAssertNotEqual(
+      receipt.tierDescription,
+      StoredRouteReceipt.pinnedRecommendation,
+      "\"Routing tier: pinned\" surfaces an internal marker as a tier"
+    )
+  }
+
+  func testAnAutomaticRunStillExplainsTheTierItChose() {
+    let receipt = StoredRouteReceipt(
+      destinationID: "openai",
+      destinationName: "GPT-5.6",
+      score: 0.32,
+      recommendation: "cloud",
+      executionSummary: "Hosted cloud",
+      boundaryID: ExecutionBoundary.hosted.storageID
+    )
+
+    XCTAssertFalse(receipt.wasPinnedByUser)
+    XCTAssertEqual(receipt.tierDescription, "cloud")
+    XCTAssertTrue(receipt.scoreExplanation.contains("Wayfinder chose"))
+  }
+
   func testHostedReceiptReadsAsHostedCloud() {
     let receipt = StoredRouteReceipt(
       destinationID: "openai",

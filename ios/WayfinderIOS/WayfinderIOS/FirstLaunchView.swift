@@ -140,8 +140,13 @@ struct FirstLaunchView: View {
       Text("Welcome to Wayfinder")
         .font(.largeTitle.weight(.bold))
 
+      // Claimed the message was "then sent to the cheapest destination that
+      // can handle it". Nothing is enrolled in Automatic in this release, so
+      // that was the first sentence a new user read and it was false.
       Text(
-        "Every message is scored on this device, then sent to the cheapest destination that can handle it. You always see where it ran."
+        appModel.hasAutomaticDestination
+          ? "Every message is scored on this device, then sent to the cheapest destination that can handle it. You always see where it ran."
+          : "Every message is scored on this device, and you always see where it ran. Choosing a destination is up to you in this release — Wayfinder never picks one on its own."
       )
       .font(.subheadline)
       .foregroundStyle(.secondary)

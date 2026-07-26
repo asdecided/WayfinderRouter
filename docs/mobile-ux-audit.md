@@ -374,19 +374,38 @@ show is enumerated in `docs/mobile-fidelity.md` and is **not** claimed here.
 | UX-012 | P2 | Design system | No asset catalog: no app icon, color sets, or appearance variants | `project.yml:29` | Phase 6; icon gates Phase 8 | fixed@fd1df17 — asset catalogue, app icon, launch screen. Rendering on a real Home Screen is Tier 2 |
 | UX-013 | P2 | Onboarding | No first-launch experience; API-key flow has no payoff beyond the key screens (no destination, routing, or chat change) | roadmap "First launch"; `APIKeysView.swift:19-23` | Phase 3 | fixed@5b7649f — first-launch chooser per the roadmap; readiness surfaced in Chat |
 | UX-014 | P2 | Threads | No search, rename, pin, or archive; naive 49-char titles; absolute timestamps; 500-thread fetch cap unpaginated | `ThreadsView.swift`; `ConversationStore.swift:44-55, 190`; `RootView.swift:169` | Phase 6 | fixed@7b82e66 — search, rename, pin, and the drawer cap raised to 30 with a pinned section. The 500-thread store fetch remains unpaginated; deferred, see note below |
-| UX-015 | P2 | Errors | Failures surface as blocking alerts with no inline recovery; nine distinct persistence-failure strings, zero retry affordances | `RootView.swift:17-33`; `SettingsView.swift:101-117`; `AppModel.swift:751-752` | Phase 6 | fixed@852e37a, 7b82e66 — every storage failure carries a retry action and renders inline; no alert remains for a recoverable failure |
+| UX-015 | P2 | Errors | Failures surface as blocking alerts with no inline recovery; nine distinct persistence-failure strings, zero retry affordances | `RootView.swift:17-33`; `SettingsView.swift:101-117`; `AppModel.swift:751-752` | Phase 6 | partly fixed@852e37a, 7b82e66, b004aba — every storage failure renders inline and carries a retry action. **The disposition written here at 7b82e66 — "no alert remains for a recoverable failure" — was false when it was written**: a blocking alert survived in `AccountsView` until b004aba. Credential failures render inline in the API-key list and, since b004aba+1, inside the editor sheet above it; their retry is the originating action (Save, Remove), not a dedicated button |
 | UX-016 | P2 | Streaming | No streaming cursor or content transition; spinner vanishes at first delta, leaving the composer's stop→send swap as the only completion signal | `ChatTabView.swift:238-252, 432-434` | Phase 3 | fixed@73def60, 6561196 — streaming cursor and block-stable incremental parsing |
 | UX-017 | P2 | Receipts | Score shown as bare decimal with no explanation; sheet omits contract-owned reason codes, fallback truth, and error recovery | `ChatTabView.swift:346-349`; WF-DESIGN-0020 receipts | Phase 6 | fixed@7b82e66 — score explained in words; reason codes and fallback truth from the routing core |
 | UX-018 | P2 | Privacy | Posture menu offers three titles with no in-context consequence explanation (Claude's inline-explainer copy pattern) | `ChatTabView.swift:419-430`; `SettingsView.swift:24-34` | Phase 6 | fixed@7b82e66 — each posture states its consequence where the choice is made |
 | UX-019 | P2 | Motion | No Reduce Motion guards on drawer or autoscroll animations | `RootView.swift:65`; `ChatTabView.swift:54` | Now | fixed@7b82e66, 6080b65 — springs throughout with a Reduce Motion crossfade; drawer drag is interruptible |
 | UX-020 | P2 | Navigation | Per-section `NavigationStack` state rebuilt on every drawer switch; roadmap and ADR require independent per-section stacks, and the contract's permitted hidden-container mechanism is unused | `RootView.swift:68-86, 98-116`; WF-ROADMAP-0016 information architecture; WF-ADR-0047 | Phase 6 | fixed@7b82e66, 6080b65 — sections held in a ZStack container, the contract's permitted \"or equivalent\" |
-| UX-021 | P2 | Performance | Per-delta full-thread JSON re-encode + dual persistence writes; transcript defeats `LazyVStack` laziness | `AppModel.swift:669-690, 742-754`; `ChatTabView.swift:25-44, 188-209` | Phase 3 | fixed@852e37a — checkpointed persistence, restored `LazyVStack` laziness, signposts. Numeric budgets are Tier 2 |
+| UX-021 | P2 | Performance | Per-delta full-thread JSON re-encode + dual persistence writes; transcript defeats `LazyVStack` laziness | `AppModel.swift:669-690, 742-754`; `ChatTabView.swift:25-44, 188-209` | Phase 3 | partly fixed@852e37a, 6561196, b004aba — checkpointed persistence replaces the per-delta re-encode, `LazyVStack` laziness is restored, markdown reuses settled blocks, and `ThreadsView` no longer scans the corpus while invisible. Per-delta cost is reduced, not removed: the parser still reparses the volatile tail block and the turn rotor still rebuilds every entry on each delta. **No numeric budget has been measured** — every performance claim here is Tier 2, see `docs/mobile-fidelity.md` |
 | UX-022 | P3 | Threads | Relative timestamps ("51 minutes ago") in lists, as both references use | `ThreadsView.swift:36-41` | Phase 6 | fixed@7b82e66 — relative timestamps in both lists |
 | UX-023 | P3 | Settings | Two-step export ("Prepare" then "Share") where one `ShareLink` would do | `SettingsView.swift:49-64` | Phase 6 | fixed@7b82e66 — one-step `ShareLink` |
 | UX-024 | P3 | Composer | Dead "+" menu: replace with an inert labelled state or hide until attachments exist | `ChatTabView.swift:399-411` | Phase 3 | fixed@7b82e66 — inert, labelled unavailable attachment state |
 | UX-025 | P3 | Design system | No spacing/radius/type token scale; no route-boundary color semantics carried from macOS theme | `WayfinderTheme.swift`; `macos/.../WayfinderTheme.swift` | Phase 6 | fixed@fd1df17 — spacing, radius, metric, and motion token scales; macOS route-boundary semantics ported |
 | UX-026 | P3 | Polish | No haptics; no send-button content transition; empty-state chips mid-screen rather than composer-adjacent; redundant `navigationTitle` declaration superseded by the principal toolbar item | `ChatTabView.swift:92, 106-112, 150-186, 432-445` | Phase 6 | fixed@7b82e66 — centralised feedback vocabulary, composer-adjacent chips, redundant `navigationTitle` removed. The feel test is Tier 3 |
 | UX-027 | P2 | Accessibility / drawer | Drawer offers no explicit close control; the scrim is hidden from assistive tech, leaving destination selection as the only assistive dismissal | `RootView.swift:51-62` | Now | fixed@7b82e66 — explicit drawer close control and a turn rotor |
+
+### Post-audit findings (raised by the blind gauntlet review, not by the original audit)
+
+These were found by a reviewer who built none of the work, re-running the
+nine-journey rubric and the contract matrix against the polish branch. Three of
+them are more severe than anything in the original register. Two were
+**introduced by the polish pass itself**, which is exactly what an adversarial
+pass exists to catch.
+
+| ID | Sev | Surface | Finding | Evidence | Disposition |
+|---|---|---|---|---|---|
+| UX-028 | P0 | Routing | **Automatic routing can never select a destination.** Every shipping destination is built `automaticEligible: false`, the routing core hard-excludes on exactly that flag, so `plan_automatic_route` returns no selection and any unpinned turn ends as a failed reply. Three separate strings told the user the opposite | `AppModel.swift` (`liveDirectProviders`, discovered models); `rust/crates/wayfinder-routing-core/src/lib.rs` `automatic_eligible` exclusion | **Copy fixed; behaviour deferred.** Every string that described Automatic now branches on `AppModel.hasAutomaticDestination` instead of asserting the behaviour, so the app stops promising a decision it cannot make and the promise returns on its own if eligibility is ever enabled. `FirstRunTests.testTheShippingBuildAdmitsItHasNoAutomaticDestination` pins the fact. Enrolling destinations in Automatic is a routing-behaviour change, not polish, and WF-ROADMAP-0016 requires it be an explicit user opt-in — out of this pass's scope, and the largest open item in the mobile client. Predates the branch (`b9b65ed`, `d1fa3cc`, `274d35e`) |
+| UX-029 | P0 | Receipts | The receipt sheet's honesty footer branched on a `-preview` destination-ID suffix that no shipping destination carries, so the dead branch meant **every real receipt claimed the response "was sent directly from this device to the selected provider"** — including an Apple On-Device run under On-Device Only, where nothing was sent at all | `ChatTabView.RouteReceiptSheet` | fixed — `egressStatement` branches on the persisted `ExecutionBoundary`, which is the only thing that knows. Predates the branch (`b9b65ed`) |
+| UX-030 | P1 | Composer / guardrail 1 | The composer's route label was a `Menu` wrapping a `Picker` over destination display names — **a model picker, in the exact screen position both reference apps put theirs**, against the product's first and most explicit guardrail | `ChatTabView.DestinationLabel` as introduced at `7b82e66` | fixed — replaced by `RouteLabel`, a readout of where the next message will go. Its two actions are not model choices: unpin back to Automatic, and navigate to Destinations, which owns explicit selection with the readiness gating a bare name list cannot apply. **Introduced by this polish pass** |
+| UX-031 | P1 | Onboarding | The first-launch cover presented on **every cold launch for existing users**: the stored flag only arrives from `restoreConversations()`, which runs after first render, so onboarding appeared and then dismissed itself | `AppModel.hasCompletedFirstRun`; `RootView.firstRunBinding` | fixed — `shouldPresentFirstRun` gates on the restore having answered. Two tests cover both directions. **Introduced by this polish pass** (the `= false` default was itself a fix for a worse bug; this is the other edge of it) |
+| UX-032 | P2 | Receipts | On the only working path, `recommendation` is the internal marker `"pinned"`, so the sheet read "Routing tier: pinned" and the score explanation read "Wayfinder chose the pinned tier" — crediting the router with a decision the user made by hand | `RouteReceipt.scoreExplanation`; `ChatTabView.RouteReceiptSheet` | fixed — `wasPinnedByUser` drives both strings; asserted in `RouteReceiptTests` |
+| UX-033 | P2 | Chat / scrolling | The scroll-to-latest pill lived inside the composer's `safeAreaInset` stack, so its appearance changed the transcript's bottom inset — shifting content under the reader's finger at the exact moment they scrolled up mid-stream | `ChatTabView.composerArea` | fixed — the pill is an overlay on the composer with an alignment guide placing its own bottom edge above it, so it takes no part in layout |
+| UX-034 | P2 | Settings | The export payload was keyed on `threads.count`, so adding turns to an existing thread left the key unchanged and the share sheet handed over a stale snapshot | `SettingsView` export task | fixed — keyed on count plus the latest `updatedAt` |
+| UX-035 | P2 | Credentials | A failed key save left the editor sheet open with no explanation: the notice rendered on the list underneath, hidden by the sheet, so the only feedback was the Save button becoming tappable again | `APIKeysView.APIKeyEditorSheet` | fixed — the notice renders inside the sheet; the retry is Save itself, which clears it on success |
 
 ### Deferred, with rationale
 
@@ -442,6 +461,50 @@ haptics and micro-motion (UX-026).
 
 ## Appendix A — WF-DESIGN-0020 compliance matrix
 
+**Re-checked at the head of `claude/new-session-vrfhmp`.** The original matrix
+below it was written against `6d51d61` and was never revisited during the
+polish pass, so for a time this document asserted both "Receipt copy uses the
+'Ran …' grammar | Violated" and "UX-010 | fixed@7b82e66 — 'Ran …' grammar".
+A blind gauntlet reviewer caught that, and it was the fair criticism: the
+register was maintained and the contract matrix was not.
+
+Two rows had *regressed* to Violated during the pass and are fixed in the same
+commit as this re-check.
+
+| # | Contract clause | Status | Evidence |
+|---|---|---|---|
+| 1 | Chat is the default and dominant screen | Compliant | `AppModel.swift` (`selectedTab = .chat`); `RootView.sectionStack` |
+| 2 | Leading button opens slide-over drawer | Compliant | `RootView.CompactShell` — drag, scrim, swipe-to-close |
+| 3 | No persistent bottom tab bar | Compliant | `ZStack` container; no `TabView` in target |
+| 4 | New chat in top trailing and drawer | Compliant | `ChatTabView.toolbarContent`; `RootView.AppSidebarView` |
+| 5 | Title exposes Automatic mode without implementation detail | Compliant | `ChatTabView.RoutingModeMenu` — states what Automatic does *and* that nothing is enrolled in it in this release, rather than advertising a decision the build cannot make |
+| 6 | Empty state short, centred, useful; no fabricated capability | Compliant | `ChatTabView.emptyState` — readiness is reported, not promised |
+| 7 | Composer via `safeAreaInset`, neutral surface, multiline, compact controls | Compliant | `ChatTabView.ComposerView` |
+| 8 | Attachment affordance only with explicit accessible unavailable state | Compliant | `ChatTabView.AttachmentAffordance` — inert, labelled, `.isStaticText` |
+| 9 | Hidden `TabView`/equivalent may preserve per-section stack state | Compliant | `RootView.sectionStack` + `SectionVisibility` — the contract's permitted "or equivalent" |
+| 10 | iPad `NavigationSplitView`, no third column, receipt in sheet | Compliant | `RootView.regularWidthLayout`; `ChatTabView` receipt sheet |
+| 11 | Collapse produces iPhone model | Compliant by construction, **unverified** | size-class switch in `RootView.layout`; Tier 2 row in `docs/mobile-fidelity.md` |
+| 12 | Quiet trailing user bubble; assistant reads as transcript | Compliant | `ChatTabView.UserMessage` / `AssistantMessage` |
+| 13 | Receipt copy uses the "Ran …" grammar | Compliant | `ExecutionBoundary.receiptPhrase`; `StoredRouteReceipt.receiptSummary`; asserted in `RouteReceiptTests` |
+| 14 | Receipt detail owns boundary, tier, score, reason codes, fallback truth, recovery | **Partial** | reason codes, fallback truth, and an honest tier are present; the sheet still offers **no bounded error recovery** |
+| 15 | Deterministic provider visibly bounded; copy never implies live provider | Compliant | `RouteReceiptSheet.egressStatement`. **Was Violated**: the honesty footer branched on a `-preview` ID suffix no shipping destination carries, so every real receipt — including an Apple On-Device run under On-Device Only — claimed a send that never happened. It now branches on the execution boundary |
+| 16 | Composer contract (field, **Automatic label**, privacy menu, gated send) | Compliant | `ChatTabView.RouteLabel`. **Was Violated**: this pass introduced a `Picker` over destination display names in the composer at `7b82e66` — a model picker, in the position both reference apps use, against the product's first guardrail. Removed; the label now reads route state and delegates explicit choice to Destinations |
+| 17 | Send/Stop labels; no concurrent submit | Compliant | `ChatTabView.SendButton`; `AppModel.canSendMessage` |
+| 18 | System materials; no strong permanent green outline | Compliant | composer hairline is `WayfinderTheme.hairline`, not accent |
+| 19 | Drawer modal to AT; obscured content unfocusable | Compliant | `CompactShell` — `.isModal`, sections hidden, `ScreenChanged` on open |
+| 20 | Icon-only controls labelled | Compliant | throughout; explicit drawer close in `AppSidebarView.sidebarHeader` |
+| 21 | Receipt rows combine into one reading unit | **Partial** | the headline combines; the four `LabeledContent` detail rows are still separate elements |
+| 22 | Dynamic Type never hides send/privacy/navigation | **Partial — unverified** | `@ScaledMetric` throughout and the composer wraps at accessibility sizes; the AX5 sweep of every screen is Tier 2 |
+| 23 | Keyboard dismissal preserves draft | Compliant | `.scrollDismissesKeyboard(.interactively)`; draft is model state |
+| 24 | New chat clears only transient state, returns to Chat | Compliant | `AppModel.startNewChat` |
+
+**19 Compliant, 1 Compliant-unverified, 3 Partial, 0 Violated.** None of the
+three Partial rows is blocked on a live provider; each is named in the
+post-audit register rows below.
+
+<details>
+<summary>Original matrix as written at <code>6d51d61</code>, kept for the record</summary>
+
 | Contract clause | Status | Evidence |
 |---|---|---|
 | Chat is the default and dominant screen | Compliant | `AppModel.swift:135` (`selectedTab = .chat`); `RootView.swift:69-86` |
@@ -480,3 +543,5 @@ haptics and micro-motion (UX-026).
 - `docs/apple-platform-capability-matrix.md` — capability truth table behind boundary language
 - `.agents/skills/wayfinder-codex-ux-review/` — reusable UX principles (calm density, color has
   meaning, explicit state, reduced-motion-aware motion)
+
+</details>

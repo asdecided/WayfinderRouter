@@ -109,8 +109,17 @@ For every configuration:
 
 ### Motion and navigation (UX-019, UX-020)
 
+- [ ] **The drawer slides.** It was conditionally inserted into the hierarchy on open, so it
+      appeared already at its final offset and was removed outright on close — it popped in and out
+      rather than animating either way, and no critic caught it from the code until the drawer's
+      existence gate was read as a layout question rather than a lifecycle one. Scrim and panel now
+      stay mounted in both states. This is the app's most-used interaction and the fix is entirely
+      unobserved.
 - [ ] The drawer is interruptible: reversing a drag mid-flight retargets the spring rather than
       snapping to either end.
+- [ ] The scroll-to-latest pill floats above the composer as an overlay with an alignment guide,
+      and the transcript does **not** shift when it appears or leaves. Verify specifically while
+      scrolled up mid-stream, which is the only moment it appears.
 - [ ] The drawer dismisses by swipe as well as by scrim tap, and the scrim fades in proportion to
       drag distance.
 - [ ] Pushing a detail screen inside Settings, opening the drawer, switching to Threads, and

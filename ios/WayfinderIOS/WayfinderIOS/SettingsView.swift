@@ -6,6 +6,15 @@ struct SettingsView: View {
   @State private var showsClearConfirmation = false
   var openSidebar: (() -> Void)?
 
+  /// Identity of the exportable corpus: how many threads there are and when
+  /// the most recently touched one changed. `-1` while Settings is off screen
+  /// so a background stream never re-encodes the whole corpus.
+  private var exportKey: String {
+    guard appModel.selectedTab == .settings else { return "-1" }
+    let latest = appModel.threads.map(\.updatedAt).max() ?? .distantPast
+    return "\(appModel.threads.count)@\(latest.timeIntervalSince1970)"
+  }
+
   var body: some View {
     @Bindable var appModel = appModel
 
@@ -116,9 +125,11 @@ struct SettingsView: View {
     } message: {
       Text("This permanently removes saved threads and the current draft.")
     }
-    // Built when Settings is actually on screen. Keyed on thread count it
-    // re-encoded every conversation each time a new chat began, from Chat.
-    .task(id: appModel.selectedTab == .settings ? appModel.threads.count : -1) {
+    // Built when Settings is actually on screen. Keyed on thread count alone
+    // it re-encoded everything each time a new chat began from Chat — and,
+    // worse, adding turns to an existing thread left the count unchanged, so
+    // the share sheet handed over a stale snapshot.
+    .task(id: exportKey) {
       guard appModel.selectedTab == .settings else { return }
       exportedConversations = await appModel.exportConversations()
     }

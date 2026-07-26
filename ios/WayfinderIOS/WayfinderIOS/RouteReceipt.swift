@@ -70,10 +70,34 @@ extension StoredRouteReceipt {
     return "\(boundary.receiptPhrase) · \(destinationName)"
   }
 
+  /// True when this turn ran against a destination the user pinned, rather
+  /// than one Automatic selected. The routing core marks the single-tier
+  /// engine it builds for a pinned run with this recommendation.
+  var wasPinnedByUser: Bool {
+    recommendation == Self.pinnedRecommendation
+  }
+
+  static let pinnedRecommendation = "pinned"
+
+  /// How the tier reads in the detail sheet. "pinned" is an internal marker,
+  /// not a tier the router picked, and showing it raw under the heading
+  /// "Routing tier" credited the router with the user's decision.
+  var tierDescription: String {
+    wasPinnedByUser ? "Not used — you chose this destination" : recommendation
+  }
+
   /// A one-line reading of the deterministic score, so the number is not the
   /// only thing the sheet says about it.
+  ///
+  /// A pinned run never claims Wayfinder chose anything: the score was still
+  /// computed on this device, but it decided nothing, and saying otherwise
+  /// attributes a human decision to the router.
   var scoreExplanation: String {
     let formatted = score.formatted(.number.precision(.fractionLength(2)))
+    guard !wasPinnedByUser else {
+      return
+        "Scored \(formatted) on this device. You chose this destination, so the score did not affect where this ran."
+    }
     switch score {
     case ..<0.10:
       return

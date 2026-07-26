@@ -41,6 +41,13 @@ struct ChatView: View {
         .background(WayfinderTheme.canvas)
         .safeAreaInset(edge: .bottom, spacing: 0) {
           composerArea(scrollProxy: scrollProxy)
+            // The pill floats above the composer instead of sitting in its
+            // stack. Inside the stack it was part of the bottom inset, so
+            // the moment it appeared — which is the moment you scroll up
+            // mid-stream — the transcript shifted under your finger.
+            .overlay(alignment: .top) {
+              scrollToLatestControl(scrollProxy: scrollProxy)
+            }
         }
         .onChange(of: messages.last?.content) {
           followTailIfNeeded(using: scrollProxy)
@@ -134,24 +141,33 @@ struct ChatView: View {
 
   private static let tailAnchor = "wayfinder.transcript.tail"
 
+  /// Floats the return-to-latest pill just above the composer without taking
+  /// part in its layout. The alignment guide moves the pill's own bottom edge
+  /// to the composer's top, so nothing reflows when it appears or leaves.
+  @ViewBuilder
+  private func scrollToLatestControl(
+    scrollProxy: ScrollViewProxy
+  ) -> some View {
+    if scroll.showsScrollToBottomControl {
+      ScrollToLatestButton {
+        returnToLatest(using: scrollProxy)
+      }
+      .alignmentGuide(.top) { dimensions in
+        dimensions[.bottom] + WayfinderSpacing.xSmall
+      }
+      .transition(
+        reduceMotion
+          ? .opacity
+          : .opacity.combined(with: .scale(scale: 0.86, anchor: .bottom))
+      )
+    }
+  }
+
   @ViewBuilder
   private func composerArea(scrollProxy: ScrollViewProxy) -> some View {
     @Bindable var appModel = appModel
 
     VStack(spacing: WayfinderSpacing.xSmall) {
-      // The control lives directly above the composer so it never overlaps
-      // the transcript's newest content, and takes no space when following.
-      if scroll.showsScrollToBottomControl {
-        ScrollToLatestButton {
-          returnToLatest(using: scrollProxy)
-        }
-        .transition(
-          reduceMotion
-            ? .opacity
-            : .opacity.combined(with: .scale(scale: 0.86, anchor: .bottom))
-        )
-      }
-
       // Suggestions sit directly above the composer, where task entry
       // happens, rather than stranded mid-screen (UX-026).
       if messages.isEmpty, appModel.draft.isEmpty {
@@ -167,6 +183,7 @@ struct ChatView: View {
         isGenerating: appModel.executionPhase.isActive,
         submit: { submit(using: scrollProxy) },
         stop: { Task { await appModel.stopGenerating() } },
+        openDestinations: { appModel.selectedTab = .destinations },
         isForeground: appModel.selectedTab == .chat
       )
       .focused($composerFocused)
@@ -192,7 +209,10 @@ struct ChatView: View {
     }
 
     ToolbarItem(placement: .principal) {
-      RoutingModeMenu(posture: appModel.privacyPosture)
+      RoutingModeMenu(
+        posture: appModel.privacyPosture,
+        hasAutomaticDestination: appModel.hasAutomaticDestination
+      )
     }
 
     ToolbarItemGroup(placement: .topBarTrailing) {
@@ -266,13 +286,16 @@ struct ChatView: View {
 /// because the routing decision is the product.
 private struct RoutingModeMenu: View {
   let posture: PrivacyPostureOption
+  /// Whether any destination is actually enrolled in Automatic. Read from the
+  /// destinations rather than asserted: in this release nothing is enrolled,
+  /// and describing Automatic as if it were routing was the single largest
+  /// untruth in the app.
+  let hasAutomaticDestination: Bool
 
   var body: some View {
     Menu {
       Section("Automatic routing") {
-        Text(
-          "Wayfinder scores every message on this device and sends it to the cheapest destination that can handle it."
-        )
+        Text(automaticExplanation)
       }
       Section("Privacy") {
         Text("\(posture.title) — \(posture.boundarySummary).")
@@ -288,8 +311,22 @@ private struct RoutingModeMenu: View {
       .contentShape(Rectangle())
     }
     .accessibilityLabel("Routing mode")
-    .accessibilityValue("Automatic")
+    .accessibilityValue(hasAutomaticDestination ? "Automatic" : "No Automatic destination")
     .accessibilityHint("Explains how Wayfinder chooses a destination")
+  }
+
+  private var automaticExplanation: String {
+    guard hasAutomaticDestination else {
+      return """
+        Wayfinder scores every message on this device. No destination is \
+        enrolled in Automatic in this release, so choose one in Destinations \
+        — the score is still recorded on every receipt.
+        """
+    }
+    return """
+      Wayfinder scores every message on this device and sends it to the \
+      cheapest destination that can handle it.
+      """
   }
 }
 
@@ -802,7 +839,7 @@ private struct RouteReceiptSheet: View {
         Section("Details") {
           LabeledContent("Destination", value: receipt.destinationName)
           LabeledContent("Execution", value: receipt.executionSummary)
-          LabeledContent("Routing tier", value: receipt.recommendation)
+          LabeledContent("Routing tier", value: receipt.tierDescription)
           LabeledContent(
             "Score",
             value: receipt.score.formatted(.number.precision(.fractionLength(2)))
@@ -843,14 +880,14 @@ private struct RouteReceiptSheet: View {
         }
 
         Section {
-          Label(
-            receipt.destinationID.hasSuffix("-preview")
-              ? "This response used the deterministic preview provider. No network request was made."
-              : "This response was sent directly from this device to the selected provider.",
-            systemImage: "checkmark.shield"
-          )
-          .font(.footnote)
-          .foregroundStyle(.secondary)
+          // Branched on a "-preview" ID suffix until the gauntlet found that
+          // no shipping destination carries one, so every real receipt —
+          // including an Apple On-Device run under On-Device Only — claimed
+          // a send that never happened. The execution boundary is the only
+          // thing that actually knows, so it decides.
+          Label(egressStatement, systemImage: "checkmark.shield")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
         } header: {
           Text("This build slice")
         }
@@ -869,6 +906,20 @@ private struct RouteReceiptSheet: View {
 
   private var boundary: ExecutionBoundary {
     receipt.boundary ?? .hosted
+  }
+
+  /// What actually crossed the device edge, stated per boundary. The
+  /// on-device case must never assert a send: under On-Device Only that
+  /// sentence would be the one falsehood the posture exists to rule out.
+  private var egressStatement: String {
+    switch boundary {
+    case .onDevice:
+      "This response was produced on this device. No network request was made."
+    case .localNetwork:
+      "This response was sent to a device on your local network, not to a hosted provider."
+    case .hosted:
+      "This response was sent directly from this device to the provider named above, with no Wayfinder server in between."
+    }
   }
 }
 
@@ -896,6 +947,7 @@ private struct ComposerView: View {
   let isGenerating: Bool
   let submit: () -> Void
   let stop: () -> Void
+  let openDestinations: () -> Void
   /// Every section stays mounted to preserve its navigation stack, so the
   /// composer's shortcuts must not fire from Settings or Threads.
   var isForeground = true
@@ -968,10 +1020,11 @@ private struct ComposerView: View {
   private var routingControls: some View {
     HStack(spacing: WayfinderSpacing.xSmall) {
       AttachmentAffordance(size: controlSize)
-      DestinationLabel(
+      RouteLabel(
         selectedDestinationID: $selectedDestinationID,
         destinations: destinations,
-        minimumHeight: controlSize
+        minimumHeight: controlSize,
+        openDestinations: openDestinations
       )
     }
   }
@@ -1015,33 +1068,50 @@ private struct AttachmentAffordance: View {
   }
 }
 
-private struct DestinationLabel: View {
+/// The composer's route label.
+///
+/// This was a `Picker` over destination display names until the gauntlet
+/// caught it: a list of model names in the composer is a model picker, in the
+/// same screen position the reference apps put theirs, and the product's
+/// first guardrail forbids one outright. WF-DESIGN-0020 asks for "a compact
+/// Automatic route label" here — a readout of where the next message will go.
+///
+/// The two actions it offers are not model choices. Returning to Automatic
+/// removes a pin rather than picking anything, and the second is navigation
+/// to Destinations, which owns explicit selection and applies the readiness
+/// rules — disabling what has no key — that a bare name list cannot.
+private struct RouteLabel: View {
   @Binding var selectedDestinationID: String?
   let destinations: [RoutingDestination]
   let minimumHeight: CGFloat
+  let openDestinations: () -> Void
 
   var body: some View {
     Menu {
-      Picker("Destination", selection: $selectedDestinationID) {
-        Text("Automatic — Wayfinder chooses")
-          .tag(nil as String?)
-        ForEach(destinations) { destination in
-          Text(destination.displayName)
-            .tag(Optional(destination.id))
+      if selectedDestinationID != nil {
+        Button("Use Automatic Routing") {
+          selectedDestinationID = nil
         }
       }
+      Button("Choose in Destinations…", action: openDestinations)
     } label: {
       Label(
         selectedDestinationName,
-        systemImage: "point.3.connected.trianglepath.dotted"
+        systemImage: selectedDestinationID == nil
+          ? "point.3.connected.trianglepath.dotted"
+          : "pin.fill"
       )
       .font(.subheadline.weight(.medium))
       .foregroundStyle(.secondary)
       .frame(minHeight: minimumHeight)
       .contentShape(Rectangle())
     }
-    .accessibilityLabel("Destination")
-    .accessibilityValue(selectedDestinationName)
+    .accessibilityLabel("Route")
+    .accessibilityValue(
+      selectedDestinationID == nil
+        ? "Automatic"
+        : "Pinned to \(selectedDestinationName)"
+    )
   }
 
   private var selectedDestinationName: String {

@@ -176,6 +176,29 @@ final class AppModel {
   /// silently skipped onboarding — and the next successful save persisted
   /// that as fact.
   private(set) var hasCompletedFirstRun = false
+
+  /// Whether the first-launch chooser should be on screen right now.
+  ///
+  /// Gated on the restore having answered the question. `hasCompletedFirstRun`
+  /// alone reads "not yet" for the whole of every cold launch, because the
+  /// stored value only arrives from `restoreConversations()` — which runs from
+  /// a `.task`, after first render. Presenting on that meant returning users
+  /// saw onboarding flash up and dismiss itself on every single launch.
+  var shouldPresentFirstRun: Bool {
+    hasLoadedFirstRunState && !hasCompletedFirstRun
+  }
+
+  /// Whether any compiled destination is enrolled in Automatic routing.
+  ///
+  /// In this release none is — every destination is built with
+  /// `automaticEligible: false` — so `plan_automatic_route` can never select
+  /// one and an unpinned turn always fails. Copy that describes Automatic
+  /// reads this rather than asserting the behaviour, so the app stops
+  /// promising a decision it cannot make.
+  var hasAutomaticDestination: Bool {
+    destinations.contains { $0.automaticEligible }
+  }
+
   var credentialNotice: String?
   var accountNotice: String?
   var openRouterAccountState = ProviderAccountState(
@@ -228,7 +251,7 @@ final class AppModel {
     providerModelCatalog: any ProviderModelCatalog = EmptyProviderModelCatalog(),
     destinations: [RoutingDestination] = .previewCandidates,
     initialPersistenceNotice: String? = nil,
-    hasCompletedFirstRun: Bool = false,
+    hasCompletedFirstRun: Bool? = nil,
     checkpointPolicy: StreamingCheckpointPolicy = .standard,
     now: @escaping () -> Date = Date.init
   ) {
@@ -247,7 +270,13 @@ final class AppModel {
     compiledDestinations = destinations
     self.destinations = destinations
     self.persistenceNotice = initialPersistenceNotice
-    self.hasCompletedFirstRun = hasCompletedFirstRun
+    // Only an explicitly injected value counts as loaded. The app passes
+    // nothing here and waits for the restore; previews and tests that state a
+    // value must not have it treated as a pending restore.
+    if let hasCompletedFirstRun {
+      self.hasCompletedFirstRun = hasCompletedFirstRun
+      self.hasLoadedFirstRunState = true
+    }
     self.now = now
 
     do {
@@ -525,7 +554,12 @@ final class AppModel {
       {
         let pinnedEngine = try RoutingEngine(
           configuration: RoutingConfiguration(
-            tiers: [RoutingTier(minScore: 0, model: "pinned")]
+            tiers: [
+              RoutingTier(
+                minScore: 0,
+                model: StoredRouteReceipt.pinnedRecommendation
+              )
+            ]
           )
         )
         plan = try pinnedEngine.plan(

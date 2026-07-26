@@ -151,6 +151,17 @@ private struct APIKeyEditorSheet: View {
   var body: some View {
     NavigationStack {
       Form {
+        // A failed save leaves this sheet open. Without the notice here the
+        // only feedback is the Save button becoming tappable again, and the
+        // explanation sits on the list underneath, hidden by this sheet.
+        if let credentialNotice = appModel.credentialNotice {
+          Section {
+            Label(credentialNotice, systemImage: "exclamationmark.triangle.fill")
+              .font(.footnote)
+              .foregroundStyle(WayfinderTheme.warning)
+          }
+        }
+
         Section {
           SecureField(provider.placeholder, text: $key)
             .textInputAutocapitalization(.never)
