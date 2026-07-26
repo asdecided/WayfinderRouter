@@ -116,24 +116,118 @@ final class FirstRunTests: XCTestCase {
 
     XCTAssertNil(model.selectedDestinationID)
     XCTAssertTrue(
-      model.readyDestinations.allSatisfy { !$0.automaticEligible },
+      model.readyDestinations
+        .filter { $0.boundary != .onDevice }
+        .allSatisfy { !$0.automaticEligible },
       "a saved key silently entered Automatic routing"
     )
   }
 
-  func testTheShippingBuildAdmitsItHasNoAutomaticDestination() {
-    // Every shipping destination is built `automaticEligible: false`, so the
-    // routing core hard-excludes all of them and an unpinned turn can only
-    // fail. The app used to describe Automatic as if it were routing anyway.
-    // Copy now branches on this, so the claim tracks the fact rather than
-    // asserting it — and if eligibility is ever switched on, the promise
-    // comes back on its own and this test is what says so.
+  func testOnDeviceIsEnrolledInAutomaticWithoutBeingAsked() {
+    // The one case where a default costs nothing to consent to: on-device
+    // execution sends nothing anywhere. Every destination used to be built
+    // ineligible, so Automatic could never select anything and an unpinned
+    // turn always failed while the copy claimed otherwise.
     let model = AppModel(destinations: .liveDirectProviders)
 
+    let onDevice = model.destinations.first { $0.boundary == .onDevice }
+    XCTAssertEqual(onDevice?.automaticEligible, true)
+    XCTAssertTrue(model.hasAutomaticDestination)
+  }
+
+  func testOnDeviceEnrolmentIsNotSomethingTheUserCanBeAskedToWithdraw() {
+    let model = AppModel(destinations: .liveDirectProviders)
+
+    let onDevice = model.destinations.first { $0.boundary == .onDevice }
+    XCTAssertNotNil(onDevice)
     XCTAssertFalse(
-      model.hasAutomaticDestination,
-      "the copy branch that promises Automatic routing is now reachable — "
-        + "check that Automatic can actually select a destination"
+      model.canEnrolInAutomatic(onDevice!),
+      "offering a toggle that cannot move implies the default is negotiable"
+    )
+  }
+
+  func testAHostedDestinationJoinsAutomaticOnlyWhenTheUserSaysSo() async {
+    let store = InMemoryConversationStore()
+    let model = AppModel(
+      conversationStore: store,
+      destinations: .liveDirectProviders
+    )
+    await model.restoreConversations()
+
+    let hosted = model.destinations.first { $0.boundary == .hosted }
+    XCTAssertNotNil(hosted)
+    XCTAssertFalse(model.isEnrolledInAutomatic(hosted!))
+
+    await model.setEnrolledInAutomatic(true, destinationID: hosted!.id)
+
+    let enrolled = model.destinations.first { $0.id == hosted!.id }
+    XCTAssertEqual(enrolled?.automaticEligible, true)
+
+    // And it survives a relaunch, or the consent was theatre.
+    let relaunched = AppModel(
+      conversationStore: store,
+      destinations: .liveDirectProviders
+    )
+    await relaunched.restoreConversations()
+    XCTAssertTrue(
+      relaunched.destinations.first { $0.id == hosted!.id }?.automaticEligible
+        ?? false
+    )
+  }
+
+  func testASaveBeforeTheRestoreDoesNotWithdrawStoredConsent() async {
+    // The write path had to learn the same lesson as the first-run flag: a
+    // workspace save that lands before the restore has read stored consent
+    // would write an empty list over it and silently un-enrol everything.
+    let store = InMemoryConversationStore()
+    let first = AppModel(
+      conversationStore: store,
+      destinations: .liveDirectProviders
+    )
+    await first.restoreConversations()
+    let hosted = first.destinations.first { $0.boundary == .hosted }!
+    await first.setEnrolledInAutomatic(true, destinationID: hosted.id)
+
+    let relaunched = AppModel(
+      conversationStore: store,
+      destinations: .liveDirectProviders
+    )
+    relaunched.draft = "typed before the restore finished"
+    await relaunched.saveDraft()
+    await relaunched.restoreConversations()
+
+    XCTAssertEqual(
+      relaunched.destinations.first { $0.id == hosted.id }?.automaticEligible,
+      true,
+      "an early save withdrew a destination the user had enrolled"
+    )
+  }
+
+  func testWithdrawingAHostedDestinationTakesEffectAndPersists() async {
+    let store = InMemoryConversationStore()
+    let model = AppModel(
+      conversationStore: store,
+      destinations: .liveDirectProviders
+    )
+    await model.restoreConversations()
+    let hosted = model.destinations.first { $0.boundary == .hosted }!
+    await model.setEnrolledInAutomatic(true, destinationID: hosted.id)
+
+    await model.setEnrolledInAutomatic(false, destinationID: hosted.id)
+
+    XCTAssertEqual(
+      model.destinations.first { $0.id == hosted.id }?.automaticEligible,
+      false
+    )
+
+    let relaunched = AppModel(
+      conversationStore: store,
+      destinations: .liveDirectProviders
+    )
+    await relaunched.restoreConversations()
+    XCTAssertEqual(
+      relaunched.destinations.first { $0.id == hosted.id }?.automaticEligible,
+      false
     )
   }
 }

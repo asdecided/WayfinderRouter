@@ -77,7 +77,9 @@ struct DestinationsView: View {
 
       Section {
         Text(
-          "Choose a destination explicitly in Chat. Connecting a key does not silently add it to Automatic."
+          appModel.hasAutomaticDestination
+            ? "Automatic picks from the destinations enrolled below. Connecting a key never enrols one on its own — that is always your explicit choice."
+            : "Nothing is enrolled in Automatic yet, so every message needs a destination you pick. Enrol one below and Wayfinder starts choosing for you."
         )
         .font(.footnote)
         .foregroundStyle(.secondary)
@@ -90,6 +92,8 @@ struct DestinationsView: View {
             .foregroundStyle(.secondary)
         }
       }
+
+      automaticEnrolmentSection
 
       if !onDeviceDestinations.isEmpty {
         Section("On this device") {
@@ -106,6 +110,85 @@ struct DestinationsView: View {
           }
         }
       }
+    }
+  }
+
+  /// The consent surface for Automatic routing.
+  ///
+  /// Deliberately a section of its own rather than a control inside each
+  /// destination row: tapping a row means "use this for my next message",
+  /// and enrolling means "you may choose this for me from now on". Those are
+  /// different promises and they should not share a hit target.
+  ///
+  /// On-device is stated, not offered. It is enrolled by construction because
+  /// it sends nothing anywhere, which makes it the one case where a default
+  /// costs the user nothing to consent to — and saying so here is the whole
+  /// point, since a toggle the user cannot move would imply otherwise.
+  @ViewBuilder
+  private var automaticEnrolmentSection: some View {
+    Section {
+      ForEach(enrollableDestinations) { destination in
+        Toggle(
+          isOn: Binding(
+            get: { appModel.isEnrolledInAutomatic(destination) },
+            set: { isEnrolled in
+              Task {
+                await appModel.setEnrolledInAutomatic(
+                  isEnrolled,
+                  destinationID: destination.id
+                )
+              }
+            }
+          )
+        ) {
+          VStack(alignment: .leading, spacing: 2) {
+            Text(destination.displayName)
+            Text(
+              destination.readiness == .ready
+                ? "Costs apply when Automatic picks it"
+                : "Enrolled, but needs a key before it can be picked"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          }
+        }
+        .frame(minHeight: WayfinderMetrics.minimumHitTarget)
+      }
+
+      if let onDevice = onDeviceDestinations.first {
+        LabeledContent("Always enrolled", value: onDevice.displayName)
+          .font(.footnote)
+          .accessibilityHint("On-device execution is always available to Automatic")
+      }
+
+      if enrollableDestinations.isEmpty {
+        Text("Connect a hosted provider to offer Automatic more to choose from.")
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+      }
+    } header: {
+      Text("Automatic routing")
+    } footer: {
+      Text(
+        "On-device execution is always available to Automatic — it sends nothing anywhere. A hosted destination joins only when you enrol it here, and you can withdraw it at any time."
+      )
+    }
+  }
+
+  /// Hosted destinations the user may enrol: those that could actually be
+  /// picked, plus anything already enrolled so consent stays withdrawable
+  /// after a key is removed.
+  ///
+  /// Drawn from the full destination list rather than the search results, so
+  /// typing in the search field never hides something already consented to.
+  /// Gating on readiness also keeps this from becoming a wall of toggles once
+  /// model discovery has run — there is nothing to decide about a destination
+  /// that has no credential and has never been enrolled.
+  private var enrollableDestinations: [RoutingDestination] {
+    appModel.destinations.filter { destination in
+      guard appModel.canEnrolInAutomatic(destination) else { return false }
+      return destination.readiness == .ready
+        || appModel.isEnrolledInAutomatic(destination)
     }
   }
 

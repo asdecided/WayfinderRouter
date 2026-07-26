@@ -141,12 +141,13 @@ struct FirstLaunchView: View {
         .font(.largeTitle.weight(.bold))
 
       // Claimed the message was "then sent to the cheapest destination that
-      // can handle it". Nothing is enrolled in Automatic in this release, so
-      // that was the first sentence a new user read and it was false.
+      // can handle it" while nothing was enrolled in Automatic at all, so it
+      // was the first sentence a new user read and it was false. It reads
+      // the enrolment state now instead of asserting the outcome.
       Text(
         appModel.hasAutomaticDestination
-          ? "Every message is scored on this device, then sent to the cheapest destination that can handle it. You always see where it ran."
-          : "Every message is scored on this device, and you always see where it ran. Choosing a destination is up to you in this release — Wayfinder never picks one on its own."
+          ? "Every message is scored on this device, then sent to the cheapest enrolled destination that can handle it. You always see where it ran."
+          : "Every message is scored on this device, and you always see where it ran. Nothing is enrolled in Automatic yet, so choosing where a message goes is up to you."
       )
       .font(.subheadline)
       .foregroundStyle(.secondary)

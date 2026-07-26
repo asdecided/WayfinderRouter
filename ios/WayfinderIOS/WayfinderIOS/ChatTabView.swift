@@ -318,14 +318,14 @@ private struct RoutingModeMenu: View {
   private var automaticExplanation: String {
     guard hasAutomaticDestination else {
       return """
-        Wayfinder scores every message on this device. No destination is \
-        enrolled in Automatic in this release, so choose one in Destinations \
-        — the score is still recorded on every receipt.
+        Wayfinder scores every message on this device. Nothing is enrolled in \
+        Automatic yet, so choose a destination in Destinations — the score is \
+        still recorded on every receipt.
         """
     }
     return """
       Wayfinder scores every message on this device and sends it to the \
-      cheapest destination that can handle it.
+      cheapest enrolled destination that can handle it.
       """
   }
 }

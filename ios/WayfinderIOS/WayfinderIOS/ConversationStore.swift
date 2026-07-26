@@ -127,19 +127,29 @@ struct ConversationWorkspaceSnapshot: Codable, Equatable, Sendable {
   /// Whether the first-launch chooser has been answered or skipped.
   /// Optional so workspaces written before it existed decode as "not yet".
   var hasCompletedFirstRun: Bool?
+  /// Destination IDs the user has explicitly enrolled in Automatic routing.
+  ///
+  /// Only hosted destinations appear here. On-device execution is enrolled by
+  /// construction — it costs nothing and sends nothing — so it needs no
+  /// stored consent, and its absence from this list is not a withdrawal.
+  /// Optional for the same reason as the flag above: workspaces written
+  /// before it existed decode as "nothing enrolled", never as "everything".
+  var automaticDestinationIDs: [String]?
 
   init(
     activeThreadID: UUID?,
     draft: String,
     retentionDays: Int?,
     updatedAt: Date,
-    hasCompletedFirstRun: Bool? = nil
+    hasCompletedFirstRun: Bool? = nil,
+    automaticDestinationIDs: [String]? = nil
   ) {
     self.activeThreadID = activeThreadID
     self.draft = draft
     self.retentionDays = retentionDays
     self.updatedAt = updatedAt
     self.hasCompletedFirstRun = hasCompletedFirstRun
+    self.automaticDestinationIDs = automaticDestinationIDs
   }
 
   static let empty = ConversationWorkspaceSnapshot(
@@ -218,6 +228,8 @@ enum WayfinderConversationSchemaV1: VersionedSchema {
     var retentionDays: Int?
     var updatedAt: Date
     var hasCompletedFirstRun: Bool?
+    /// Optional so stores written by earlier builds migrate lightweight.
+    var automaticDestinationIDs: [String]?
 
     init(
       key: String,
@@ -225,7 +237,8 @@ enum WayfinderConversationSchemaV1: VersionedSchema {
       draft: String,
       retentionDays: Int?,
       updatedAt: Date,
-      hasCompletedFirstRun: Bool? = nil
+      hasCompletedFirstRun: Bool? = nil,
+      automaticDestinationIDs: [String]? = nil
     ) {
       self.key = key
       self.activeThreadID = activeThreadID
@@ -233,6 +246,7 @@ enum WayfinderConversationSchemaV1: VersionedSchema {
       self.retentionDays = retentionDays
       self.updatedAt = updatedAt
       self.hasCompletedFirstRun = hasCompletedFirstRun
+      self.automaticDestinationIDs = automaticDestinationIDs
     }
   }
 }
@@ -375,7 +389,8 @@ actor SwiftDataConversationStore: ConversationStore {
       draft: workspace.draft,
       retentionDays: workspace.retentionDays,
       updatedAt: workspace.updatedAt,
-      hasCompletedFirstRun: workspace.hasCompletedFirstRun
+      hasCompletedFirstRun: workspace.hasCompletedFirstRun,
+      automaticDestinationIDs: workspace.automaticDestinationIDs
     )
   }
 
@@ -386,6 +401,7 @@ actor SwiftDataConversationStore: ConversationStore {
       record.retentionDays = workspace.retentionDays
       record.updatedAt = workspace.updatedAt
       record.hasCompletedFirstRun = workspace.hasCompletedFirstRun
+      record.automaticDestinationIDs = workspace.automaticDestinationIDs
     } else {
       modelContext.insert(
         WayfinderConversationSchemaV1.WorkspaceRecord(
@@ -394,7 +410,8 @@ actor SwiftDataConversationStore: ConversationStore {
           draft: workspace.draft,
           retentionDays: workspace.retentionDays,
           updatedAt: workspace.updatedAt,
-          hasCompletedFirstRun: workspace.hasCompletedFirstRun
+          hasCompletedFirstRun: workspace.hasCompletedFirstRun,
+          automaticDestinationIDs: workspace.automaticDestinationIDs
         )
       )
     }

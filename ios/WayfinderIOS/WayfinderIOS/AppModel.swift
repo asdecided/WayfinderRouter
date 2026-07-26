@@ -188,15 +188,52 @@ final class AppModel {
     hasLoadedFirstRunState && !hasCompletedFirstRun
   }
 
-  /// Whether any compiled destination is enrolled in Automatic routing.
+  /// Hosted destination IDs the user has explicitly enrolled in Automatic.
   ///
-  /// In this release none is — every destination is built with
-  /// `automaticEligible: false` — so `plan_automatic_route` can never select
-  /// one and an unpinned turn always fails. Copy that describes Automatic
-  /// reads this rather than asserting the behaviour, so the app stops
-  /// promising a decision it cannot make.
+  /// On-device execution is deliberately absent: it is enrolled by
+  /// construction, because sending nothing anywhere is the one case where
+  /// enrolling by default costs the user nothing to consent to.
+  private(set) var enrolledAutomaticDestinationIDs: Set<String> = []
+
+  /// Whether any destination is actually enrolled in Automatic routing.
+  ///
+  /// Copy that describes Automatic reads this rather than asserting the
+  /// behaviour. Every destination used to be built `automaticEligible: false`
+  /// — the routing core hard-excludes on exactly that flag — so Automatic
+  /// could never select anything and an unpinned turn always failed, while
+  /// three separate strings said otherwise.
   var hasAutomaticDestination: Bool {
     destinations.contains { $0.automaticEligible }
+  }
+
+  /// Whether a destination may be enrolled by the user at all. On-device is
+  /// always enrolled and cannot be withdrawn from here; a destination with no
+  /// credential to offer has nothing to consent to yet.
+  func canEnrolInAutomatic(_ destination: RoutingDestination) -> Bool {
+    destination.boundary != .onDevice
+  }
+
+  func isEnrolledInAutomatic(_ destination: RoutingDestination) -> Bool {
+    destination.automaticEligible
+  }
+
+  /// Enrols or withdraws a hosted destination from Automatic routing.
+  ///
+  /// WF-ROADMAP-0016 forbids a connected provider *silently* entering
+  /// Automatic. An explicit, reversible act by the user is the opposite of
+  /// silent, and it is the only way this flag is ever set for hosted
+  /// execution — saving a key still changes readiness and nothing else.
+  func setEnrolledInAutomatic(
+    _ isEnrolled: Bool,
+    destinationID: String
+  ) async {
+    if isEnrolled {
+      enrolledAutomaticDestinationIDs.insert(destinationID)
+    } else {
+      enrolledAutomaticDestinationIDs.remove(destinationID)
+    }
+    rebuildDestinations()
+    await persistWorkspace()
   }
 
   var credentialNotice: String?
@@ -268,7 +305,12 @@ final class AppModel {
     self.providerExecutor = providerExecutor
     self.providerModelCatalog = providerModelCatalog
     compiledDestinations = destinations
-    self.destinations = destinations
+    // Eligibility is decided in one place, so the list is passed through it
+    // immediately rather than being trusted as constructed. Without this an
+    // on-device destination reads ineligible until the first restore.
+    self.destinations = destinations.map {
+      $0.withAutomaticEligible($0.automaticEligible || $0.boundary == .onDevice)
+    }
     self.persistenceNotice = initialPersistenceNotice
     // Only an explicitly injected value counts as loaded. The app passes
     // nothing here and waits for the restore; previews and tests that state a
@@ -486,6 +528,10 @@ final class AppModel {
       )
       hasCompletedFirstRun = workspace.hasCompletedFirstRun ?? false
       hasLoadedFirstRunState = true
+      enrolledAutomaticDestinationIDs = Set(
+        workspace.automaticDestinationIDs ?? []
+      )
+      rebuildDestinations()
       activeThreadID = workspace.activeThreadID
 
       if let activeThread {
@@ -1363,7 +1409,21 @@ final class AppModel {
       }
     }
 
-    destinations = rebuilt
+    // Automatic eligibility is applied here rather than read from each
+    // destination as constructed, so there is exactly one place that decides
+    // it: on-device always, hosted only where the user has said so.
+    //
+    // Additive, never subtractive. A destination compiled eligible stays
+    // eligible — that is how the routing fixtures declare candidates — so
+    // this grants consent and never silently revokes something a caller
+    // deliberately allowed.
+    destinations = rebuilt.map { destination in
+      destination.withAutomaticEligible(
+        destination.automaticEligible
+          || destination.boundary == .onDevice
+          || enrolledAutomaticDestinationIDs.contains(destination.id)
+      )
+    }
     updateDestinationReadiness()
     if let selectedDestinationID,
       !destinations.contains(where: { $0.id == selectedDestinationID })
@@ -1477,7 +1537,13 @@ final class AppModel {
       draft: activeThreadID == nil ? draft : "",
       retentionDays: retentionPolicy.days,
       updatedAt: now(),
-      hasCompletedFirstRun: hasLoadedFirstRunState ? hasCompletedFirstRun : nil
+      hasCompletedFirstRun: hasLoadedFirstRunState ? hasCompletedFirstRun : nil,
+      // Same guard as the flag above, and for the same reason: a save that
+      // lands before the restore has read the stored consent would write an
+      // empty list over it and silently withdraw every enrolled destination.
+      automaticDestinationIDs: hasLoadedFirstRunState
+        ? enrolledAutomaticDestinationIDs.sorted()
+        : nil
     )
 
     do {
@@ -1783,6 +1849,25 @@ struct RoutingDestination: Identifiable, Hashable {
   }
 
   func withReadiness(_ readiness: ProviderReadiness) -> Self {
+    RoutingDestination(
+      id: id,
+      providerID: providerID,
+      providerName: providerName,
+      modelID: modelID,
+      displayName: displayName,
+      detail: detail,
+      routeTier: routeTier,
+      boundary: boundary,
+      boundaryLabel: boundaryLabel,
+      billingClass: billingClass,
+      readiness: readiness,
+      automaticEligible: automaticEligible,
+      contextWindow: contextWindow,
+      credentialID: credentialID
+    )
+  }
+
+  func withAutomaticEligible(_ automaticEligible: Bool) -> Self {
     RoutingDestination(
       id: id,
       providerID: providerID,

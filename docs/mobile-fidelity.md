@@ -109,6 +109,13 @@ For every configuration:
 
 ### Motion and navigation (UX-019, UX-020)
 
+- [ ] **Automatic actually routes on a supported device.** On-device execution is enrolled by
+      construction, but its readiness is reported by the live device — no simulator or CI run can
+      confirm that Apple Intelligence resolves as available, that Automatic then selects it, and
+      that the receipt reads "Ran on this device". On hardware without Apple Intelligence the
+      honest "nothing enrolled" state is what should appear instead; both branches need a device.
+- [ ] Enrolling a hosted destination in Destinations changes the Chat copy and the composer's route
+      label in the same session, and withdrawing it changes them back.
 - [ ] **The drawer slides.** It was conditionally inserted into the hierarchy on open, so it
       appeared already at its final offset and was removed outright on close — it popped in and out
       rather than animating either way, and no critic caught it from the code until the drawer's
