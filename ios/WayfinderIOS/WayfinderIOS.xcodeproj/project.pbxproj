@@ -48,6 +48,7 @@
 		6185E43E26661D1875EA9BE6 /* TranscriptScrollTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD99427DAE64871659D80447 /* TranscriptScrollTests.swift */; };
 		27EF4155691E79DCF59BB731 /* FirstLaunchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EF64E6A3CFA4AFF2EA6A88D /* FirstLaunchView.swift */; };
 		C0398EFC7FF4C86B79EADDED /* FirstRunAndThreadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25CC024AB111627E6AA726E3 /* FirstRunAndThreadTests.swift */; };
+		79B65384981BAA1D11367369 /* Previews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45D9F9D732DA2BAD8954FFF9 /* Previews.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -104,6 +105,7 @@
 		FD99427DAE64871659D80447 /* TranscriptScrollTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptScrollTests.swift; sourceTree = "<group>"; };
 		0EF64E6A3CFA4AFF2EA6A88D /* FirstLaunchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstLaunchView.swift; sourceTree = "<group>"; };
 		25CC024AB111627E6AA726E3 /* FirstRunAndThreadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstRunAndThreadTests.swift; sourceTree = "<group>"; };
+		45D9F9D732DA2BAD8954FFF9 /* Previews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Previews.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -138,6 +140,7 @@
 				58EF24813B3BA8027B7E4CE4 /* MarkdownView.swift */,
 				6AA05C69CF6E5D026498FA04 /* OpenAICompatibleProvider.swift */,
 				199D09FCEAB826F397ABEAF1 /* OpenRouterAccount.swift */,
+				45D9F9D732DA2BAD8954FFF9 /* Previews.swift */,
 				45626E28DD8157BEF5D16EF7 /* ProviderModelCatalog.swift */,
 				A28A0256D98D907F1BAF7A34 /* RootView.swift */,
 				97AEEE355705A642C7D55C11 /* RouteReceipt.swift */,
@@ -330,6 +333,7 @@
 				05E82E625C01CD5ABD2F9BB0 /* MarkdownView.swift in Sources */,
 				4516AED0EA2C6143C441CAC1 /* OpenAICompatibleProvider.swift in Sources */,
 				AECF557711C7CD3BC8C373BF /* OpenRouterAccount.swift in Sources */,
+				79B65384981BAA1D11367369 /* Previews.swift in Sources */,
 				81347D868AF6B843F8845DCD /* ProviderModelCatalog.swift in Sources */,
 				014B0F0F1659B0478F68FAF3 /* RootView.swift in Sources */,
 				016C2DA8BBBEF64FFF547B2D /* RouteReceipt.swift in Sources */,
