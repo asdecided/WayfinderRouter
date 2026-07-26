@@ -140,13 +140,16 @@ struct RootView: View {
     }
   }
 
-  @ViewBuilder
-  private func section(
+  /// Written as an explicit generic returning a single expression. Combining
+  /// `@ViewBuilder` on the function, an opaque parameter type, and a local
+  /// binding defeated the type checker outright — it reported only "failed to
+  /// produce diagnostic" against the enclosing `ZStack`.
+  private func section<Content: View>(
     _ tab: AppTab,
-    @ViewBuilder content: () -> some View
+    @ViewBuilder content: () -> Content
   ) -> some View {
     let isSelected = appModel.selectedTab == tab
-    content()
+    return content()
       .opacity(isSelected ? 1 : 0)
       .allowsHitTesting(isSelected)
       .accessibilityHidden(!isSelected)

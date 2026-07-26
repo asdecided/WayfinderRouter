@@ -876,37 +876,18 @@ private struct ComposerView: View {
       // five of them plus a label cannot share one row on any iPhone width.
       // WF-DESIGN-0020 forbids hiding send, privacy, or navigation, so the
       // row wraps rather than truncating.
-      let layout = dynamicTypeSize.isAccessibilitySize
-        ? AnyLayout(VStackLayout(alignment: .leading, spacing: WayfinderSpacing.xSmall))
-        : AnyLayout(HStackLayout(spacing: WayfinderSpacing.xSmall))
-
-      layout {
-        HStack(spacing: WayfinderSpacing.xSmall) {
-          AttachmentAffordance(size: controlSize)
-          DestinationLabel(
-            selectedDestinationID: $selectedDestinationID,
-            destinations: destinations,
-            minimumHeight: controlSize
-          )
-          if !dynamicTypeSize.isAccessibilitySize {
-            Spacer(minLength: WayfinderSpacing.xSmall)
-          }
+      if dynamicTypeSize.isAccessibilitySize {
+        VStack(alignment: .leading, spacing: WayfinderSpacing.xSmall) {
+          routingControls
+          actionControls
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
-
+      } else {
         HStack(spacing: WayfinderSpacing.xSmall) {
-          if dynamicTypeSize.isAccessibilitySize {
-            Spacer(minLength: 0)
-          }
-          PrivacyMenu(posture: $privacyPosture, size: controlSize)
-          SendButton(
-            isGenerating: isGenerating,
-            canSubmit: canSubmit,
-            size: controlSize,
-            submit: submit,
-            stop: stop
-          )
+          routingControls
+          Spacer(minLength: WayfinderSpacing.xSmall)
+          actionControls
         }
-        .frame(maxWidth: .infinity, alignment: .trailing)
       }
     }
     .padding(.horizontal, WayfinderSpacing.small)
@@ -938,6 +919,30 @@ private struct ComposerView: View {
       }
       .opacity(0)
       .accessibilityHidden(true)
+    }
+  }
+
+  private var routingControls: some View {
+    HStack(spacing: WayfinderSpacing.xSmall) {
+      AttachmentAffordance(size: controlSize)
+      DestinationLabel(
+        selectedDestinationID: $selectedDestinationID,
+        destinations: destinations,
+        minimumHeight: controlSize
+      )
+    }
+  }
+
+  private var actionControls: some View {
+    HStack(spacing: WayfinderSpacing.xSmall) {
+      PrivacyMenu(posture: $privacyPosture, size: controlSize)
+      SendButton(
+        isGenerating: isGenerating,
+        canSubmit: canSubmit,
+        size: controlSize,
+        submit: submit,
+        stop: stop
+      )
     }
   }
 
