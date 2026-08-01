@@ -1118,16 +1118,15 @@ fn validate_keys(
                     format!("'gateway.keys.{key_id}.models' names unknown model '{model}'"),
                 ));
             }
-            if let Some(workspace) = workspace
-                && !workspace.models.is_empty()
-                && !workspace.models.contains(model)
-            {
-                return Err(invalid(
-                    where_,
-                    format!(
-                        "'gateway.keys.{key_id}.models' cannot broaden its workspace model policy with '{model}'"
-                    ),
-                ));
+            if let Some(workspace) = workspace {
+                if !workspace.models.is_empty() && !workspace.models.contains(model) {
+                    return Err(invalid(
+                        where_,
+                        format!(
+                            "'gateway.keys.{key_id}.models' cannot broaden its workspace model policy with '{model}'"
+                        ),
+                    ));
+                }
             }
         }
     }
