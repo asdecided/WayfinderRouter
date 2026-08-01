@@ -9,7 +9,28 @@ tags: [evidence, shadow-mode, canary, rollout, enterprise, trust, redis, otel, o
 
 ## Status
 
-Proposed
+Active — Rust enterprise substrate
+
+## Rust runtime amendment (2026-08-01)
+
+WF-ADR-0046 made Rust the sole production router and removed the Python runtime
+referenced throughout the original proposal. The outcomes and sequencing remain
+governing, but every implementation now lands in the Rust workspace. Historical
+`gateway.py`, `ratelimit.py`, `pricing.py`, and Python-extra references below
+describe the capability seam, not an implementation authority.
+
+Enterprise hardening begins with WF-ADR-0050: the existing local surface stays
+loopback-only, while an explicit authenticated managed data plane exposes only
+inference, allowlist-filtered model discovery, and content-free probes. This
+precedes Redis, OIDC, audit, OpenTelemetry, and Helm because those systems must
+attach to explicit data-plane and operator-plane authorities rather than a
+single mixed listener.
+
+Current Rust baseline already includes bounded request/response/streaming
+delivery, virtual keys, per-key model allowlists, per-key and global limits,
+budgets, cache, retry/failover/breakers, prompt-free metrics, last-good hot
+reload, and bounded graceful shutdown. Track B therefore starts from these
+implemented primitives rather than rebuilding them.
 
 ## Context
 
