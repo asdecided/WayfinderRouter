@@ -47,6 +47,40 @@ pub const MAX_MODEL_DEPLOYMENT_WEIGHT: u64 = 100;
 pub const MAX_ROUTE_PRESETS: usize = 64;
 /// Maximum number of ordered model aliases in one routing preset.
 pub const MAX_ROUTE_PRESET_MODELS: usize = 32;
+/// Supported operator authentication modes.
+pub const OPERATOR_AUTH_MODES: [&str; 3] = ["vkeys", "oidc", "both"];
+
+/// Authentication policy for local operator surfaces.
+///
+/// Virtual keys remain the data-plane credential. OIDC is an optional,
+/// separately configured operator identity boundary for metrics, routing
+/// policy, savings, and other administrative surfaces.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GatewayAuthConfig {
+    /// `vkeys` preserves the legacy local operator behavior, `oidc` requires
+    /// a signed operator token, and `both` accepts either boundary.
+    pub mode: String,
+    /// Expected JWT issuer claim.
+    pub issuer: Option<String>,
+    /// Expected JWT audience claim.
+    pub audience: Option<String>,
+    /// Explicit JWKS endpoint used to validate operator tokens.
+    pub jwks_url: Option<String>,
+    /// Claim name whose value must assert operator access.
+    pub admin_claim: String,
+}
+
+impl Default for GatewayAuthConfig {
+    fn default() -> Self {
+        Self {
+            mode: "vkeys".to_owned(),
+            issuer: None,
+            audience: None,
+            jwks_url: None,
+            admin_claim: "admin".to_owned(),
+        }
+    }
+}
 
 /// Stable delivery identity for a configured gateway model.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -306,6 +340,8 @@ pub struct GatewayConfig {
     pub concurrency: ConcurrencyConfig,
     /// Shared state backend for fleet-wide policy counters.
     pub state: StateConfig,
+    /// Authentication boundary for operator surfaces.
+    pub auth: GatewayAuthConfig,
     /// Workspace policy namespaces keyed by operator-selected identifier.
     pub workspaces: IndexMap<String, Workspace>,
     /// Named ordered routing presets keyed by operator-selected identifier.
@@ -332,6 +368,7 @@ impl Default for GatewayConfig {
             rate_limit: None,
             concurrency: ConcurrencyConfig::default(),
             state: StateConfig::default(),
+            auth: GatewayAuthConfig::default(),
             workspaces: IndexMap::new(),
             routes: IndexMap::new(),
             keys: IndexMap::new(),
@@ -406,6 +443,7 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
     let rate_limit = parse_rate_limit(gateway.get("rate_limit"), where_)?;
     let concurrency = parse_concurrency(gateway.get("concurrency"), where_)?;
     let state = parse_state(gateway.get("state"), where_)?;
+    let auth = parse_auth(gateway.get("auth"), where_)?;
     let workspaces = parse_workspaces(gateway.get("workspaces"), where_)?;
     let keys = parse_keys(gateway.get("keys"), where_)?;
     let models = parse_models(gateway.get("models"), where_)?;
@@ -432,6 +470,7 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
         rate_limit,
         concurrency,
         state,
+        auth,
         workspaces,
         routes,
         keys,
@@ -562,6 +601,29 @@ fn render_gateway_toml(gateway: &GatewayConfig) -> String {
             lines.push(format!(
                 "namespace = {}",
                 quote_toml_string(&gateway.state.namespace)
+            ));
+        }
+        blocks.push(lines.join("\n"));
+    }
+
+    if gateway.auth != GatewayAuthConfig::default() {
+        let mut lines = vec!["[gateway.auth]".to_owned()];
+        if gateway.auth.mode != "vkeys" {
+            lines.push(format!("mode = {}", quote_toml_string(&gateway.auth.mode)));
+        }
+        if let Some(issuer) = &gateway.auth.issuer {
+            lines.push(format!("issuer = {}", quote_toml_string(issuer)));
+        }
+        if let Some(audience) = &gateway.auth.audience {
+            lines.push(format!("audience = {}", quote_toml_string(audience)));
+        }
+        if let Some(jwks_url) = &gateway.auth.jwks_url {
+            lines.push(format!("jwks_url = {}", quote_toml_string(jwks_url)));
+        }
+        if gateway.auth.admin_claim != "admin" {
+            lines.push(format!(
+                "admin_claim = {}",
+                quote_toml_string(&gateway.auth.admin_claim)
             ));
         }
         blocks.push(lines.join("\n"));
@@ -907,6 +969,51 @@ fn parse_state(value: Option<&Value>, where_: &str) -> Result<StateConfig, Confi
         backend,
         url,
         namespace,
+    })
+}
+
+fn parse_auth(value: Option<&Value>, where_: &str) -> Result<GatewayAuthConfig, ConfigError> {
+    let Some(value) = value else {
+        return Ok(GatewayAuthConfig::default());
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| invalid(where_, "'[gateway.auth]' must be a table"))?;
+    let mode = optional_allowed_string(
+        table.get("mode"),
+        "vkeys",
+        &OPERATOR_AUTH_MODES,
+        where_,
+        "gateway.auth.mode",
+    )?;
+    let issuer = optional_non_empty_string(table.get("issuer"), where_, "gateway.auth.issuer")?;
+    let audience =
+        optional_non_empty_string(table.get("audience"), where_, "gateway.auth.audience")?;
+    let jwks_url =
+        optional_non_empty_string(table.get("jwks_url"), where_, "gateway.auth.jwks_url")?;
+    let admin_claim =
+        optional_non_empty_string(table.get("admin_claim"), where_, "gateway.auth.admin_claim")?
+            .unwrap_or_else(|| "admin".to_owned());
+    if !valid_policy_id(&admin_claim) {
+        return Err(invalid(
+            where_,
+            "'gateway.auth.admin_claim' must be 1-128 visible ASCII characters",
+        ));
+    }
+    if matches!(mode.as_str(), "oidc" | "both")
+        && (issuer.is_none() || audience.is_none() || jwks_url.is_none())
+    {
+        return Err(invalid(
+            where_,
+            "'gateway.auth.issuer', 'gateway.auth.audience', and 'gateway.auth.jwks_url' are required when gateway.auth.mode is 'oidc' or 'both'",
+        ));
+    }
+    Ok(GatewayAuthConfig {
+        mode,
+        issuer,
+        audience,
+        jwks_url,
+        admin_claim,
     })
 }
 
@@ -1679,6 +1786,25 @@ mod tests {
 
     fn parse(text: &str) -> Result<GatewayConfig, ConfigError> {
         gateway_config_from_toml(text, "fixture")
+    }
+
+    #[test]
+    fn oidc_operator_auth_requires_complete_configuration_and_round_trips()
+    -> Result<(), ConfigError> {
+        assert!(parse("[gateway.auth]\nmode = \"oidc\"\n").is_err());
+        let config = parse(
+            "[gateway.auth]\nmode = \"both\"\nissuer = \"https://issuer.example\"\naudience = \"wayfinder-ops\"\njwks_url = \"https://issuer.example/.well-known/jwks.json\"\nadmin_claim = \"wayfinder_admin\"\n",
+        )?;
+        assert_eq!(config.auth.mode, "both");
+        assert_eq!(
+            config.auth.issuer.as_deref(),
+            Some("https://issuer.example")
+        );
+        assert_eq!(config.auth.audience.as_deref(), Some("wayfinder-ops"));
+        assert_eq!(config.auth.admin_claim, "wayfinder_admin");
+        let rendered = dump_gateway_toml(&config)?;
+        assert_eq!(gateway_config_from_toml(&rendered, "round-trip")?, config);
+        Ok(())
     }
 
     #[test]

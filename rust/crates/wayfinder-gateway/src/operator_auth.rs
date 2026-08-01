@@ -1,0 +1,576 @@
+//! OIDC authorization for the bounded operator surface.
+//!
+//! Operator identity is deliberately separate from virtual-key data-plane
+//! authentication. The gateway validates short-lived RS256 JWTs against an
+//! explicitly configured JWKS endpoint; it never creates sessions or stores
+//! provider/account credentials.
+
+#![forbid(unsafe_code)]
+
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, header};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use reqwest::Client;
+use ring::signature;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use thiserror::Error;
+use tokio::sync::RwLock;
+use wayfinder_config::gateway::GatewayAuthConfig;
+
+use crate::AppState;
+
+const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
+const JWKS_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_TOKEN_BYTES: usize = 16 * 1024;
+const MAX_JWKS_KEYS: usize = 64;
+const MAX_JWK_COMPONENT_BYTES: usize = 1024;
+const CLOCK_SKEW_SECONDS: f64 = 60.0;
+
+/// The operator auth modes that require this validator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OperatorMode {
+    Oidc,
+    Both,
+}
+
+/// Errors while constructing the configured operator authenticator.
+#[derive(Debug, Error)]
+pub enum OperatorAuthConfigError {
+    /// The parser should have required all OIDC fields for these modes.
+    #[error("OIDC operator auth requires issuer, audience, and jwks_url")]
+    MissingConfiguration,
+    /// The JWKS client could not be created.
+    #[error("cannot create OIDC JWKS client: {0}")]
+    Client(#[from] reqwest::Error),
+}
+
+/// An immutable, clone-cheap validator with a short-lived public-key cache.
+#[derive(Clone)]
+pub struct OperatorAuthenticator {
+    mode: OperatorMode,
+    issuer: Arc<str>,
+    audience: Arc<str>,
+    jwks_url: Arc<str>,
+    admin_claim: Arc<str>,
+    client: Client,
+    keys: Arc<RwLock<Option<CachedKeys>>>,
+}
+
+impl OperatorAuthenticator {
+    /// Build the validator when the gateway auth mode includes OIDC.
+    pub fn from_config(
+        config: &GatewayAuthConfig,
+    ) -> Result<Option<Self>, OperatorAuthConfigError> {
+        let mode = match config.mode.as_str() {
+            "vkeys" => return Ok(None),
+            "oidc" => OperatorMode::Oidc,
+            "both" => OperatorMode::Both,
+            _ => return Ok(None),
+        };
+        let issuer = config
+            .issuer
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or(OperatorAuthConfigError::MissingConfiguration)?;
+        let audience = config
+            .audience
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or(OperatorAuthConfigError::MissingConfiguration)?;
+        let jwks_url = config
+            .jwks_url
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or(OperatorAuthConfigError::MissingConfiguration)?;
+        let client = Client::builder()
+            .connect_timeout(JWKS_TIMEOUT)
+            .timeout(JWKS_TIMEOUT)
+            .user_agent("wayfinder-router-operator-auth")
+            .build()?;
+        Ok(Some(Self {
+            mode,
+            issuer: Arc::from(issuer.to_owned()),
+            audience: Arc::from(audience.to_owned()),
+            jwks_url: Arc::from(jwks_url.to_owned()),
+            admin_claim: Arc::from(config.admin_claim.clone()),
+            client,
+            keys: Arc::new(RwLock::new(None)),
+        }))
+    }
+
+    /// Authorize an operator request. A virtual key can satisfy `both`, but
+    /// OIDC mode never accepts a data-plane key as an operator identity.
+    async fn authorize(
+        &self,
+        authorization: Option<&str>,
+        virtual_key_valid: bool,
+    ) -> Result<(), OperatorAuthFailure> {
+        if self.mode == OperatorMode::Both && virtual_key_valid {
+            return Ok(());
+        }
+        let token = bearer_token(authorization).ok_or(OperatorAuthFailure::Unauthorized)?;
+        self.verify(token).await
+    }
+
+    async fn verify(&self, token: &str) -> Result<(), OperatorAuthFailure> {
+        if token.len() > MAX_TOKEN_BYTES {
+            return Err(OperatorAuthFailure::Unauthorized);
+        }
+        let mut segments = token.split('.');
+        let header_segment = segments.next().ok_or(OperatorAuthFailure::Unauthorized)?;
+        let claims_segment = segments.next().ok_or(OperatorAuthFailure::Unauthorized)?;
+        let signature_segment = segments.next().ok_or(OperatorAuthFailure::Unauthorized)?;
+        if segments.next().is_some()
+            || header_segment.is_empty()
+            || claims_segment.is_empty()
+            || signature_segment.is_empty()
+            || header_segment.len() > MAX_TOKEN_BYTES
+            || claims_segment.len() > MAX_TOKEN_BYTES
+            || signature_segment.len() > MAX_TOKEN_BYTES
+        {
+            return Err(OperatorAuthFailure::Unauthorized);
+        }
+        let header: JwtHeader = decode_json(header_segment)?;
+        if header.alg != "RS256" || header.kid.is_empty() || header.kid.len() > 128 {
+            return Err(OperatorAuthFailure::Unauthorized);
+        }
+        let claims: Value = decode_json(claims_segment)?;
+        self.validate_claims(&claims)?;
+        let signature = URL_SAFE_NO_PAD
+            .decode(signature_segment)
+            .map_err(|_| OperatorAuthFailure::Unauthorized)?;
+        let keys = self.keys_for(&header.kid).await?;
+        let signed = format!("{header_segment}.{claims_segment}");
+        for key in keys {
+            let verifier = signature::RsaPublicKeyComponents {
+                n: key.modulus.as_slice(),
+                e: key.exponent.as_slice(),
+            };
+            if verifier
+                .verify(
+                    &signature::RSA_PKCS1_2048_8192_SHA256,
+                    signed.as_bytes(),
+                    &signature,
+                )
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        Err(OperatorAuthFailure::Unauthorized)
+    }
+
+    fn validate_claims(&self, claims: &Value) -> Result<(), OperatorAuthFailure> {
+        if claims.get("iss").and_then(Value::as_str) != Some(&self.issuer) {
+            return Err(OperatorAuthFailure::Unauthorized);
+        }
+        let audience_matches = match claims.get("aud") {
+            Some(Value::String(value)) => value == self.audience.as_ref(),
+            Some(Value::Array(values)) => values
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|value| value == self.audience.as_ref()),
+            _ => false,
+        };
+        if !audience_matches {
+            return Err(OperatorAuthFailure::Unauthorized);
+        }
+        let now = unix_seconds();
+        let expires = numeric_claim(claims, "exp")?;
+        if expires <= now {
+            return Err(OperatorAuthFailure::Unauthorized);
+        }
+        if let Some(not_before) = claims.get("nbf") {
+            let not_before = numeric_value(not_before).ok_or(OperatorAuthFailure::Unauthorized)?;
+            if not_before > now + CLOCK_SKEW_SECONDS {
+                return Err(OperatorAuthFailure::Unauthorized);
+            }
+        }
+        if claims
+            .get("sub")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            return Err(OperatorAuthFailure::Unauthorized);
+        }
+        if !claim_allows_operator(claims.get(&*self.admin_claim)) {
+            return Err(OperatorAuthFailure::Forbidden);
+        }
+        Ok(())
+    }
+
+    async fn keys_for(&self, kid: &str) -> Result<Vec<RsaJwk>, OperatorAuthFailure> {
+        {
+            let cache = self.keys.read().await;
+            if let Some(cached) = cache
+                .as_ref()
+                .filter(|cache| cache.fetched.elapsed() < JWKS_CACHE_TTL)
+            {
+                let matching = cached
+                    .keys
+                    .iter()
+                    .filter(|key| key.kid == kid)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !matching.is_empty() {
+                    return Ok(matching);
+                }
+            }
+        }
+        self.refresh_keys().await?;
+        let cache = self.keys.read().await;
+        cache
+            .as_ref()
+            .map(|cached| {
+                cached
+                    .keys
+                    .iter()
+                    .filter(|key| key.kid == kid)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .filter(|keys| !keys.is_empty())
+            .ok_or(OperatorAuthFailure::Unauthorized)
+    }
+
+    async fn refresh_keys(&self) -> Result<(), OperatorAuthFailure> {
+        let response = self
+            .client
+            .get(self.jwks_url.as_ref())
+            .send()
+            .await
+            .map_err(|_| OperatorAuthFailure::Unavailable)?;
+        if !response.status().is_success() {
+            return Err(OperatorAuthFailure::Unavailable);
+        }
+        let document = response
+            .json::<JwksDocument>()
+            .await
+            .map_err(|_| OperatorAuthFailure::Unavailable)?;
+        if document.keys.len() > MAX_JWKS_KEYS {
+            return Err(OperatorAuthFailure::Unavailable);
+        }
+        let keys = document
+            .keys
+            .into_iter()
+            .filter_map(RsaJwk::try_from_document)
+            .collect::<Vec<_>>();
+        if keys.is_empty() {
+            return Err(OperatorAuthFailure::Unavailable);
+        }
+        let mut cache = self.keys.write().await;
+        *cache = Some(CachedKeys {
+            fetched: Instant::now(),
+            keys,
+        });
+        Ok(())
+    }
+}
+
+/// Protect the operator router while leaving the data-plane router unchanged.
+pub async fn middleware(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let Some(authenticator) = state.operator_auth() else {
+        return next.run(request).await;
+    };
+    let authorization = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    let virtual_key_valid = state.access_policy().is_some_and(|policy| {
+        policy.requires_authentication() && policy.authenticate(authorization).is_some()
+    });
+    match authenticator
+        .authorize(authorization, virtual_key_valid)
+        .await
+    {
+        Ok(()) => next.run(request).await,
+        Err(OperatorAuthFailure::Unauthorized) => operator_error(
+            StatusCode::UNAUTHORIZED,
+            "wayfinder_router_operator_unauthorized",
+            "a valid operator bearer token is required",
+            true,
+        ),
+        Err(OperatorAuthFailure::Forbidden) => operator_error(
+            StatusCode::FORBIDDEN,
+            "wayfinder_router_operator_forbidden",
+            "the operator token lacks the configured admin claim",
+            false,
+        ),
+        Err(OperatorAuthFailure::Unavailable) => operator_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "wayfinder_router_operator_auth_unavailable",
+            "operator identity validation is temporarily unavailable",
+            false,
+        ),
+    }
+}
+
+fn operator_error(
+    status: StatusCode,
+    error_type: &'static str,
+    message: &'static str,
+    challenge: bool,
+) -> Response {
+    let mut headers = HeaderMap::new();
+    if challenge {
+        headers.insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    }
+    (
+        status,
+        headers,
+        axum::Json(json!({
+            "error": {"type": error_type, "message": message}
+        })),
+    )
+        .into_response()
+}
+
+fn bearer_token(authorization: Option<&str>) -> Option<&str> {
+    let value = authorization?.trim();
+    let (scheme, token) = value.split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then_some(token.trim())
+        .filter(|token| !token.is_empty())
+}
+
+fn decode_json<T: for<'de> Deserialize<'de>>(segment: &str) -> Result<T, OperatorAuthFailure> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(segment)
+        .map_err(|_| OperatorAuthFailure::Unauthorized)?;
+    serde_json::from_slice(&bytes).map_err(|_| OperatorAuthFailure::Unauthorized)
+}
+
+fn numeric_claim(claims: &Value, name: &str) -> Result<f64, OperatorAuthFailure> {
+    claims
+        .get(name)
+        .and_then(numeric_value)
+        .filter(|value| value.is_finite())
+        .ok_or(OperatorAuthFailure::Unauthorized)
+}
+
+fn numeric_value(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_u64().map(|value| value as f64))
+}
+
+fn claim_allows_operator(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::String(value)) => matches!(
+            value.to_ascii_lowercase().as_str(),
+            "true" | "admin" | "operator"
+        ),
+        Some(Value::Array(values)) => values
+            .iter()
+            .any(|value| claim_allows_operator(Some(value))),
+        _ => false,
+    }
+}
+
+fn unix_seconds() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |duration| duration.as_secs_f64())
+}
+
+#[derive(Clone)]
+struct CachedKeys {
+    fetched: Instant,
+    keys: Vec<RsaJwk>,
+}
+
+#[derive(Clone, Debug)]
+struct RsaJwk {
+    kid: String,
+    modulus: Vec<u8>,
+    exponent: Vec<u8>,
+}
+
+impl RsaJwk {
+    fn try_from_document(document: JwkDocument) -> Option<Self> {
+        if document.kty != "RSA"
+            || document.kid.is_empty()
+            || document.kid.len() > 128
+            || document.alg.as_deref().is_some_and(|alg| alg != "RS256")
+            || document.use_.as_deref().is_some_and(|usage| usage != "sig")
+        {
+            return None;
+        }
+        let modulus = URL_SAFE_NO_PAD.decode(document.n).ok()?;
+        let exponent = URL_SAFE_NO_PAD.decode(document.e).ok()?;
+        if modulus.is_empty()
+            || exponent.is_empty()
+            || modulus.len() > MAX_JWK_COMPONENT_BYTES
+            || exponent.len() > MAX_JWK_COMPONENT_BYTES
+        {
+            return None;
+        }
+        Some(Self {
+            kid: document.kid,
+            modulus,
+            exponent,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct JwksDocument {
+    keys: Vec<JwkDocument>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JwkDocument {
+    kid: String,
+    kty: String,
+    alg: Option<String>,
+    #[serde(rename = "use")]
+    use_: Option<String>,
+    n: String,
+    e: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct JwtHeader {
+    alg: String,
+    kid: String,
+}
+
+#[derive(Debug)]
+enum OperatorAuthFailure {
+    Unauthorized,
+    Forbidden,
+    Unavailable,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+    use wayfinder_routing_core::RoutingConfig;
+
+    #[test]
+    fn bearer_token_requires_the_bearer_scheme() {
+        assert_eq!(bearer_token(Some("Bearer abc")), Some("abc"));
+        assert_eq!(bearer_token(Some("bearer    abc")), Some("abc"));
+        assert_eq!(bearer_token(Some("abc")), None);
+        assert_eq!(bearer_token(Some("Bearer")), None);
+    }
+
+    #[test]
+    fn admin_claim_accepts_bounded_truthy_shapes_only() {
+        assert!(claim_allows_operator(Some(&Value::Bool(true))));
+        assert!(claim_allows_operator(Some(&Value::String(
+            "operator".to_owned()
+        ))));
+        assert!(claim_allows_operator(Some(&json!(["viewer", "admin"]))));
+        assert!(!claim_allows_operator(Some(&Value::Bool(false))));
+        assert!(!claim_allows_operator(Some(&Value::String(
+            "owner".to_owned()
+        ))));
+    }
+
+    #[test]
+    fn jwk_filters_non_signing_or_non_rs256_keys() {
+        assert!(
+            RsaJwk::try_from_document(JwkDocument {
+                kid: "key-1".to_owned(),
+                kty: "EC".to_owned(),
+                alg: Some("ES256".to_owned()),
+                use_: Some("sig".to_owned()),
+                n: "AQ".to_owned(),
+                e: "AQ".to_owned(),
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn auth_config_only_builds_oidc_validator_for_oidc_modes() {
+        let config = GatewayAuthConfig::default();
+        assert!(matches!(
+            OperatorAuthenticator::from_config(&config),
+            Ok(None)
+        ));
+        let config = GatewayAuthConfig {
+            mode: "oidc".to_owned(),
+            issuer: Some("https://issuer.example".to_owned()),
+            audience: Some("wayfinder".to_owned()),
+            jwks_url: Some("https://issuer.example/jwks".to_owned()),
+            admin_claim: "admin".to_owned(),
+        };
+        assert!(matches!(
+            OperatorAuthenticator::from_config(&config),
+            Ok(Some(_))
+        ));
+    }
+
+    #[test]
+    fn claims_require_identity_time_bounds_and_admin_access() {
+        let config = GatewayAuthConfig {
+            mode: "oidc".to_owned(),
+            issuer: Some("https://issuer.example".to_owned()),
+            audience: Some("wayfinder".to_owned()),
+            jwks_url: Some("https://issuer.example/jwks".to_owned()),
+            admin_claim: "admin".to_owned(),
+        };
+        let authenticator = match OperatorAuthenticator::from_config(&config) {
+            Ok(Some(authenticator)) => authenticator,
+            _ => return,
+        };
+        let claims = json!({
+            "iss": "https://issuer.example",
+            "aud": ["other", "wayfinder"],
+            "sub": "operator-1",
+            "exp": unix_seconds() + 300.0,
+            "admin": true,
+        });
+        assert!(authenticator.validate_claims(&claims).is_ok());
+        let mut forbidden = claims;
+        forbidden["admin"] = Value::Bool(false);
+        assert!(matches!(
+            authenticator.validate_claims(&forbidden),
+            Err(OperatorAuthFailure::Forbidden)
+        ));
+    }
+
+    #[tokio::test]
+    async fn oidc_mode_guards_operator_routes_without_affecting_health()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = GatewayAuthConfig {
+            mode: "oidc".to_owned(),
+            issuer: Some("https://issuer.example".to_owned()),
+            audience: Some("wayfinder".to_owned()),
+            jwks_url: Some("https://issuer.example/jwks".to_owned()),
+            admin_claim: "admin".to_owned(),
+        };
+        let state = AppState::new(RoutingConfig::binary(0.5), Vec::new(), false, "test")
+            .with_gateway_operator_auth(&wayfinder_config::gateway::GatewayConfig {
+                auth: config,
+                ..wayfinder_config::gateway::GatewayConfig::default()
+            })?;
+        let operator = crate::build_router(state.clone())
+            .oneshot(Request::get("/router/routes").body(Body::empty())?)
+            .await?;
+        assert_eq!(operator.status(), StatusCode::UNAUTHORIZED);
+        let health = crate::build_router(state)
+            .oneshot(Request::get("/healthz").body(Body::empty())?)
+            .await?;
+        assert_eq!(health.status(), StatusCode::OK);
+        Ok(())
+    }
+}

@@ -2275,6 +2275,7 @@ name = "wayfinder-gateway"
 version = "2026.7.0"
 dependencies = [
  "axum",
+ "base64",
  "bytes",
  "futures-util",
  "http",
@@ -2282,6 +2283,7 @@ dependencies = [
  "indexmap",
  "redis",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

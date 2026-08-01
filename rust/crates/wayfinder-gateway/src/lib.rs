@@ -15,6 +15,7 @@ pub mod codex_control;
 pub mod decision_policy;
 pub mod delivery;
 pub mod metrics;
+pub mod operator_auth;
 pub mod rate_limit;
 pub mod recent;
 pub mod reliability;
@@ -36,7 +37,7 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Json, Router, middleware};
 use bytes::Bytes;
 use futures_util::{StreamExt, stream};
 use indexmap::IndexMap;
@@ -432,6 +433,7 @@ pub struct AppState {
     savings_ledger: Arc<SavingsLedger>,
     savings_path: Option<Arc<std::path::PathBuf>>,
     codex_control: Option<Arc<dyn codex_control::CodexControl>>,
+    operator_auth: Option<Arc<operator_auth::OperatorAuthenticator>>,
 }
 
 impl AppState {
@@ -490,6 +492,7 @@ impl AppState {
             savings_ledger,
             savings_path: None,
             codex_control: None,
+            operator_auth: None,
         }
     }
 
@@ -645,6 +648,16 @@ impl AppState {
             backend,
         )?;
         Ok(self.with_access_policy(policy))
+    }
+
+    /// Attach the separately authenticated operator surface when configured.
+    pub fn with_gateway_operator_auth(
+        mut self,
+        config: &wayfinder_config::gateway::GatewayConfig,
+    ) -> Result<Self, operator_auth::OperatorAuthConfigError> {
+        self.operator_auth =
+            operator_auth::OperatorAuthenticator::from_config(&config.auth)?.map(Arc::new);
+        Ok(self)
     }
 
     /// Attach gateway-wide and per-key spend caps from validated configuration.
@@ -906,6 +919,12 @@ impl AppState {
         self.access_policy.as_deref()
     }
 
+    /// Configured operator authenticator, if OIDC is enabled.
+    #[must_use]
+    pub fn operator_auth(&self) -> Option<&operator_auth::OperatorAuthenticator> {
+        self.operator_auth.as_deref()
+    }
+
     pub(crate) fn access_policy_arc(&self) -> Option<Arc<AccessPolicy>> {
         self.access_policy.as_ref().map(Arc::clone)
     }
@@ -989,6 +1008,7 @@ impl fmt::Debug for AppState {
             .field("price_table_version", &self.price_table_version)
             .field("savings_priced", &self.savings_ledger.priced())
             .field("codex_control_configured", &self.codex_control.is_some())
+            .field("operator_auth_configured", &self.operator_auth.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -997,11 +1017,8 @@ impl fmt::Debug for AppState {
 pub fn build_router(state: AppState) -> Router {
     let request_body_limit = state.request_body_limit();
     let codex_control_enabled = state.codex_control.is_some();
-    let application = Router::new()
-        .route("/healthz", get(healthz))
+    let operator_routes = Router::new()
         .route("/metrics", get(gateway_metrics))
-        .route("/v1/models", get(openai_models))
-        .route("/models", get(openai_models))
         .route("/router/models", get(router_models))
         .route("/router/routes", get(router_routes))
         .route("/router/profiles", get(router_profiles))
@@ -1009,10 +1026,19 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/savings", get(savings_report))
         .route("/savings", get(savings_report))
         .route("/router/config", post(router_config))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            operator_auth::middleware,
+        ));
+    let application = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/v1/models", get(openai_models))
+        .route("/models", get(openai_models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/chat/completions", post(chat_completions))
         .route("/v1/messages", post(anthropic_messages))
-        .route("/messages", post(anthropic_messages));
+        .route("/messages", post(anthropic_messages))
+        .merge(operator_routes);
     let application = if codex_control_enabled {
         application.merge(codex_control::routes())
     } else {
