@@ -25,6 +25,7 @@ use tokio::sync::RwLock;
 use wayfinder_config::gateway::GatewayAuthConfig;
 
 use crate::AppState;
+use crate::audit::AuditActor;
 
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 const JWKS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -111,15 +112,16 @@ impl OperatorAuthenticator {
         &self,
         authorization: Option<&str>,
         virtual_key_valid: bool,
-    ) -> Result<(), OperatorAuthFailure> {
+        virtual_key_actor: Option<&str>,
+    ) -> Result<String, OperatorAuthFailure> {
         if self.mode == OperatorMode::Both && virtual_key_valid {
-            return Ok(());
+            return Ok(format!("vkey:{}", virtual_key_actor.unwrap_or("unknown")));
         }
         let token = bearer_token(authorization).ok_or(OperatorAuthFailure::Unauthorized)?;
         self.verify(token).await
     }
 
-    async fn verify(&self, token: &str) -> Result<(), OperatorAuthFailure> {
+    async fn verify(&self, token: &str) -> Result<String, OperatorAuthFailure> {
         if token.len() > MAX_TOKEN_BYTES {
             return Err(OperatorAuthFailure::Unauthorized);
         }
@@ -142,7 +144,7 @@ impl OperatorAuthenticator {
             return Err(OperatorAuthFailure::Unauthorized);
         }
         let claims: Value = decode_json(claims_segment)?;
-        self.validate_claims(&claims)?;
+        let actor = self.validate_claims(&claims)?;
         let signature = URL_SAFE_NO_PAD
             .decode(signature_segment)
             .map_err(|_| OperatorAuthFailure::Unauthorized)?;
@@ -161,13 +163,13 @@ impl OperatorAuthenticator {
                 )
                 .is_ok()
             {
-                return Ok(());
+                return Ok(actor);
             }
         }
         Err(OperatorAuthFailure::Unauthorized)
     }
 
-    fn validate_claims(&self, claims: &Value) -> Result<(), OperatorAuthFailure> {
+    fn validate_claims(&self, claims: &Value) -> Result<String, OperatorAuthFailure> {
         if claims.get("iss").and_then(Value::as_str) != Some(&self.issuer) {
             return Err(OperatorAuthFailure::Unauthorized);
         }
@@ -193,17 +195,15 @@ impl OperatorAuthenticator {
                 return Err(OperatorAuthFailure::Unauthorized);
             }
         }
-        if claims
+        let subject = claims
             .get("sub")
             .and_then(Value::as_str)
-            .is_none_or(str::is_empty)
-        {
-            return Err(OperatorAuthFailure::Unauthorized);
-        }
+            .filter(|value| !value.is_empty())
+            .ok_or(OperatorAuthFailure::Unauthorized)?;
         if !claim_allows_operator(claims.get(&*self.admin_claim)) {
             return Err(OperatorAuthFailure::Forbidden);
         }
-        Ok(())
+        Ok(subject.to_owned())
     }
 
     async fn keys_for(&self, kid: &str) -> Result<Vec<RsaJwk>, OperatorAuthFailure> {
@@ -277,7 +277,7 @@ impl OperatorAuthenticator {
 /// Protect the operator router while leaving the data-plane router unchanged.
 pub async fn middleware(
     State(state): State<AppState>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
     let Some(authenticator) = state.operator_auth() else {
@@ -287,32 +287,55 @@ pub async fn middleware(
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
-    let virtual_key_valid = state.access_policy().is_some_and(|policy| {
-        policy.requires_authentication() && policy.authenticate(authorization).is_some()
+    let request_path = request.uri().path().to_owned();
+    let virtual_key_actor = state.access_policy().and_then(|policy| {
+        let grant = policy
+            .requires_authentication()
+            .then(|| policy.authenticate(authorization))
+            .flatten()?;
+        policy.key_id(grant)
     });
+    let virtual_key_valid = virtual_key_actor.is_some();
     match authenticator
-        .authorize(authorization, virtual_key_valid)
+        .authorize(authorization, virtual_key_valid, virtual_key_actor)
         .await
     {
-        Ok(()) => next.run(request).await,
-        Err(OperatorAuthFailure::Unauthorized) => operator_error(
-            StatusCode::UNAUTHORIZED,
-            "wayfinder_router_operator_unauthorized",
-            "a valid operator bearer token is required",
-            true,
-        ),
-        Err(OperatorAuthFailure::Forbidden) => operator_error(
-            StatusCode::FORBIDDEN,
-            "wayfinder_router_operator_forbidden",
-            "the operator token lacks the configured admin claim",
-            false,
-        ),
-        Err(OperatorAuthFailure::Unavailable) => operator_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "wayfinder_router_operator_auth_unavailable",
-            "operator identity validation is temporarily unavailable",
-            false,
-        ),
+        Ok(actor) => {
+            request.extensions_mut().insert(AuditActor(actor));
+            next.run(request).await
+        }
+        Err(failure) => {
+            let (status, error_type, message, challenge, reason) = match failure {
+                OperatorAuthFailure::Unauthorized => (
+                    StatusCode::UNAUTHORIZED,
+                    "wayfinder_router_operator_unauthorized",
+                    "a valid operator bearer token is required",
+                    true,
+                    "unauthorized",
+                ),
+                OperatorAuthFailure::Forbidden => (
+                    StatusCode::FORBIDDEN,
+                    "wayfinder_router_operator_forbidden",
+                    "the operator token lacks the configured admin claim",
+                    false,
+                    "forbidden",
+                ),
+                OperatorAuthFailure::Unavailable => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "wayfinder_router_operator_auth_unavailable",
+                    "operator identity validation is temporarily unavailable",
+                    false,
+                    "unavailable",
+                ),
+            };
+            let _ = state.audit_log().record(
+                "anonymous",
+                "auth.failure",
+                None,
+                Some(json!({"path": request_path, "reason": reason})),
+            );
+            operator_error(status, error_type, message, challenge)
+        }
     }
 }
 
@@ -457,6 +480,8 @@ enum OperatorAuthFailure {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
@@ -558,7 +583,12 @@ mod tests {
             jwks_url: Some("https://issuer.example/jwks".to_owned()),
             admin_claim: "admin".to_owned(),
         };
+        let path = std::env::temp_dir().join(format!(
+            "wayfinder-operator-audit-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
         let state = AppState::new(RoutingConfig::binary(0.5), Vec::new(), false, "test")
+            .with_audit_log(crate::audit::AuditLog::from_path(&path)?)
             .with_gateway_operator_auth(&wayfinder_config::gateway::GatewayConfig {
                 auth: config,
                 ..wayfinder_config::gateway::GatewayConfig::default()
@@ -571,6 +601,10 @@ mod tests {
             .oneshot(Request::get("/healthz").body(Body::empty())?)
             .await?;
         assert_eq!(health.status(), StatusCode::OK);
+        let audit = fs::read_to_string(&path)?;
+        assert!(audit.contains("auth.failure"));
+        assert!(audit.contains("/router/routes"));
+        let _ = fs::remove_file(path);
         Ok(())
     }
 }

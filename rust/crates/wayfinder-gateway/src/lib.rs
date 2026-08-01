@@ -8,6 +8,7 @@
 
 pub mod access;
 pub mod admission;
+pub mod audit;
 pub mod auth;
 pub mod budget;
 pub mod cache;
@@ -33,7 +34,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, to_bytes};
 use axum::extract::rejection::BytesRejection;
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -434,6 +435,7 @@ pub struct AppState {
     savings_path: Option<Arc<std::path::PathBuf>>,
     codex_control: Option<Arc<dyn codex_control::CodexControl>>,
     operator_auth: Option<Arc<operator_auth::OperatorAuthenticator>>,
+    audit_log: Arc<audit::AuditLog>,
 }
 
 impl AppState {
@@ -493,6 +495,7 @@ impl AppState {
             savings_path: None,
             codex_control: None,
             operator_auth: None,
+            audit_log: Arc::new(audit::AuditLog::disabled()),
         }
     }
 
@@ -660,6 +663,13 @@ impl AppState {
         Ok(self)
     }
 
+    /// Attach an append-only, prompt-free operator audit destination.
+    #[must_use]
+    pub fn with_audit_log(mut self, audit_log: audit::AuditLog) -> Self {
+        self.audit_log = Arc::new(audit_log);
+        self
+    }
+
     /// Attach gateway-wide and per-key spend caps from validated configuration.
     #[must_use]
     pub fn with_gateway_budget(
@@ -762,6 +772,7 @@ impl AppState {
         self.deployment_cursors = Arc::clone(&previous.deployment_cursors);
         self.savings_ledger = Arc::clone(&previous.savings_ledger);
         self.savings_path = previous.savings_path.clone();
+        self.audit_log = Arc::clone(&previous.audit_log);
         self
     }
 
@@ -925,6 +936,12 @@ impl AppState {
         self.operator_auth.as_deref()
     }
 
+    /// Prompt-free audit sink shared by immutable request snapshots.
+    #[must_use]
+    pub fn audit_log(&self) -> &audit::AuditLog {
+        &self.audit_log
+    }
+
     pub(crate) fn access_policy_arc(&self) -> Option<Arc<AccessPolicy>> {
         self.access_policy.as_ref().map(Arc::clone)
     }
@@ -1009,6 +1026,7 @@ impl fmt::Debug for AppState {
             .field("savings_priced", &self.savings_ledger.priced())
             .field("codex_control_configured", &self.codex_control.is_some())
             .field("operator_auth_configured", &self.operator_auth.is_some())
+            .field("audit_log", &self.audit_log.path())
             .finish_non_exhaustive()
     }
 }
@@ -1431,7 +1449,11 @@ struct SavingsResponse {
     price_table_version: String,
 }
 
-async fn savings_report(State(state): State<AppState>, uri: Uri) -> Response {
+async fn savings_report(
+    State(state): State<AppState>,
+    uri: Uri,
+    actor: Option<Extension<audit::AuditActor>>,
+) -> Response {
     let today = match utc_today() {
         Ok(today) => today,
         Err(error) => {
@@ -1443,12 +1465,22 @@ async fn savings_report(State(state): State<AppState>, uri: Uri) -> Response {
             );
         }
     };
-    match state.savings_ledger().period(savings_period(&uri), today) {
-        Ok(report) => Json(SavingsResponse {
-            report,
-            price_table_version: state.price_table_version().to_owned(),
-        })
-        .into_response(),
+    let period = savings_period(&uri);
+    match state.savings_ledger().period(period, today) {
+        Ok(report) => {
+            let actor = actor.as_ref().map_or("local", |actor| actor.0.0.as_str());
+            let _ = state.audit_log().record(
+                actor,
+                "savings.export",
+                None,
+                Some(json!({"period_days": period})),
+            );
+            Json(SavingsResponse {
+                report,
+                price_table_version: state.price_table_version().to_owned(),
+            })
+            .into_response()
+        }
         Err(error) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "wayfinder_router_state_error",
@@ -1480,6 +1512,7 @@ fn savings_period(uri: &Uri) -> Option<u32> {
 
 async fn router_config(
     State(state): State<AppState>,
+    actor: Option<Extension<audit::AuditActor>>,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let body = match body {
@@ -1511,6 +1544,17 @@ async fn router_config(
             );
         }
     };
+    let fields = body
+        .as_object()
+        .map(|body| body.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let actor = actor.as_ref().map_or("local", |actor| actor.0.0.as_str());
+    let _ = state.audit_log().record(
+        actor,
+        "config.export",
+        None,
+        Some(json!({"fields": fields})),
+    );
     (
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
         dump_routing_toml(&tuned),
