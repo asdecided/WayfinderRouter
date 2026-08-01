@@ -114,3 +114,4 @@ the plaintext.
 - WF-ROADMAP-0010 — shared state, OIDC, audit, telemetry, and Helm
 - WF-ROADMAP-0011 — identity and governance plane
 - WF-ADR-0055 — named routing presets
+- WF-ADR-0056 — hard destination eligibility

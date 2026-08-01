@@ -1258,6 +1258,38 @@ pub fn endpoint_is_literal_loopback(endpoint: &str) -> bool {
             .is_ok_and(|address| address.is_loopback())
 }
 
+/// Whether a validated endpoint is provably on a private local network
+/// without DNS resolution. Loopback is intentionally excluded: it is owned by
+/// the current host and therefore has the stricter `on-device` boundary.
+#[must_use]
+pub fn endpoint_is_literal_local_network(endpoint: &str) -> bool {
+    let Ok(endpoint) = OpenAiEndpoint::parse(endpoint) else {
+        return false;
+    };
+    let Some(host) = endpoint.chat_completions_url().host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return false;
+    }
+    let address_host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    address_host.ends_with(".local")
+        || address_host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| match address {
+                IpAddr::V4(address) => {
+                    !address.is_loopback() && (address.is_private() || address.is_link_local())
+                }
+                IpAddr::V6(address) => {
+                    !address.is_loopback()
+                        && (address.is_unique_local() || address.is_unicast_link_local())
+                }
+            })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -1759,6 +1791,23 @@ mod tests {
             "http://local-model.internal/v1"
         ));
         assert!(!endpoint_is_literal_loopback("file:///tmp/socket"));
+    }
+
+    #[test]
+    fn local_network_proof_accepts_private_literal_hosts_without_dns() {
+        assert!(endpoint_is_literal_local_network(
+            "http://192.168.1.20:11434/v1"
+        ));
+        assert!(endpoint_is_literal_local_network("http://router.local/v1"));
+        assert!(!endpoint_is_literal_local_network(
+            "http://127.0.0.1:11434/v1"
+        ));
+        assert!(!endpoint_is_literal_local_network(
+            "https://api.example.com/v1"
+        ));
+        assert!(!endpoint_is_literal_local_network(
+            "http://model.internal/v1"
+        ));
     }
 
     #[test]

@@ -105,6 +105,17 @@ existing per-key attribution and budget behavior. Workspace and key rate
 limits both apply, and successful responses identify the bounded policy scope
 through `x-wayfinder-router-workspace`.
 
+Every inference candidate is hard-filtered for the request's capabilities and
+privacy posture before delivery. Callers may send
+`x-wayfinder-privacy-posture: on-device-only|local-devices|hosted-allowed`;
+`hosted-allowed` is the compatibility default and the effective value is
+echoed as `x-wayfinder-router-privacy-posture`. Missing credentials,
+insufficient context, unsupported image/tool/streaming requirements, and
+disallowed execution boundaries are excluded from primary and fallback plans.
+A pinned destination with no eligible path fails with
+`422 wayfinder_router_destination_ineligible`; it never silently crosses the
+requested boundary.
+
 Model names in this API are stable Wayfinder aliases. A configured alias maps
 to its provider model and ordered same-tier fallbacks, allowing operators to
 change upstream revisions without changing every client. An alias may also
@@ -152,4 +163,6 @@ workspace, alias, and multi-turn boundaries, and
 [WF-ADR-0053](../decisions/WF-ADR-0053-shared-state-backend.md) for the
 shared-state contract and degradation behavior, and
 [WF-ADR-0054](../decisions/WF-ADR-0054-model-deployment-pools.md) for stable
-aliases and weighted deployment pools.
+aliases and weighted deployment pools, and
+[WF-ADR-0056](../decisions/WF-ADR-0056-hard-destination-eligibility.md) for
+hard privacy and capability filtering.

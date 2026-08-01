@@ -113,6 +113,34 @@ verification. See
 | `[gateway.keys.<id>] hash` / `tags` / `models` (+ nested `budget` / `rate_limit`) | virtual API keys: when any is set, inference requires a valid `Authorization: Bearer` token (else `401`). Mint with `wayfinder-router keys new --id <id>`; the plaintext is printed once and only the SHA-256 hash belongs in config. Spend & **savings** are attributed per key (`by_key` in `/v1/savings`, `wayfinder_router_key_requests_total`); a key can carry its own budget/rate-limit (strictest wins) and a `models` allowlist (clamps to the nearest allowed tier) (WF-ADR-0035) |
 | `[gateway.workspaces.<id>] models` (+ nested `rate_limit`) / `[gateway.keys.<id>] workspace` | group multiple keys under one model policy and shared RPM/TPM envelope. With `[gateway.state] backend = "redis"`, the envelope is fleet-wide; otherwise it is process-local. A key inherits the workspace model list and may only narrow it. Successful inference returns `x-wayfinder-router-workspace`; discovery uses the same effective list (WF-ADR-0052) |
 
+## Privacy and capability eligibility
+
+Before a provider call, the gateway filters every primary and fallback
+destination through the shared routing-core eligibility contract. The request
+may select a privacy boundary with `x-wayfinder-privacy-posture`:
+
+| value | permitted execution boundary |
+| --- | --- |
+| `on-device-only` | Apple local providers and literal loopback endpoints |
+| `local-devices` | on-device plus literal private-IP or `.local` endpoints |
+| `hosted-allowed` | all configured boundaries (the compatibility default) |
+
+`[gateway].offline = true` and `x-wayfinder-offline: true` always force
+`on-device-only`. The effective value is returned as
+`x-wayfinder-router-privacy-posture`.
+
+The body also contributes hard requirements: estimated prompt plus requested
+output context, image content, tool/function declarations, and streaming.
+Apple Foundation Models and the bounded ChatGPT adapter are text-only and are
+excluded for image/tool requests; OpenAI-compatible adapters retain their
+existing pass-through contract. Missing credentials, declared windows that are
+too small, unsupported capabilities, and denied privacy boundaries are
+excluded before reliability retries or failover. Models that omit
+`context_window` retain the legacy prompt-precheck behavior. A pinned destination or
+named preset with no eligible member returns
+`422 wayfinder_router_destination_ineligible` with stable reason names rather
+than silently switching privacy boundary (WF-ADR-0056).
+
 ## Named routing presets
 
 Use a named preset when an application should select an ordered, operator-owned
