@@ -289,6 +289,11 @@ WF-ADR-0053. Its first PR deliberately leaves the local savings ledger and
 response cache process-local; those migrations require their own compatibility
 and recovery evidence.
 
+Stable public aliases may now carry bounded weighted OpenAI-compatible
+deployments under WF-ADR-0054. Rotation and deployment-health state remain
+process-local by design; Redis coordinates policy windows, not a hidden global
+round-robin cursor.
+
 **Acceptance:**
 
 - Two gateway replicas against one Redis enforce a **single** shared RPM limit and budget: N

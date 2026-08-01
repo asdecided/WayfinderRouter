@@ -34,7 +34,7 @@ use wayfinder_gateway::delivery::{
 use wayfinder_gateway::reload::{LastGood, ReloadOutcome};
 use wayfinder_gateway::server::{DEFAULT_DRAIN_TIMEOUT, serve_with_shutdown, shutdown_signal};
 use wayfinder_gateway::{
-    AppState, ConfiguredModel, RouteOn, build_reloadable_data_plane_router,
+    AppState, ConfiguredDeployment, ConfiguredModel, RouteOn, build_reloadable_data_plane_router,
     build_reloadable_router, validate_data_plane_state,
 };
 use wayfinder_providers::openai_compat::{
@@ -712,7 +712,25 @@ fn configured_models(
                 .api_key_env
                 .as_deref()
                 .is_none_or(|reference| credentials.is_ready(reference));
+            let deployments = model
+                .deployments
+                .iter()
+                .map(|deployment| {
+                    ConfiguredDeployment::new(
+                        deployment.id.clone(),
+                        deployment.base_url.clone(),
+                        deployment.model.clone(),
+                        deployment.api_key_env.clone(),
+                        deployment
+                            .api_key_env
+                            .as_deref()
+                            .is_none_or(|reference| credentials.is_ready(reference)),
+                        deployment.weight,
+                    )
+                })
+                .collect();
             ConfiguredModel::from_gateway_model(name, model, key_ready)
+                .with_deployments(deployments)
         })
         .collect()
 }

@@ -98,7 +98,9 @@ the plaintext.
    accounting, and admission consistency. The Redis-first rate/token counter
    contract is now WF-ADR-0053; budget, ledger, cache, and distributed
    admission remain follow-ons.
-4. Package the two-plane topology through a Helm chart with ingress TLS,
+4. Keep stable model aliases over bounded weighted deployment pools; the
+   process-local selection and per-deployment health contract is WF-ADR-0054.
+5. Package the two-plane topology through a Helm chart with ingress TLS,
    NetworkPolicy, PodDisruptionBudget, and probe defaults.
 
 ## Related

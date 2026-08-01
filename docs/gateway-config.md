@@ -79,7 +79,7 @@ verification. See
 | --- | --- |
 | `[gateway] retries` / `breaker_threshold` / `breaker_cooldown` | reliability: bounded retries on transport/`429`/`5xx`, and a per-target circuit breaker (WF-ADR-0031) |
 | `[gateway] failover = same-tier\|degrade\|escalate` | on exhaustion, stay on the tier (default), fall to a cheaper one (never raises cost), or a dearer one (opt-in); per-request `X-Wayfinder-Failover` |
-| `[gateway.models.<name>] fallbacks = [...]` / `context_window` | same-tier endpoints to try on failure; skip a target whose window can't fit the prompt. Responses carry `x-wayfinder-router-served-by` |
+| `[gateway.models.<name>] fallbacks = [...]` / `deployments = [...]` / `context_window` | same-tier endpoints to try on failure; weighted concrete deployments behind one alias for healthy throughput; skip a target whose window can't fit the prompt. Responses carry `x-wayfinder-router-served-by` |
 
 ## Concurrency and backpressure
 
@@ -116,8 +116,14 @@ verification. See
 Names under `[gateway.models.<name>]` are public Wayfinder model aliases. The
 alias is what clients discover and request; `model = "..."` is the provider's
 upstream identifier, and `fallbacks` gives the alias an ordered same-tier
-delivery ladder. Multi-turn chats remain stateless: clients resend their full
-transcript, while `route_on` and optional `sticky` decide how it is routed.
+delivery ladder. An OpenAI-compatible alias may add up to 32 inline
+`deployments` with an `id`, `base_url`, `model`, optional `api_key_env`, and
+optional `weight` (1–100). The alias's own endpoint is the default member;
+weighted deterministic rotation picks a healthy member first, then tries the
+remaining members before the outer fallback ladder. Client-visible model names
+stay aliases while circuit and latency state use `alias#deployment` identities.
+Multi-turn chats remain stateless: clients resend their full transcript, while
+`route_on` and optional `sticky` decide how it is routed.
 
 For a non-loopback listener, follow the [managed gateway deployment](managed-gateway-deployment.md)
 contract. The local surface refuses external binds; the managed surface omits

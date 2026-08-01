@@ -764,6 +764,7 @@ model = "large"
             cost_per_1k: None,
             fallbacks: Vec::new(),
             context_window: None,
+            deployments: Vec::new(),
         };
         assert_eq!(model.model, "m");
     }
