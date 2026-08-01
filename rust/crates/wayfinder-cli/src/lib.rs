@@ -625,6 +625,7 @@ async fn build_serve_state<W: Write>(
         .with_route_on(route_on)
         .with_sticky(gateway.sticky, gateway.sticky_cooldown)
         .with_slash_directives(gateway.slash_directives)
+        .with_route_presets(gateway.routes.clone())
         .with_gateway_budget(&gateway);
     let savings_path = std::env::var_os(SAVINGS_FILE_ENV)
         .filter(|value| !value.is_empty())

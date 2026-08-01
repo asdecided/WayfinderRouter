@@ -114,6 +114,13 @@ requests remain OpenAI/Anthropic-compatible and stateless: the caller sends the
 complete transcript each turn, so no conversation content is retained by the
 gateway.
 
+Application-owned delivery policy can use a configured named preset through
+`model = "@route/<name>"` on a request. Presets are not exposed on the managed
+`/router/*` surface; they select only the operator-defined model aliases that
+are already allowed for the presented virtual key. An unknown preset fails
+closed with `400 wayfinder_router_unknown_route` rather than becoming
+`Automatic`.
+
 The listener deliberately does **not** expose `/healthz`, `/metrics`,
 `/router/*`, savings, config rendering, or local ChatGPT/Codex account controls.
 Those are operator/local surfaces and must not be routed through the public

@@ -113,6 +113,31 @@ verification. See
 | `[gateway.keys.<id>] hash` / `tags` / `models` (+ nested `budget` / `rate_limit`) | virtual API keys: when any is set, inference requires a valid `Authorization: Bearer` token (else `401`). Mint with `wayfinder-router keys new --id <id>`; the plaintext is printed once and only the SHA-256 hash belongs in config. Spend & **savings** are attributed per key (`by_key` in `/v1/savings`, `wayfinder_router_key_requests_total`); a key can carry its own budget/rate-limit (strictest wins) and a `models` allowlist (clamps to the nearest allowed tier) (WF-ADR-0035) |
 | `[gateway.workspaces.<id>] models` (+ nested `rate_limit`) / `[gateway.keys.<id>] workspace` | group multiple keys under one model policy and shared RPM/TPM envelope. With `[gateway.state] backend = "redis"`, the envelope is fleet-wide; otherwise it is process-local. A key inherits the workspace model list and may only narrow it. Successful inference returns `x-wayfinder-router-workspace`; discovery uses the same effective list (WF-ADR-0052) |
 
+## Named routing presets
+
+Use a named preset when an application should select an ordered, operator-owned
+delivery path without knowing provider endpoints or deployment topology:
+
+```toml
+[gateway.routes.coding]
+models = ["local-code", "cloud-code"]
+```
+
+Clients select it with the normal OpenAI-compatible model field:
+`model = "@route/coding"`. Wayfinder still computes the deterministic score for
+the receipt, but the preset's ordered aliases are the only delivery candidates;
+the first compatible, available alias wins and later aliases are tried on
+transport/`429`/`5xx` failure. This is an explicit route choice, not a new
+scoring model or a credential-broker path. Unknown `@route/...` names fail with
+`400 wayfinder_router_unknown_route` rather than silently becoming `Automatic`.
+
+The local operator surface exposes the configured, secret-free inventory at
+`GET /router/routes`. Responses identify the selected preset with
+`x-wayfinder-router-route: @route/<name>` and `x-wayfinder-router-mode: preset`.
+Presets are bounded to 64 names and 32 unique model aliases each; model aliases
+remain the stable public contract, so deployment pools and provider credentials
+stay behind the selected route (WF-ADR-0055).
+
 Names under `[gateway.models.<name>]` are public Wayfinder model aliases. The
 alias is what clients discover and request; `model = "..."` is the provider's
 upstream identifier, and `fallbacks` gives the alias an ordered same-tier

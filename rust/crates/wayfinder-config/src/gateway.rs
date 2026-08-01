@@ -43,6 +43,10 @@ pub const DEFAULT_STATE_NAMESPACE: &str = "wayfinder";
 pub const MAX_MODEL_DEPLOYMENTS: usize = 32;
 /// Maximum weight accepted for one model deployment.
 pub const MAX_MODEL_DEPLOYMENT_WEIGHT: u64 = 100;
+/// Maximum number of named routing presets in one gateway configuration.
+pub const MAX_ROUTE_PRESETS: usize = 64;
+/// Maximum number of ordered model aliases in one routing preset.
+pub const MAX_ROUTE_PRESET_MODELS: usize = 32;
 
 /// Stable delivery identity for a configured gateway model.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -132,6 +136,13 @@ pub struct GatewayDeployment {
     pub api_key_env: Option<String>,
     /// Relative selection weight; higher values receive more turns.
     pub weight: u64,
+}
+
+/// An ordered, named delivery route selected with `model = "@route/<name>"`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoutePreset {
+    /// Ordered public model aliases attempted by this route.
+    pub models: Vec<String>,
 }
 
 /// A spend cap over the gateway's realized-cost ledger.
@@ -297,6 +308,8 @@ pub struct GatewayConfig {
     pub state: StateConfig,
     /// Workspace policy namespaces keyed by operator-selected identifier.
     pub workspaces: IndexMap<String, Workspace>,
+    /// Named ordered routing presets keyed by operator-selected identifier.
+    pub routes: IndexMap<String, RoutePreset>,
     /// Virtual credentials keyed by operator-selected identifier.
     pub keys: IndexMap<String, VirtualKey>,
 }
@@ -320,6 +333,7 @@ impl Default for GatewayConfig {
             concurrency: ConcurrencyConfig::default(),
             state: StateConfig::default(),
             workspaces: IndexMap::new(),
+            routes: IndexMap::new(),
             keys: IndexMap::new(),
         }
     }
@@ -395,9 +409,11 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
     let workspaces = parse_workspaces(gateway.get("workspaces"), where_)?;
     let keys = parse_keys(gateway.get("keys"), where_)?;
     let models = parse_models(gateway.get("models"), where_)?;
+    let routes = parse_routes(gateway.get("routes"), where_)?;
 
     validate_model_fallbacks(&models, where_)?;
     validate_workspace_models(&workspaces, &models, where_)?;
+    validate_route_presets(&routes, &models, where_)?;
     validate_keys(&keys, &workspaces, &models, where_)?;
 
     Ok(GatewayConfig {
@@ -417,6 +433,7 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
         concurrency,
         state,
         workspaces,
+        routes,
         keys,
     })
 }
@@ -638,6 +655,13 @@ fn render_gateway_toml(gateway: &GatewayConfig) -> String {
             lines.push(format!("context_window = {context_window}"));
         }
         blocks.push(lines.join("\n"));
+    }
+    for (route_id, route) in &gateway.routes {
+        let segment = quote_toml_key_segment(route_id);
+        blocks.push(format!(
+            "[gateway.routes.{segment}]\nmodels = {}",
+            render_string_list(&route.models)
+        ));
     }
     blocks.join("\n\n")
 }
@@ -997,6 +1021,72 @@ fn parse_workspaces(
     Ok(workspaces)
 }
 
+fn parse_routes(
+    value: Option<&Value>,
+    where_: &str,
+) -> Result<IndexMap<String, RoutePreset>, ConfigError> {
+    let Some(value) = value else {
+        return Ok(IndexMap::new());
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| invalid(where_, "'[gateway.routes]' must be a table"))?;
+    if table.len() > MAX_ROUTE_PRESETS {
+        return Err(invalid(
+            where_,
+            format!("'[gateway.routes]' may contain at most {MAX_ROUTE_PRESETS} named routes"),
+        ));
+    }
+    let mut routes = IndexMap::new();
+    for (route_id, value) in table {
+        if !valid_policy_id(route_id) {
+            return Err(invalid(
+                where_,
+                format!("'gateway.routes.{route_id}' must use a 1-128 character visible ASCII id"),
+            ));
+        }
+        let entry = value.as_table().ok_or_else(|| {
+            invalid(
+                where_,
+                format!("'[gateway.routes.{route_id}]' must be a table"),
+            )
+        })?;
+        let models = optional_non_empty_string_list(
+            entry.get("models"),
+            where_,
+            &format!("gateway.routes.{route_id}.models"),
+            "a non-empty list of model names",
+        )?;
+        if models.is_empty() {
+            return Err(invalid(
+                where_,
+                format!("'gateway.routes.{route_id}.models' must not be empty"),
+            ));
+        }
+        if models.len() > MAX_ROUTE_PRESET_MODELS {
+            return Err(invalid(
+                where_,
+                format!(
+                    "'gateway.routes.{route_id}.models' may contain at most {MAX_ROUTE_PRESET_MODELS} model names"
+                ),
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for model in &models {
+            if !seen.insert(model) {
+                return Err(invalid(
+                    where_,
+                    format!(
+                        "'gateway.routes.{route_id}.models' contains duplicate model '{model}'"
+                    ),
+                ));
+            }
+        }
+        routes.insert(route_id.clone(), RoutePreset { models });
+    }
+    Ok(routes)
+}
+
 fn valid_policy_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -1328,6 +1418,24 @@ fn validate_workspace_models(
     Ok(())
 }
 
+fn validate_route_presets(
+    routes: &IndexMap<String, RoutePreset>,
+    models: &IndexMap<String, GatewayModel>,
+    where_: &str,
+) -> Result<(), ConfigError> {
+    for (route_id, route) in routes {
+        for model in &route.models {
+            if !models.contains_key(model) {
+                return Err(invalid(
+                    where_,
+                    format!("'gateway.routes.{route_id}.models' names unknown model '{model}'"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_keys(
     keys: &IndexMap<String, VirtualKey>,
     workspaces: &IndexMap<String, Workspace>,
@@ -1622,6 +1730,9 @@ api_key_env = "LOCAL_API_KEY"
 api_key_cmd = "credential-helper read local"
 cost_per_1k = 0.25
 
+[gateway.routes.coding]
+models = ["local", "local-backup"]
+
 [gateway.keys.team-a]
 hash = "{hash}"
 tags = ["prod", "team-a"]
@@ -1677,6 +1788,10 @@ rpm = 5
             .ok_or_else(|| invalid("test", "missing local model"))?;
         assert_eq!(local.fallbacks, ["local-backup"]);
         assert_eq!(local.context_window, Some(8_192));
+        assert_eq!(
+            config.routes["coding"].models,
+            ["local".to_owned(), "local-backup".to_owned()]
+        );
         let backup = config
             .models
             .get("local-backup")
@@ -1698,6 +1813,24 @@ rpm = 5
             Some("day")
         );
         assert_eq!(key.rate_limit.as_ref().and_then(|limit| limit.rpm), Some(5));
+        Ok(())
+    }
+
+    #[test]
+    fn named_routes_round_trip_and_validate_model_references() -> Result<(), ConfigError> {
+        let text = "[gateway.models.local]\nbase_url = \"http://localhost:11434/v1\"\nmodel = \"llama3.2\"\n\n[gateway.models.cloud]\nbase_url = \"https://api.example/v1\"\nmodel = \"gpt-5\"\n\n[gateway.routes.coding]\nmodels = [\"local\", \"cloud\"]";
+        let config = parse(text)?;
+        assert_eq!(dump_gateway_toml(&config)?, text);
+        for invalid_text in [
+            "[gateway.models.local]\nbase_url = \"http://localhost:11434/v1\"\nmodel = \"llama3.2\"\n\n[gateway.routes.empty]\nmodels = []",
+            "[gateway.models.local]\nbase_url = \"http://localhost:11434/v1\"\nmodel = \"llama3.2\"\n\n[gateway.routes.coding]\nmodels = [\"local\", \"local\"]",
+            "[gateway.models.local]\nbase_url = \"http://localhost:11434/v1\"\nmodel = \"llama3.2\"\n\n[gateway.routes.coding]\nmodels = [\"missing\"]",
+        ] {
+            assert!(
+                parse(invalid_text).is_err(),
+                "unexpectedly accepted: {invalid_text}"
+            );
+        }
         Ok(())
     }
 
