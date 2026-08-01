@@ -6,7 +6,7 @@ development. Do not expose that surface through an ingress or LAN bind.
 For a remotely reachable model endpoint, use the explicit managed data plane:
 
 ```sh
-wayfinder-router keys new --id team-a
+wayfinder-router keys new --id team-a --workspace production
 ```
 
 Store the plaintext key in the calling application's secret manager. Add only
@@ -16,7 +16,15 @@ budget, and rate-limit scope:
 ```toml
 [gateway.keys.team-a]
 hash = "<sha256 printed by keys new>"
+workspace = "production"
+
+[gateway.workspaces.production]
 models = ["local", "cloud"]
+
+[gateway.workspaces.production.rate_limit]
+rpm = 600
+tpm = 1000000
+window = 60
 
 [gateway.keys.team-a.rate_limit]
 rpm = 120
@@ -80,8 +88,16 @@ The managed listener exposes only:
 | `POST /v1/messages`, `POST /messages` | virtual key | Anthropic-compatible inference |
 
 Requests authenticate with `Authorization: Bearer <virtual-key>`. Model listing
-respects the key's `models` allowlist. Inference retains the existing per-key
-attribution, budget, rate-limit, and allowlist behavior.
+respects the effective workspace/key `models` allowlist. Inference retains the
+existing per-key attribution and budget behavior. Workspace and key rate
+limits both apply, and successful responses identify the bounded policy scope
+through `x-wayfinder-router-workspace`.
+
+Model names in this API are stable Wayfinder aliases. A configured alias maps
+to its provider model and ordered same-tier fallbacks, allowing operators to
+change upstream revisions without changing every client. Multi-turn requests
+remain OpenAI/Anthropic-compatible and stateless: the caller sends the complete
+transcript each turn, so no conversation content is retained by the gateway.
 
 The listener deliberately does **not** expose `/healthz`, `/metrics`,
 `/router/*`, savings, config rendering, or local ChatGPT/Codex account controls.
@@ -107,4 +123,6 @@ model ingress.
 See [WF-ADR-0050](../decisions/WF-ADR-0050-managed-gateway-surfaces.md) for the
 authority separation and threat model, and
 [WF-ADR-0051](../decisions/WF-ADR-0051-bounded-delivery-concurrency.md) for the
-process-local throughput contract.
+process-local throughput contract, and
+[WF-ADR-0052](../decisions/WF-ADR-0052-workspace-scoped-model-routing.md) for
+workspace, alias, and multi-turn boundaries.

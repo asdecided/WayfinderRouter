@@ -139,6 +139,7 @@ fn run_keys(arguments: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write
         return EXIT_USAGE;
     }
     let mut id = "default".to_owned();
+    let mut workspace = None;
     let mut json_output = false;
     let mut index = 1_usize;
     while let Some(argument) = arguments.get(index) {
@@ -155,6 +156,17 @@ fn run_keys(arguments: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write
             value if value.starts_with("--id=") => {
                 id = value.trim_start_matches("--id=").to_owned();
             }
+            "--workspace" => {
+                index = index.saturating_add(1);
+                let Some(value) = arguments.get(index) else {
+                    write_error(stderr, "wayfinder-router: --workspace needs a value");
+                    return EXIT_USAGE;
+                };
+                workspace = Some(value.clone());
+            }
+            value if value.starts_with("--workspace=") => {
+                workspace = Some(value.trim_start_matches("--workspace=").to_owned());
+            }
             value => {
                 write_error(
                     stderr,
@@ -164,6 +176,17 @@ fn run_keys(arguments: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write
             }
         }
         index = index.saturating_add(1);
+    }
+    if workspace.as_ref().is_some_and(|workspace| {
+        workspace.is_empty()
+            || workspace.len() > wayfinder_gateway::access::MAX_KEY_ID_BYTES
+            || !workspace.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+    }) {
+        write_error(
+            stderr,
+            "wayfinder-router: workspace id must be 1-128 visible ASCII characters",
+        );
+        return EXIT_USAGE;
     }
     if id.is_empty()
         || id.len() > wayfinder_gateway::access::MAX_KEY_ID_BYTES
@@ -185,13 +208,20 @@ fn run_keys(arguments: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write
             return EXIT_CONFIG;
         }
     };
-    let toml = format!("[gateway.keys.{id_literal}]\nhash = \"{hash}\"");
+    let workspace_line = workspace
+        .as_ref()
+        .and_then(|workspace| serde_json::to_string(workspace).ok())
+        .map_or_else(String::new, |workspace| {
+            format!("\nworkspace = {workspace}")
+        });
+    let toml = format!("[gateway.keys.{id_literal}]\nhash = \"{hash}\"{workspace_line}");
     if json_output {
         let payload = json!({
             "schema_version": 1,
             "id": id,
             "key": key,
             "hash": hash,
+            "workspace": workspace,
             "toml": toml,
         });
         if serde_json::to_writer_pretty(&mut *stdout, &payload).is_err()
@@ -1181,7 +1211,7 @@ fn write_error(stream: &mut dyn Write, message: &str) {
 const TOP_LEVEL_USAGE: &str = "usage: wayfinder-router [-h] [--version] COMMAND ...";
 const TOP_LEVEL_HELP: &str = "usage: wayfinder-router [-h] [--version] COMMAND ...\n\nNative deterministic prompt-complexity router.\n\nCommands:\n  route          Score a prompt and recommend a model.\n  serve          Run the bounded HTTP gateway.\n  service        Manage the always-on launchd/systemd user service.\n  keys new       Mint a virtual gateway key and its hashed config entry.\n  capabilities   Emit the versioned helper capability handshake.\n  app-setup-init Create a bounded desktop setup config.\n  app-configure-chatgpt\n                 Add a bounded ChatGPT account route for Desktop.\n  config read-routing | apply-routing\n                 Read or replace the desktop-owned routing fragment.\n  apple-foundation-live-smoke\n                 Exercise the bounded Apple Foundation Models delivery path.";
 const ROUTE_HELP: &str = "usage: wayfinder-router route [-h] [--threshold THRESHOLD] [--json] [--explain] prompt\n\nScore a prompt and recommend a model.";
-const KEYS_HELP: &str = "usage: wayfinder-router keys new [--id ID] [--json]\n\nMint a virtual gateway key. The plaintext is printed once; only its SHA-256 hash belongs in config.";
+const KEYS_HELP: &str = "usage: wayfinder-router keys new [--id ID] [--workspace ID] [--json]\n\nMint a virtual gateway key. The plaintext is printed once; only its SHA-256 hash belongs in config.";
 const SERVE_HELP: &str = "usage: wayfinder-router serve [-h] [--host HOST] [--port PORT] [--surface local|data-plane] [--dry-run] [--timeout TIMEOUT] [--config CONFIG]\n\nRun the bounded HTTP gateway. Non-loopback serving requires the authenticated data-plane surface.";
 
 #[cfg(test)]
@@ -1358,6 +1388,8 @@ mod tests {
                 "new".into(),
                 "--id".into(),
                 "team a".into(),
+                "--workspace".into(),
+                "production".into(),
                 "--json".into(),
             ],
             &mut stdin,
@@ -1374,6 +1406,8 @@ mod tests {
         assert_eq!(hash, wayfinder_gateway::auth::hash_key(key));
         assert!(toml.contains("[gateway.keys.\"team a\"]"));
         assert!(toml.contains(hash));
+        assert_eq!(payload["workspace"], "production");
+        assert!(toml.contains("workspace = \"production\""));
         assert!(!toml.contains(key));
         Ok(())
     }
@@ -1465,6 +1499,7 @@ mod tests {
             wayfinder_config::gateway::VirtualKey {
                 hash: wayfinder_gateway::auth::hash_key("wf-secret"),
                 tags: Vec::new(),
+                workspace: None,
                 budget: None,
                 rate_limit: None,
                 models: Vec::new(),

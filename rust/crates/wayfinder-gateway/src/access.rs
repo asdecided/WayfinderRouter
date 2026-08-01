@@ -4,6 +4,7 @@
 //! Presented credentials exist for one constant-time comparison pass and are
 //! never formatted, logged, or stored in application state.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
@@ -16,6 +17,8 @@ use crate::rate_limit::{RateLimitError, RateLimiter, RateResult, RateSnapshot};
 
 /// Bound compare work and dynamic key-attribution cardinality.
 pub const MAX_VIRTUAL_KEYS: usize = 256;
+/// Bound workspace policy cardinality and metric attribution.
+pub const MAX_WORKSPACES: usize = 256;
 /// Maximum retained bytes in one key id.
 pub const MAX_KEY_ID_BYTES: usize = 128;
 
@@ -24,7 +27,9 @@ type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
 struct VirtualKeyPolicy {
     id: String,
     digest: String,
+    workspace: Option<String>,
     allowed_models: Arc<[String]>,
+    workspace_limiter: Option<Arc<RateLimiter>>,
     limiter: Option<Arc<RateLimiter>>,
 }
 
@@ -34,6 +39,7 @@ impl fmt::Debug for VirtualKeyPolicy {
             .debug_struct("VirtualKeyPolicy")
             .field("id", &self.id)
             .field("digest", &"<redacted sha256>")
+            .field("workspace", &self.workspace)
             .field("allowed_models", &self.allowed_models)
             .field("rate_limit_configured", &self.limiter.is_some())
             .finish()
@@ -46,6 +52,9 @@ pub enum AccessPolicyError {
     /// The configured key count exceeds the bounded compare pass.
     #[error("gateway access policy exceeds the virtual-key bound")]
     TooManyKeys,
+    /// The configured workspace count exceeds the bounded policy set.
+    #[error("gateway access policy exceeds the workspace bound")]
+    TooManyWorkspaces,
     /// A key id cannot safely be retained as operational metadata.
     #[error("gateway virtual-key id is empty, too long, or contains control characters")]
     InvalidKeyId,
@@ -77,12 +86,28 @@ impl AccessPolicy {
         if config.keys.len() > MAX_VIRTUAL_KEYS {
             return Err(AccessPolicyError::TooManyKeys);
         }
+        if config.workspaces.len() > MAX_WORKSPACES {
+            return Err(AccessPolicyError::TooManyWorkspaces);
+        }
         let global_limiter = config
             .rate_limit
             .as_ref()
             .map(new_limiter)
             .transpose()?
             .map(Arc::new);
+        let workspaces = config
+            .workspaces
+            .iter()
+            .map(|(id, workspace)| {
+                let limiter = workspace
+                    .rate_limit
+                    .as_ref()
+                    .map(new_limiter)
+                    .transpose()?
+                    .map(Arc::new);
+                Ok((id.clone(), (workspace.models.clone(), limiter)))
+            })
+            .collect::<Result<BTreeMap<_, _>, RateLimitError>>()?;
         let mut keys = Vec::with_capacity(config.keys.len());
         for (id, key) in &config.keys {
             if !valid_key_id(id) {
@@ -94,10 +119,21 @@ impl AccessPolicy {
                 .map(new_limiter)
                 .transpose()?
                 .map(Arc::new);
+            let workspace = key
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspaces.get(workspace));
+            let allowed_models = if key.models.is_empty() {
+                workspace.map_or_else(Vec::new, |(models, _)| models.clone())
+            } else {
+                key.models.clone()
+            };
             keys.push(VirtualKeyPolicy {
                 id: id.clone(),
                 digest: key.hash.clone(),
-                allowed_models: Arc::from(key.models.clone()),
+                workspace: key.workspace.clone(),
+                allowed_models: Arc::from(allowed_models),
+                workspace_limiter: workspace.and_then(|(_, limiter)| limiter.clone()),
                 limiter,
             });
         }
@@ -155,16 +191,36 @@ impl AccessPolicy {
         &self,
         grant: AccessGrant,
     ) -> Result<Option<RateResult>, AccessPolicyError> {
-        self.key(grant)
+        let now = (self.clock)();
+        let workspace_result = if let Some(limiter) = self
+            .key(grant)
+            .and_then(|key| key.workspace_limiter.as_ref())
+        {
+            let result = limiter.admit_at(now)?;
+            if !result.allowed() {
+                return Ok(Some(result));
+            }
+            Some(result)
+        } else {
+            None
+        };
+        let key_result = self
+            .key(grant)
             .and_then(|key| key.limiter.as_ref())
-            .map(|limiter| limiter.admit_at((self.clock)()))
+            .map(|limiter| limiter.admit_at(now))
             .transpose()
-            .map_err(Into::into)
+            .map_err(AccessPolicyError::from)?;
+        Ok(key_result.or(workspace_result))
     }
 
     #[must_use]
     pub(crate) fn key_id(&self, grant: AccessGrant) -> Option<&str> {
         self.key(grant).map(|key| key.id.as_str())
+    }
+
+    #[must_use]
+    pub(crate) fn workspace_id(&self, grant: AccessGrant) -> Option<&str> {
+        self.key(grant).and_then(|key| key.workspace.as_deref())
     }
 
     #[must_use]
@@ -186,7 +242,14 @@ impl AccessPolicy {
             Some(limiter) => limiter.snapshot_at(now)?,
             None => None,
         };
-        Ok([global, key]
+        let workspace = match self
+            .key(grant)
+            .and_then(|key| key.workspace_limiter.as_ref())
+        {
+            Some(limiter) => limiter.snapshot_at(now)?,
+            None => None,
+        };
+        Ok([global, workspace, key]
             .into_iter()
             .flatten()
             .min_by_key(|snapshot| snapshot.remaining))
@@ -199,6 +262,12 @@ impl AccessPolicy {
     ) -> Result<(), AccessPolicyError> {
         let now = (self.clock)();
         if let Some(limiter) = &self.global_limiter {
+            limiter.add_tokens_at(tokens, now)?;
+        }
+        if let Some(limiter) = self
+            .key(grant)
+            .and_then(|key| key.workspace_limiter.as_ref())
+        {
             limiter.add_tokens_at(tokens, now)?;
         }
         if let Some(limiter) = self.key(grant).and_then(|key| key.limiter.as_ref()) {
@@ -242,7 +311,7 @@ fn valid_key_id(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use wayfinder_config::gateway::{GatewayConfig, RateLimit, VirtualKey};
+    use wayfinder_config::gateway::{GatewayConfig, RateLimit, VirtualKey, Workspace};
 
     use super::*;
 
@@ -250,6 +319,7 @@ mod tests {
         VirtualKey {
             hash: auth::hash_key(secret),
             tags: Vec::new(),
+            workspace: None,
             budget: None,
             rate_limit: None,
             models: Vec::new(),
@@ -274,6 +344,57 @@ mod tests {
         let rendered = format!("{policy:?}");
         assert!(!rendered.contains(&digest));
         assert!(!rendered.contains("wf-secret"));
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_policy_is_shared_across_keys_and_keys_can_only_narrow_models()
+    -> Result<(), AccessPolicyError> {
+        let mut config = GatewayConfig::default();
+        config.workspaces.insert(
+            "production".to_owned(),
+            Workspace {
+                models: vec!["fast".to_owned(), "deep".to_owned()],
+                rate_limit: Some(RateLimit {
+                    rpm: Some(2),
+                    tpm: None,
+                    window: 60.0,
+                }),
+            },
+        );
+        let mut first = virtual_key("first-secret");
+        first.workspace = Some("production".to_owned());
+        let mut second = virtual_key("second-secret");
+        second.workspace = Some("production".to_owned());
+        second.models = vec!["fast".to_owned()];
+        config.keys.insert("first".to_owned(), first);
+        config.keys.insert("second".to_owned(), second);
+
+        let policy = AccessPolicy::from_gateway_config_with_clock(&config, || 1.0)?;
+        let first = policy
+            .authenticate(Some("Bearer first-secret"))
+            .ok_or(AccessPolicyError::InvalidKeyId)?;
+        let second = policy
+            .authenticate(Some("Bearer second-secret"))
+            .ok_or(AccessPolicyError::InvalidKeyId)?;
+        assert_eq!(policy.workspace_id(first), Some("production"));
+        assert_eq!(policy.allowed_models(first), ["fast", "deep"]);
+        assert_eq!(policy.allowed_models(second), ["fast"]);
+        assert!(
+            policy
+                .admit_key(first)?
+                .is_some_and(|result| result.allowed())
+        );
+        assert!(
+            policy
+                .admit_key(second)?
+                .is_some_and(|result| result.allowed())
+        );
+        assert!(
+            policy
+                .admit_key(first)?
+                .is_some_and(|result| !result.allowed())
+        );
         Ok(())
     }
 

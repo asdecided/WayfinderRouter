@@ -161,6 +161,15 @@ pub struct ConcurrencyConfig {
     pub queue_timeout: f64,
 }
 
+/// A bounded policy namespace shared by one or more virtual keys.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Workspace {
+    /// Configured-model allowlist; empty means unrestricted.
+    pub models: Vec<String>,
+    /// Optional workspace-wide request/token limit.
+    pub rate_limit: Option<RateLimit>,
+}
+
 impl Default for ConcurrencyConfig {
     fn default() -> Self {
         Self {
@@ -178,6 +187,8 @@ pub struct VirtualKey {
     pub hash: String,
     /// Attribution labels.
     pub tags: Vec<String>,
+    /// Optional workspace policy inherited by this key.
+    pub workspace: Option<String>,
     /// Optional per-key spend cap.
     pub budget: Option<Budget>,
     /// Optional per-key request/token limit.
@@ -192,6 +203,7 @@ impl fmt::Debug for VirtualKey {
             .debug_struct("VirtualKey")
             .field("hash", &"<redacted sha256>")
             .field("tags", &self.tags)
+            .field("workspace", &self.workspace)
             .field("budget", &self.budget)
             .field("rate_limit", &self.rate_limit)
             .field("models", &self.models)
@@ -230,6 +242,8 @@ pub struct GatewayConfig {
     pub rate_limit: Option<RateLimit>,
     /// Process-local upstream delivery admission bounds.
     pub concurrency: ConcurrencyConfig,
+    /// Workspace policy namespaces keyed by operator-selected identifier.
+    pub workspaces: IndexMap<String, Workspace>,
     /// Virtual credentials keyed by operator-selected identifier.
     pub keys: IndexMap<String, VirtualKey>,
 }
@@ -251,6 +265,7 @@ impl Default for GatewayConfig {
             cache: None,
             rate_limit: None,
             concurrency: ConcurrencyConfig::default(),
+            workspaces: IndexMap::new(),
             keys: IndexMap::new(),
         }
     }
@@ -322,11 +337,13 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
     let cache = parse_cache(gateway.get("cache"), where_)?;
     let rate_limit = parse_rate_limit(gateway.get("rate_limit"), where_)?;
     let concurrency = parse_concurrency(gateway.get("concurrency"), where_)?;
+    let workspaces = parse_workspaces(gateway.get("workspaces"), where_)?;
     let keys = parse_keys(gateway.get("keys"), where_)?;
     let models = parse_models(gateway.get("models"), where_)?;
 
     validate_model_fallbacks(&models, where_)?;
-    validate_key_models(&keys, &models, where_)?;
+    validate_workspace_models(&workspaces, &models, where_)?;
+    validate_keys(&keys, &workspaces, &models, where_)?;
 
     Ok(GatewayConfig {
         models,
@@ -343,6 +360,7 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
         cache,
         rate_limit,
         concurrency,
+        workspaces,
         keys,
     })
 }
@@ -457,6 +475,24 @@ fn render_gateway_toml(gateway: &GatewayConfig) -> String {
         blocks.push(lines.join("\n"));
     }
 
+    for (workspace_id, workspace) in &gateway.workspaces {
+        let segment = quote_toml_key_segment(workspace_id);
+        let mut lines = vec![format!("[gateway.workspaces.{segment}]")];
+        if !workspace.models.is_empty() {
+            lines.push(format!(
+                "models = {}",
+                render_string_list(&workspace.models)
+            ));
+        }
+        blocks.push(lines.join("\n"));
+        if let Some(rate_limit) = &workspace.rate_limit {
+            blocks.push(render_rate_limit(
+                &format!("[gateway.workspaces.{segment}.rate_limit]"),
+                rate_limit,
+            ));
+        }
+    }
+
     for (key_id, key) in &gateway.keys {
         let key_segment = quote_toml_key_segment(key_id);
         let mut lines = vec![
@@ -465,6 +501,9 @@ fn render_gateway_toml(gateway: &GatewayConfig) -> String {
         ];
         if !key.tags.is_empty() {
             lines.push(format!("tags = {}", render_string_list(&key.tags)));
+        }
+        if let Some(workspace) = &key.workspace {
+            lines.push(format!("workspace = {}", quote_toml_string(workspace)));
         }
         if !key.models.is_empty() {
             lines.push(format!("models = {}", render_string_list(&key.models)));
@@ -734,6 +773,21 @@ fn parse_keys(
             &format!("gateway.keys.{key_id}.tags"),
             "a list of strings",
         )?;
+        let workspace = entry
+            .get("workspace")
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        invalid(
+                            where_,
+                            format!("'gateway.keys.{key_id}.workspace' must be a non-empty string"),
+                        )
+                    })
+            })
+            .transpose()?;
         let models = optional_non_empty_string_list(
             entry.get("models"),
             where_,
@@ -748,6 +802,7 @@ fn parse_keys(
             VirtualKey {
                 hash,
                 tags,
+                workspace,
                 budget,
                 rate_limit,
                 models,
@@ -755,6 +810,49 @@ fn parse_keys(
         );
     }
     Ok(keys)
+}
+
+fn parse_workspaces(
+    value: Option<&Value>,
+    where_: &str,
+) -> Result<IndexMap<String, Workspace>, ConfigError> {
+    let Some(value) = value else {
+        return Ok(IndexMap::new());
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| invalid(where_, "'[gateway.workspaces]' must be a table"))?;
+    let mut workspaces = IndexMap::new();
+    for (workspace_id, value) in table {
+        if !valid_policy_id(workspace_id) {
+            return Err(invalid(
+                where_,
+                "gateway workspace id must be 1-128 visible ASCII characters",
+            ));
+        }
+        let entry = value.as_table().ok_or_else(|| {
+            invalid(
+                where_,
+                format!("'[gateway.workspaces.{workspace_id}]' must be a table"),
+            )
+        })?;
+        let models = optional_non_empty_string_list(
+            entry.get("models"),
+            where_,
+            &format!("gateway.workspaces.{workspace_id}.models"),
+            "a list of model names",
+        )?;
+        let nested_where = format!("{where_} [gateway.workspaces.{workspace_id}]");
+        let rate_limit = parse_rate_limit(entry.get("rate_limit"), &nested_where)?;
+        workspaces.insert(workspace_id.clone(), Workspace { models, rate_limit });
+    }
+    Ok(workspaces)
+}
+
+fn valid_policy_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
 }
 
 fn parse_models(
@@ -975,17 +1073,60 @@ fn validate_model_fallbacks(
     Ok(())
 }
 
-fn validate_key_models(
+fn validate_workspace_models(
+    workspaces: &IndexMap<String, Workspace>,
+    models: &IndexMap<String, GatewayModel>,
+    where_: &str,
+) -> Result<(), ConfigError> {
+    for (workspace_id, workspace) in workspaces {
+        for model in &workspace.models {
+            if !models.contains_key(model) {
+                return Err(invalid(
+                    where_,
+                    format!(
+                        "'gateway.workspaces.{workspace_id}.models' names unknown model '{model}'"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_keys(
     keys: &IndexMap<String, VirtualKey>,
+    workspaces: &IndexMap<String, Workspace>,
     models: &IndexMap<String, GatewayModel>,
     where_: &str,
 ) -> Result<(), ConfigError> {
     for (key_id, key) in keys {
+        let workspace = match key.workspace.as_deref() {
+            Some(workspace_id) => Some(workspaces.get(workspace_id).ok_or_else(|| {
+                invalid(
+                    where_,
+                    format!(
+                        "'gateway.keys.{key_id}.workspace' names unknown workspace '{workspace_id}'"
+                    ),
+                )
+            })?),
+            None => None,
+        };
         for model in &key.models {
             if !models.contains_key(model) {
                 return Err(invalid(
                     where_,
                     format!("'gateway.keys.{key_id}.models' names unknown model '{model}'"),
+                ));
+            }
+            if let Some(workspace) = workspace
+                && !workspace.models.is_empty()
+                && !workspace.models.contains(model)
+            {
+                return Err(invalid(
+                    where_,
+                    format!(
+                        "'gateway.keys.{key_id}.models' cannot broaden its workspace model policy with '{model}'"
+                    ),
                 ));
             }
         }
@@ -1486,6 +1627,7 @@ cost_per_1k = 0.0"#;
             VirtualKey {
                 hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                 tags: vec!["quoted \"tag\"".to_owned(), "line\nbreak".to_owned()],
+                workspace: None,
                 budget: None,
                 rate_limit: None,
                 models: vec!["local.prod".to_owned()],
@@ -1498,6 +1640,68 @@ cost_per_1k = 0.0"#;
         assert!(dumped.contains("model = 'model-\"quoted\"'"));
         assert!(dumped.contains("api_key_cmd = \"\"\""));
         assert_eq!(gateway_config_from_toml(&dumped, "round-trip")?, config);
+        Ok(())
+    }
+
+    #[test]
+    fn workspaces_round_trip_and_keys_may_only_narrow_their_model_policy() -> Result<(), ConfigError>
+    {
+        let hash = "a".repeat(64);
+        let text = format!(
+            r#"
+[gateway.models.fast]
+base_url = "https://fast.example/v1"
+model = "fast-upstream"
+
+[gateway.models.deep]
+base_url = "https://deep.example/v1"
+model = "deep-upstream"
+
+[gateway.workspaces.production]
+models = ["fast", "deep"]
+
+[gateway.workspaces.production.rate_limit]
+rpm = 120
+tpm = 200000
+
+[gateway.keys.mobile]
+hash = "{hash}"
+workspace = "production"
+models = ["fast"]
+"#
+        );
+        let config = parse(&text)?;
+        assert_eq!(
+            config.keys["mobile"].workspace.as_deref(),
+            Some("production")
+        );
+        assert_eq!(config.workspaces["production"].models, ["fast", "deep"]);
+        let dumped = dump_gateway_toml(&config)?;
+        assert!(dumped.contains("[gateway.workspaces.production]"));
+        assert!(dumped.contains("workspace = \"production\""));
+        assert_eq!(parse(&dumped)?, config);
+
+        let broadened = text.replace("models = [\"fast\"]", "models = [\"missing\"]");
+        let error = parse(&broadened)
+            .err()
+            .ok_or_else(|| invalid("test", "unknown key model was accepted"))?;
+        assert!(error.to_string().contains("unknown model 'missing'"));
+
+        let outside = format!(
+            "{}\n[gateway.models.outside]\nbase_url = \"https://outside.example/v1\"\nmodel = \"outside-upstream\"\n",
+            text.replace("models = [\"fast\"]", "models = [\"outside\"]")
+        );
+        let error = parse(&outside)
+            .err()
+            .ok_or_else(|| invalid("test", "broadened workspace model was accepted"))?;
+        assert!(error.to_string().contains("cannot broaden"));
+
+        let unknown_workspace =
+            text.replace("workspace = \"production\"", "workspace = \"missing\"");
+        let error = parse(&unknown_workspace)
+            .err()
+            .ok_or_else(|| invalid("test", "unknown workspace was accepted"))?;
+        assert!(error.to_string().contains("unknown workspace 'missing'"));
         Ok(())
     }
 

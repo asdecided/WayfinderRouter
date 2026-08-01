@@ -162,6 +162,7 @@ mod tests {
             VirtualKey {
                 hash: "0".repeat(64),
                 tags: Vec::new(),
+                workspace: None,
                 budget: Some(budget(1.0, "block")),
                 rate_limit: None,
                 models: Vec::new(),
@@ -191,6 +192,7 @@ mod tests {
             VirtualKey {
                 hash: "0".repeat(64),
                 tags: Vec::new(),
+                workspace: None,
                 budget: Some(budget(0.5, "block")),
                 rate_limit: None,
                 models: Vec::new(),

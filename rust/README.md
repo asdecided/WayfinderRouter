@@ -67,4 +67,5 @@ separate pull requests under WF-ROADMAP-0016.
 - `roadmaps/WF-ROADMAP-0016-native-mobile-v0.2.md`
 - `decisions/WF-ADR-0050-managed-gateway-surfaces.md`
 - `decisions/WF-ADR-0051-bounded-delivery-concurrency.md`
+- `decisions/WF-ADR-0052-workspace-scoped-model-routing.md`
 - `docs/apple-platform-capability-matrix.md`
