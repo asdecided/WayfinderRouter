@@ -826,34 +826,43 @@ async fn preload_xpc_credentials<W: Write>(
         return;
     }
     for (name, model) in &gateway.models {
-        let Some(reference) = model.api_key_env.as_deref() else {
-            continue;
-        };
-        let owned_reference = reference.to_owned();
-        match tokio::task::spawn_blocking(move || {
-            wayfinder_macos_xpc::resolve_xpc_credential(&owned_reference)
-        })
-        .await
-        {
-            Ok(Ok(secret)) => {
-                credentials
-                    .broker_values
-                    .insert(reference.to_owned(), secret);
+        let mut references = Vec::with_capacity(1 + model.deployments.len());
+        if let Some(reference) = model.api_key_env.as_deref() {
+            references.push(reference);
+        }
+        references.extend(
+            model
+                .deployments
+                .iter()
+                .filter_map(|deployment| deployment.api_key_env.as_deref()),
+        );
+        for reference in references {
+            let owned_reference = reference.to_owned();
+            match tokio::task::spawn_blocking(move || {
+                wayfinder_macos_xpc::resolve_xpc_credential(&owned_reference)
+            })
+            .await
+            {
+                Ok(Ok(secret)) => {
+                    credentials
+                        .broker_values
+                        .insert(reference.to_owned(), secret);
+                }
+                Ok(Err(error)) => write_error(
+                    stderr,
+                    &format!(
+                        "wayfinder-router: warning: model '{}' broker credential unavailable: {error}",
+                        diagnostic_label(name)
+                    ),
+                ),
+                Err(_) => write_error(
+                    stderr,
+                    &format!(
+                        "wayfinder-router: warning: model '{}' broker credential task failed",
+                        diagnostic_label(name)
+                    ),
+                ),
             }
-            Ok(Err(error)) => write_error(
-                stderr,
-                &format!(
-                    "wayfinder-router: warning: model '{}' broker credential unavailable: {error}",
-                    diagnostic_label(name)
-                ),
-            ),
-            Err(_) => write_error(
-                stderr,
-                &format!(
-                    "wayfinder-router: warning: model '{}' broker credential task failed",
-                    diagnostic_label(name)
-                ),
-            ),
         }
     }
 }
