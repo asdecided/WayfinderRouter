@@ -305,6 +305,11 @@ capability, readiness, context, and privacy-boundary filters now run before
 delivery retries and fallback, with explicit pins failing closed and the
 effective privacy posture echoed in response metadata.
 
+WF-ADR-0057 adds the first enterprise trust-surface slice: an optional OIDC
+operator boundary with explicit issuer, audience, JWKS, and admin-claim
+configuration. Virtual keys remain the data-plane credential; audit records,
+OpenTelemetry, and Helm packaging remain separate follow-on slices.
+
 **Acceptance:**
 
 - Two gateway replicas against one Redis enforce a **single** shared RPM limit and budget: N

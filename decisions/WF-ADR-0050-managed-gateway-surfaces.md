@@ -74,7 +74,7 @@ the plaintext.
   this decision does not treat virtual data-plane keys as administrator
   identity.
 - TLS remains terminated by a trusted ingress or service mesh. This change does
-  not add in-process TLS, Redis, OIDC, an audit log, or multi-tenant identity.
+  not add in-process TLS, Redis, an audit log, or multi-tenant identity.
 
 ## Rejected alternatives
 
@@ -90,8 +90,8 @@ the plaintext.
 
 ## Follow-on sequence
 
-1. Add a separately bound operator surface with OIDC authorization and an
-   append-only audit contract.
+1. Add OIDC authorization to the operator surface and define the append-only
+   audit contract (WF-ADR-0057).
 2. Add bounded process-local concurrency/backpressure controls and a
    real-listener concurrency contract (WF-ADR-0051).
 3. Introduce a shared state backend and prove two-replica rate-limit, budget,
@@ -115,3 +115,4 @@ the plaintext.
 - WF-ROADMAP-0011 — identity and governance plane
 - WF-ADR-0055 — named routing presets
 - WF-ADR-0056 — hard destination eligibility
+- WF-ADR-0057 — OIDC authentication for the managed operator surface
