@@ -92,9 +92,10 @@ the plaintext.
 
 1. Add a separately bound operator surface with OIDC authorization and an
    append-only audit contract.
-2. Introduce a shared state backend and prove two-replica rate-limit, budget,
-   and accounting consistency.
-3. Add bounded concurrency/backpressure controls and fleet load tests.
+2. Add bounded process-local concurrency/backpressure controls and a
+   real-listener concurrency contract (WF-ADR-0051).
+3. Introduce a shared state backend and prove two-replica rate-limit, budget,
+   accounting, and admission consistency.
 4. Package the two-plane topology through a Helm chart with ingress TLS,
    NetworkPolicy, PodDisruptionBudget, and probe defaults.
 
@@ -103,5 +104,6 @@ the plaintext.
 - WF-ADR-0035 — hashed virtual keys and per-key attribution
 - WF-ADR-0045 — Rust gateway/helper architecture and loopback default
 - WF-ADR-0046 — Rust-only runtime
+- WF-ADR-0051 — bounded delivery concurrency
 - WF-ROADMAP-0010 — shared state, OIDC, audit, telemetry, and Helm
 - WF-ROADMAP-0011 — identity and governance plane

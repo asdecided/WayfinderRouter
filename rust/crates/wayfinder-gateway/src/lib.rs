@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod access;
+pub mod admission;
 pub mod auth;
 pub mod budget;
 pub mod cache;
@@ -26,7 +27,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::convert::Infallible;
 use std::fmt;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, to_bytes};
 use axum::extract::rejection::BytesRejection;
@@ -65,6 +66,7 @@ use wayfinder_service::pricing::{
 };
 
 use crate::access::{AccessGrant, AccessPolicy, AccessPolicyError};
+use crate::admission::{AdmissionError, AdmissionPermit, AdmissionPolicy};
 use crate::budget::{BudgetDecision, BudgetPolicy, format_limit};
 use crate::cache::{
     CacheError, CacheSettings, CachedResponse, ResponseCache, cache_key, is_cacheable, is_storable,
@@ -114,6 +116,7 @@ const RATE_LIMIT_LIMIT_HEADER: &str = "x-ratelimit-limit";
 const RATE_LIMIT_REMAINING_HEADER: &str = "x-ratelimit-remaining";
 const RATE_LIMIT_RESET_HEADER: &str = "x-ratelimit-reset";
 const ROUTER_CACHE_HEADER: &str = "x-wayfinder-router-cache";
+const ROUTER_OVERLOAD_HEADER: &str = "x-wayfinder-router-overload";
 const DEBUG_HEADER: &str = "x-wayfinder-debug";
 
 type MonotonicClock = Arc<dyn Fn() -> f64 + Send + Sync>;
@@ -320,6 +323,7 @@ pub struct AppState {
     slash_directives: bool,
     build_version: Arc<str>,
     request_body_limit: usize,
+    admission_policy: Arc<AdmissionPolicy>,
     recent: Arc<RecentRoutes>,
     metrics: Arc<GatewayMetrics>,
     delivery: Option<Arc<dyn BufferedDelivery>>,
@@ -375,6 +379,7 @@ impl AppState {
             slash_directives: false,
             build_version,
             request_body_limit: DEFAULT_REQUEST_BODY_LIMIT,
+            admission_policy: Arc::new(AdmissionPolicy::default()),
             recent: Arc::new(RecentRoutes::default()),
             metrics,
             delivery: None,
@@ -425,6 +430,32 @@ impl AppState {
     #[must_use]
     pub const fn with_request_body_limit(mut self, request_body_limit: usize) -> Self {
         self.request_body_limit = request_body_limit;
+        self
+    }
+
+    /// Attach process-local upstream delivery admission bounds.
+    pub fn with_gateway_admission(
+        mut self,
+        config: &wayfinder_config::gateway::GatewayConfig,
+    ) -> Result<Self, AdmissionError> {
+        let max_in_flight = usize::try_from(config.concurrency.max_in_flight)
+            .map_err(|_| AdmissionError::InvalidInFlightLimit)?;
+        let max_queued = usize::try_from(config.concurrency.max_queued)
+            .map_err(|_| AdmissionError::InvalidQueueLimit)?;
+        let queue_timeout = Duration::try_from_secs_f64(config.concurrency.queue_timeout)
+            .map_err(|_| AdmissionError::InvalidQueueTimeout)?;
+        self.admission_policy = Arc::new(AdmissionPolicy::new(
+            max_in_flight,
+            max_queued,
+            queue_timeout,
+        )?);
+        Ok(self)
+    }
+
+    /// Attach caller-owned admission state for deterministic tests.
+    #[must_use]
+    pub fn with_admission_policy(mut self, policy: AdmissionPolicy) -> Self {
+        self.admission_policy = Arc::new(policy);
         self
     }
 
@@ -662,6 +693,12 @@ impl AppState {
         self.request_body_limit
     }
 
+    /// Process-local upstream delivery admission policy.
+    #[must_use]
+    pub fn admission_policy(&self) -> &AdmissionPolicy {
+        &self.admission_policy
+    }
+
     /// Prompt-free recent decision metadata retained by this process.
     #[must_use]
     pub fn recent(&self) -> &RecentRoutes {
@@ -757,6 +794,7 @@ impl fmt::Debug for AppState {
             .field("slash_directives", &self.slash_directives)
             .field("build_version", &self.build_version)
             .field("request_body_limit", &self.request_body_limit)
+            .field("admission_policy", &self.admission_policy)
             .field("delivery_configured", &self.delivery.is_some())
             .field(
                 "streaming_delivery_configured",
@@ -1829,6 +1867,11 @@ async fn chat_completions(
         );
     }
 
+    let admission_permit = match acquire_delivery(&state).await {
+        Ok(permit) => permit,
+        Err(error) => return admission_error_response(&state, error, routing_headers),
+    };
+
     if request_body.get("stream").and_then(Value::as_bool) == Some(true) {
         let initial_event = debug.then(|| {
             let envelope = DecisionEnvelope {
@@ -1860,9 +1903,12 @@ async fn chat_completions(
             messages,
             access_grant,
             initial_event,
+            admission_permit,
         })
         .await;
     }
+
+    let _admission_permit = admission_permit;
 
     let Some(delivery) = state.delivery() else {
         return error_response(
@@ -2010,6 +2056,27 @@ fn inject_debug_decision(body: Bytes, decision: DecisionResponse) -> Bytes {
     serde_json::to_vec(&value).map_or(body, Bytes::from)
 }
 
+struct ObservedAdmissionPermit {
+    _permit: AdmissionPermit,
+    metrics: Arc<GatewayMetrics>,
+}
+
+impl Drop for ObservedAdmissionPermit {
+    fn drop(&mut self) {
+        let _ = self.metrics.observe_admission_release();
+    }
+}
+
+async fn acquire_delivery(state: &AppState) -> Result<ObservedAdmissionPermit, AdmissionError> {
+    let permit = state.admission_policy().acquire().await?;
+    let metrics = Arc::clone(&state.metrics);
+    let _ = metrics.observe_admission(permit.waited().as_secs_f64());
+    Ok(ObservedAdmissionPermit {
+        _permit: permit,
+        metrics,
+    })
+}
+
 struct StreamRelayContext {
     state: AppState,
     target_name: String,
@@ -2020,6 +2087,7 @@ struct StreamRelayContext {
     completion_chars: u64,
     started: Option<Instant>,
     initial_event: Option<Bytes>,
+    _admission_permit: ObservedAdmissionPermit,
 }
 
 struct StreamingChatInput {
@@ -2033,6 +2101,7 @@ struct StreamingChatInput {
     messages: Value,
     access_grant: Option<AccessGrant>,
     initial_event: Option<Bytes>,
+    admission_permit: ObservedAdmissionPermit,
 }
 
 async fn streaming_chat_response(input: StreamingChatInput) -> Response {
@@ -2047,6 +2116,7 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
         messages,
         access_grant,
         initial_event,
+        admission_permit,
     } = input;
     if state.streaming_delivery().is_none() {
         return error_response(
@@ -2144,6 +2214,7 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
         completion_chars: 0,
         started: Some(started),
         initial_event,
+        _admission_permit: admission_permit,
     };
     let body_stream = stream::unfold(
         Some((context, response.into_stream())),
@@ -2815,6 +2886,42 @@ fn rate_limited_response(state: &AppState, result: RateResult, request_id: &str)
     )
 }
 
+fn admission_error_response(
+    state: &AppState,
+    error: AdmissionError,
+    mut headers: HeaderMap,
+) -> Response {
+    let (reason, retry_after) = match error {
+        AdmissionError::QueueFull => ("queue-full", 1_u64),
+        AdmissionError::QueueTimedOut => (
+            "queue-timeout",
+            state.admission_policy().queue_timeout().as_secs().max(1),
+        ),
+        AdmissionError::InvalidInFlightLimit
+        | AdmissionError::InvalidQueueLimit
+        | AdmissionError::InvalidQueueTimeout
+        | AdmissionError::Unavailable => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "wayfinder_router_state_error",
+                error.to_string(),
+                headers,
+            );
+        }
+    };
+    let _ = state.metrics().observe_admission_rejected(reason);
+    headers.insert(ROUTER_OVERLOAD_HEADER, HeaderValue::from_static(reason));
+    if let Ok(value) = HeaderValue::from_str(&retry_after.to_string()) {
+        headers.insert(header::RETRY_AFTER, value);
+    }
+    error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "wayfinder_router_overloaded",
+        error.to_string(),
+        headers,
+    )
+}
+
 fn insert_rate_snapshot_headers(
     headers: &mut HeaderMap,
     snapshot: RateSnapshot,
@@ -3283,12 +3390,14 @@ mod tests {
     use std::error::Error;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
     use axum::response::Response;
     use bytes::Bytes;
     use serde_json::{Value, json};
+    use tokio::sync::{Barrier, Semaphore, oneshot};
     use tower::ServiceExt;
     use wayfinder_config::gateway::{
         Budget as GatewayBudget, GatewayConfig, ProviderKind, ProviderTier, RateLimit, VirtualKey,
@@ -3297,9 +3406,9 @@ mod tests {
     use wayfinder_service::pricing::{SavingsLedger, UtcDate, turn_cost};
 
     use super::{
-        AppState, ConfiguredModel, DataPlaneError, RouteOn, build_data_plane_router,
-        build_reloadable_router, build_router, model_is_proven_local, utc_date_from_unix_days,
-        utc_today, validate_data_plane_state,
+        AppState, ConfiguredModel, DataPlaneError, ROUTER_OVERLOAD_HEADER, RouteOn,
+        build_data_plane_router, build_reloadable_router, build_router, model_is_proven_local,
+        utc_date_from_unix_days, utc_today, validate_data_plane_state,
     };
     use crate::delivery::{
         BufferedDelivery, BufferedDeliveryResponse, DeliveryError, DeliveryFuture,
@@ -3307,8 +3416,10 @@ mod tests {
     };
     use crate::{
         access::AccessPolicy,
+        admission::AdmissionPolicy,
         auth,
         cache::{CacheSettings, CachedResponse, cache_key},
+        server::serve_with_shutdown,
     };
 
     type TestResult = Result<(), Box<dyn Error>>;
@@ -3363,6 +3474,55 @@ mod tests {
 
     struct CountingUsageDelivery {
         calls: Arc<AtomicUsize>,
+    }
+
+    struct ConcurrentDelivery {
+        barrier: Arc<Barrier>,
+        current: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+
+    impl BufferedDelivery for ConcurrentDelivery {
+        fn send<'a>(&'a self, _model: &'a ConfiguredModel, _body: Value) -> DeliveryFuture<'a> {
+            Box::pin(async move {
+                let current = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(current, Ordering::SeqCst);
+                self.barrier.wait().await;
+                self.current.fetch_sub(1, Ordering::SeqCst);
+                Ok(BufferedDeliveryResponse::new(
+                    StatusCode::OK,
+                    "application/json",
+                    Bytes::from_static(EXACT_USAGE_BODY),
+                ))
+            })
+        }
+    }
+
+    struct GatedDelivery {
+        entered: Arc<AtomicUsize>,
+        release: Arc<Semaphore>,
+    }
+
+    impl BufferedDelivery for GatedDelivery {
+        fn send<'a>(&'a self, _model: &'a ConfiguredModel, _body: Value) -> DeliveryFuture<'a> {
+            Box::pin(async move {
+                self.entered.fetch_add(1, Ordering::SeqCst);
+                self.release
+                    .acquire()
+                    .await
+                    .map_err(|_| {
+                        DeliveryError::Provider(
+                            wayfinder_providers::openai_compat::ProviderError::Transport,
+                        )
+                    })?
+                    .forget();
+                Ok(BufferedDeliveryResponse::new(
+                    StatusCode::OK,
+                    "application/json",
+                    Bytes::from_static(EXACT_USAGE_BODY),
+                ))
+            })
+        }
     }
 
     impl BufferedDelivery for CountingUsageDelivery {
@@ -3907,6 +4067,196 @@ mod tests {
         let response = app.oneshot(request).await?;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(json_body(response).await?, json!({"status": "not_ready"}));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn twenty_concurrent_users_reach_delivery_without_router_serialization() -> TestResult {
+        const USERS: usize = 20;
+        let barrier = Arc::new(Barrier::new(USERS + 1));
+        let current = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let delivery = Arc::new(ConcurrentDelivery {
+            barrier: Arc::clone(&barrier),
+            current: Arc::clone(&current),
+            peak: Arc::clone(&peak),
+        });
+        let mut config = GatewayConfig::default();
+        config.keys.insert(
+            "team-a".to_owned(),
+            VirtualKey {
+                hash: auth::hash_key("wf-throughput-test"),
+                tags: vec!["load-test".to_owned()],
+                budget: None,
+                rate_limit: None,
+                models: vec!["local".to_owned()],
+            },
+        );
+        let state = AppState::new(
+            RoutingConfig::binary(0.5),
+            vec![ConfiguredModel::new(
+                "local",
+                "http://127.0.0.1:11434/v1",
+                "provider-local",
+                None,
+                true,
+            )],
+            false,
+            "test",
+        )
+        .with_gateway_access(&config)?
+        .with_delivery(delivery);
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let server = tokio::spawn(serve_with_shutdown(
+            listener,
+            build_data_plane_router(state.clone())?,
+            async move {
+                let _: Result<(), oneshot::error::RecvError> = shutdown_receiver.await;
+            },
+            Duration::from_secs(2),
+        ));
+        let client = reqwest::Client::new();
+        let url = format!("http://{address}/v1/chat/completions");
+        let mut tasks = Vec::with_capacity(USERS);
+        for user in 0..USERS {
+            let client = client.clone();
+            let url = url.clone();
+            tasks.push(tokio::spawn(async move {
+                client
+                    .post(url)
+                    .bearer_auth("wf-throughput-test")
+                    .json(&json!({
+                        "model": "local",
+                        "messages": [{"role": "user", "content": format!("user {user}")}]
+                    }))
+                    .send()
+                    .await
+            }));
+        }
+        tokio::time::timeout(Duration::from_secs(5), barrier.wait()).await?;
+        for task in tasks {
+            assert_eq!(task.await??.status(), StatusCode::OK);
+        }
+        let _: Result<(), ()> = shutdown_sender.send(());
+        server.await??;
+        assert_eq!(peak.load(Ordering::SeqCst), USERS);
+        assert_eq!(current.load(Ordering::SeqCst), 0);
+        let metrics = state.metrics().render()?;
+        assert!(metrics.contains("wayfinder_router_peak_in_flight_deliveries 20"));
+        assert!(metrics.contains("wayfinder_router_in_flight_deliveries 0"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn full_delivery_capacity_returns_bounded_overload_response() -> TestResult {
+        let entered = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let state = AppState::new(
+            RoutingConfig::binary(0.5),
+            vec![ConfiguredModel::new(
+                "local",
+                "http://127.0.0.1:11434/v1",
+                "provider-local",
+                None,
+                true,
+            )],
+            false,
+            "test",
+        )
+        .with_admission_policy(AdmissionPolicy::new(1, 0, Duration::from_secs(1))?)
+        .with_delivery(Arc::new(GatedDelivery {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        }));
+        let app = build_router(state.clone());
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"local","messages":[{"role":"user","content":"hello"}]}"#,
+                ))
+        };
+        let first_app = app.clone();
+        let first_request = request()?;
+        let first = tokio::spawn(async move { first_app.oneshot(first_request).await });
+        while entered.load(Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+
+        let overloaded = app.oneshot(request()?).await?;
+        assert_eq!(overloaded.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            overloaded
+                .headers()
+                .get(ROUTER_OVERLOAD_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("queue-full")
+        );
+        assert_eq!(
+            json_body(overloaded).await?["error"]["type"],
+            "wayfinder_router_overloaded"
+        );
+        assert!(
+            state
+                .metrics()
+                .render()?
+                .contains("wayfinder_router_admission_rejected_total{reason=\"queue-full\"} 1")
+        );
+
+        release.add_permits(1);
+        assert_eq!(first.await??.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streaming_delivery_holds_capacity_until_response_body_is_dropped() -> TestResult {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let outcomes = Arc::new(Mutex::new(BTreeMap::from([(
+            "local".to_owned(),
+            VecDeque::from([ScriptedStreamOutcome::Cancellable(Arc::clone(&dropped))]),
+        )])));
+        let state = AppState::new(
+            RoutingConfig::binary(0.5),
+            vec![ConfiguredModel::new(
+                "local",
+                "http://127.0.0.1:11434/v1",
+                "provider-local",
+                None,
+                true,
+            )],
+            false,
+            "test",
+        )
+        .with_admission_policy(AdmissionPolicy::new(1, 0, Duration::from_secs(1))?)
+        .with_streaming_delivery(Arc::new(ScriptedStreamingDelivery {
+            outcomes,
+            seen: Arc::new(Mutex::new(Vec::new())),
+        }));
+        let app = build_router(state.clone());
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"local","stream":true,"messages":[{"role":"user","content":"hello"}]}"#,
+                ))
+        };
+
+        let first = app.clone().oneshot(request()?).await?;
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(state.admission_policy().in_flight(), 1);
+        let overloaded = app.oneshot(request()?).await?;
+        assert_eq!(overloaded.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        drop(first);
+        tokio::task::yield_now().await;
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(state.admission_policy().in_flight(), 0);
         Ok(())
     }
 

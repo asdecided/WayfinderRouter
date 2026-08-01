@@ -32,5 +32,8 @@ wayfinder-routing-core = { path = "../wayfinder-routing-core" }
 wayfinder-providers = { path = "../wayfinder-providers" }
 wayfinder-service = { path = "../wayfinder-service" }
 
+[dev-dependencies]
+reqwest.workspace = true
+
 [lints]
 workspace = true

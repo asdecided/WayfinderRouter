@@ -32,6 +32,13 @@ budgets, cache, retry/failover/breakers, prompt-free metrics, last-good hot
 reload, and bounded graceful shutdown. Track B therefore starts from these
 implemented primitives rather than rebuilding them.
 
+WF-ADR-0051 adds the next process-level capacity boundary: 32 simultaneous
+deliveries, 64 bounded waiters, a two-second queue deadline by default, explicit
+`503` overload responses, and a real-listener test proving twenty concurrent
+requests reach delivery without router serialization. These are single-process
+limits; shared admission and accounting remain prerequisites for a truthful
+multi-replica claim.
+
 ## Context
 
 Every conversation about adopting a router — any router — ends on the same question: **"will

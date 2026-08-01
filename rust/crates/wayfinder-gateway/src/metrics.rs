@@ -16,6 +16,7 @@ const DECISION_BUCKETS: [f64; 9] = [
     0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05,
 ];
 const UPSTREAM_BUCKETS: [f64; 10] = [0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0];
+const QUEUE_WAIT_BUCKETS: [f64; 8] = [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0];
 
 /// Metrics synchronization or invalid-observation failure.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -74,6 +75,10 @@ struct MetricsState {
     cache_avoided_cost: f64,
     rate_limited: BTreeMap<String, u64>,
     key_requests: BTreeMap<String, u64>,
+    admission_in_flight: u64,
+    admission_peak_in_flight: u64,
+    admission_queue_wait: Histogram<8>,
+    admission_rejected: BTreeMap<String, u64>,
 }
 
 impl Default for MetricsState {
@@ -92,6 +97,10 @@ impl Default for MetricsState {
             cache_avoided_cost: 0.0,
             rate_limited: BTreeMap::new(),
             key_requests: BTreeMap::new(),
+            admission_in_flight: 0,
+            admission_peak_in_flight: 0,
+            admission_queue_wait: Histogram::new(QUEUE_WAIT_BUCKETS),
+            admission_rejected: BTreeMap::new(),
         }
     }
 }
@@ -205,6 +214,32 @@ impl GatewayMetrics {
         let mut state = self.state.lock().map_err(|_| MetricsError::LockPoisoned)?;
         let key = bounded_map_key(&state.key_requests, key_id, self.max_label_series);
         saturating_increment(state.key_requests.entry(key).or_default());
+        Ok(())
+    }
+
+    /// Record one admitted upstream delivery and its bounded queue wait.
+    pub fn observe_admission(&self, waited_seconds: f64) -> Result<(), MetricsError> {
+        validate_observation(waited_seconds)?;
+        let mut state = self.state.lock().map_err(|_| MetricsError::LockPoisoned)?;
+        state.admission_in_flight = state.admission_in_flight.saturating_add(1);
+        state.admission_peak_in_flight = state
+            .admission_peak_in_flight
+            .max(state.admission_in_flight);
+        state.admission_queue_wait.observe(waited_seconds)
+    }
+
+    /// Record release of one admitted upstream delivery.
+    pub fn observe_admission_release(&self) -> Result<(), MetricsError> {
+        let mut state = self.state.lock().map_err(|_| MetricsError::LockPoisoned)?;
+        state.admission_in_flight = state.admission_in_flight.saturating_sub(1);
+        Ok(())
+    }
+
+    /// Record one request rejected by the bounded admission queue.
+    pub fn observe_admission_rejected(&self, reason: &str) -> Result<(), MetricsError> {
+        let mut state = self.state.lock().map_err(|_| MetricsError::LockPoisoned)?;
+        let key = bounded_map_key(&state.admission_rejected, reason, self.max_label_series);
+        saturating_increment(state.admission_rejected.entry(key).or_default());
         Ok(())
     }
 
@@ -431,6 +466,40 @@ fn render_state(version: &str, state: &MetricsState) -> String {
         }
     }
 
+    output.push_str(
+        "# HELP wayfinder_router_in_flight_deliveries Current admitted upstream deliveries.\n",
+    );
+    output.push_str("# TYPE wayfinder_router_in_flight_deliveries gauge\n");
+    let _ = writeln!(
+        output,
+        "wayfinder_router_in_flight_deliveries {}",
+        state.admission_in_flight
+    );
+    output.push_str("# HELP wayfinder_router_peak_in_flight_deliveries Highest simultaneous admitted deliveries since process start.\n");
+    output.push_str("# TYPE wayfinder_router_peak_in_flight_deliveries gauge\n");
+    let _ = writeln!(
+        output,
+        "wayfinder_router_peak_in_flight_deliveries {}",
+        state.admission_peak_in_flight
+    );
+    output.push_str("# HELP wayfinder_router_admission_queue_wait_seconds Time admitted deliveries waited for capacity.\n");
+    output.push_str("# TYPE wayfinder_router_admission_queue_wait_seconds histogram\n");
+    render_histogram(
+        &mut output,
+        "wayfinder_router_admission_queue_wait_seconds",
+        &state.admission_queue_wait,
+        "",
+    );
+    output.push_str("# HELP wayfinder_router_admission_rejected_total Requests rejected by bounded delivery admission.\n");
+    output.push_str("# TYPE wayfinder_router_admission_rejected_total counter\n");
+    for (reason, count) in &state.admission_rejected {
+        let _ = writeln!(
+            output,
+            "wayfinder_router_admission_rejected_total{{reason=\"{}\"}} {count}",
+            label_escape(reason)
+        );
+    }
+
     output.push_str("# HELP wayfinder_router_config_reload_failures_total Config reloads that failed and kept the last-good config.\n");
     output.push_str("# TYPE wayfinder_router_config_reload_failures_total counter\n");
     let _ = writeln!(
@@ -524,6 +593,9 @@ mod tests {
         metrics.observe_cache_miss()?;
         metrics.observe_rate_limited("rpm")?;
         metrics.observe_key_request("team-a")?;
+        metrics.observe_admission(0.05)?;
+        metrics.observe_admission_rejected("queue-full")?;
+        metrics.observe_admission_release()?;
         metrics.record_reload_failure()?;
         metrics.observe_cost(0.01, 0.02)?;
         metrics.set_model_costs(&BTreeMap::from([
@@ -542,6 +614,12 @@ mod tests {
         assert!(text.contains("wayfinder_router_cache_avoided_cost_total 0.01"));
         assert!(text.contains("wayfinder_router_model_cost_per_1k{model=\"cloud\"} 10"));
         assert!(text.contains("wayfinder_router_savings_cost_total 0.01"));
+        assert!(text.contains("wayfinder_router_peak_in_flight_deliveries 1"));
+        assert!(text.contains("wayfinder_router_in_flight_deliveries 0"));
+        assert!(text.contains("wayfinder_router_admission_queue_wait_seconds_count 1"));
+        assert!(
+            text.contains("wayfinder_router_admission_rejected_total{reason=\"queue-full\"} 1")
+        );
         Ok(())
     }
 
