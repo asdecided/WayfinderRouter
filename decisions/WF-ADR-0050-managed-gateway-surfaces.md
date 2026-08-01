@@ -100,7 +100,9 @@ the plaintext.
    admission remain follow-ons.
 4. Keep stable model aliases over bounded weighted deployment pools; the
    process-local selection and per-deployment health contract is WF-ADR-0054.
-5. Package the two-plane topology through a Helm chart with ingress TLS,
+5. Keep application-owned delivery policy behind bounded named routes; the
+   `@route/<name>` contract is WF-ADR-0055.
+6. Package the two-plane topology through a Helm chart with ingress TLS,
    NetworkPolicy, PodDisruptionBudget, and probe defaults.
 
 ## Related
@@ -111,3 +113,4 @@ the plaintext.
 - WF-ADR-0051 — bounded delivery concurrency
 - WF-ROADMAP-0010 — shared state, OIDC, audit, telemetry, and Helm
 - WF-ROADMAP-0011 — identity and governance plane
+- WF-ADR-0055 — named routing presets

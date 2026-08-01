@@ -294,6 +294,12 @@ deployments under WF-ADR-0054. Rotation and deployment-health state remain
 process-local by design; Redis coordinates policy windows, not a hidden global
 round-robin cursor.
 
+WF-ADR-0055 adds bounded named routing presets for application-owned delivery
+policy. `model = "@route/<name>"` selects an operator-defined ordered alias
+list, exposes a secret-free `/router/routes` inventory, and fails closed on an
+unknown route. Presets do not alter the deterministic score or expand the
+credential boundary.
+
 **Acceptance:**
 
 - Two gateway replicas against one Redis enforce a **single** shared RPM limit and budget: N

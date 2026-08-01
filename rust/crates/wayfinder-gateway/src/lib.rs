@@ -46,7 +46,7 @@ use thiserror::Error;
 use tower::ServiceExt;
 use uuid::Uuid;
 use wayfinder_config::dump_routing_toml;
-use wayfinder_config::gateway::{GatewayModel, ProviderKind, ProviderTier};
+use wayfinder_config::gateway::{GatewayModel, ProviderKind, ProviderTier, RoutePreset};
 use wayfinder_providers::anthropic::{
     MessagesStreamTranslator, anthropic_error, anthropic_to_openai_request,
     openai_to_anthropic_response,
@@ -119,7 +119,9 @@ const RATE_LIMIT_REMAINING_HEADER: &str = "x-ratelimit-remaining";
 const RATE_LIMIT_RESET_HEADER: &str = "x-ratelimit-reset";
 const ROUTER_CACHE_HEADER: &str = "x-wayfinder-router-cache";
 const ROUTER_OVERLOAD_HEADER: &str = "x-wayfinder-router-overload";
+const ROUTER_ROUTE_HEADER: &str = "x-wayfinder-router-route";
 const DEBUG_HEADER: &str = "x-wayfinder-debug";
+const ROUTE_PRESET_PREFIX: &str = "@route/";
 
 type MonotonicClock = Arc<dyn Fn() -> f64 + Send + Sync>;
 
@@ -401,6 +403,7 @@ fn configured_price_table(
 pub struct AppState {
     routing: Arc<RoutingConfig>,
     models: Arc<[ConfiguredModel]>,
+    route_presets: Arc<IndexMap<String, RoutePreset>>,
     deployment_cursors: Arc<Mutex<BTreeMap<String, u64>>>,
     offline: bool,
     dry_run: bool,
@@ -458,6 +461,7 @@ impl AppState {
         Self {
             routing: Arc::new(routing),
             models: Arc::from(models),
+            route_presets: Arc::new(IndexMap::new()),
             deployment_cursors: Arc::new(Mutex::new(BTreeMap::new())),
             offline,
             dry_run: false,
@@ -511,6 +515,13 @@ impl AppState {
     #[must_use]
     pub const fn with_slash_directives(mut self, enabled: bool) -> Self {
         self.slash_directives = enabled;
+        self
+    }
+
+    /// Attach validated named routing presets without exposing credentials.
+    #[must_use]
+    pub fn with_route_presets(mut self, presets: IndexMap<String, RoutePreset>) -> Self {
+        self.route_presets = Arc::new(presets);
         self
     }
 
@@ -749,6 +760,18 @@ impl AppState {
         &self.models
     }
 
+    /// Configured named routing presets in source insertion order.
+    #[must_use]
+    pub fn route_presets(&self) -> &IndexMap<String, RoutePreset> {
+        &self.route_presets
+    }
+
+    /// Resolve one named route without exposing mutable configuration.
+    #[must_use]
+    pub fn route_preset(&self, name: &str) -> Option<&RoutePreset> {
+        self.route_presets.get(name)
+    }
+
     /// Return a deterministic weighted order of concrete targets for an alias.
     ///
     /// The first target rotates according to configured weights. Remaining
@@ -940,6 +963,7 @@ impl fmt::Debug for AppState {
             .debug_struct("AppState")
             .field("routing", &self.routing)
             .field("models", &self.models)
+            .field("route_presets", &self.route_presets)
             .field("offline", &self.offline)
             .field("dry_run", &self.dry_run)
             .field("route_on", &self.route_on)
@@ -975,6 +999,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/models", get(openai_models))
         .route("/models", get(openai_models))
         .route("/router/models", get(router_models))
+        .route("/router/routes", get(router_routes))
         .route("/router/profiles", get(router_profiles))
         .route("/router/recent", get(router_recent))
         .route("/v1/savings", get(savings_report))
@@ -1312,6 +1337,30 @@ struct RouterProfilesResponse {
     profiles: &'static [LexiconProfile],
 }
 
+#[derive(Serialize)]
+struct RouterRoutesResponse {
+    routes: Vec<RouterRoute>,
+}
+
+#[derive(Serialize)]
+struct RouterRoute {
+    name: String,
+    models: Vec<String>,
+}
+
+async fn router_routes(State(state): State<AppState>) -> Json<RouterRoutesResponse> {
+    Json(RouterRoutesResponse {
+        routes: state
+            .route_presets()
+            .iter()
+            .map(|(name, route)| RouterRoute {
+                name: name.clone(),
+                models: route.models.clone(),
+            })
+            .collect(),
+    })
+}
+
 async fn router_profiles() -> Json<RouterProfilesResponse> {
     Json(RouterProfilesResponse {
         profiles: profiles(),
@@ -1607,68 +1656,86 @@ async fn chat_completions(
         }
     };
 
-    let pin = resolve_request_pin(body.get("model"), &state);
-    let (mut chosen, mut mode) = if let Some(pin) = pin {
-        (pin, "pinned")
-    } else if let Some(slash_pin) = slash_resolution.and_then(|resolution| resolution.pin) {
-        (slash_pin, "slash-pinned")
-    } else {
-        let threshold_header = match request_header(&headers, THRESHOLD_HEADER) {
-            Ok(value) => value,
-            Err(message) => return bad_override_response(&request_id, message),
-        };
-        let threshold = match parse_threshold_header(threshold_header) {
-            Ok(value) => value,
-            Err(error) => return bad_override_response(&request_id, error.to_string()),
-        };
-        let (mut chosen, mut mode, effective_tiers) = if let Some(threshold) = threshold {
-            let tiers = match threshold_tiers(&routing, threshold) {
-                Ok(tiers) => tiers,
-                Err(error) => return bad_override_response(&request_id, error.to_string()),
-            };
-            let Some(model) = recommend_tier(decision.score, &tiers) else {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "wayfinder_router_misconfigured",
-                    "routing configuration contains no selectable tier".to_owned(),
-                    request_id_headers(&request_id),
-                );
-            };
-            (model.to_owned(), "threshold-override", tiers)
+    let selection = match resolve_request_selection(body.get("model"), &state) {
+        Ok(selection) => selection,
+        Err(message) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "wayfinder_router_unknown_route",
+                message,
+                request_id_headers(&request_id),
+            );
+        }
+    };
+    let (mut chosen, mut mode, mut preset_models, mut preset_name) =
+        if let Some(selection) = selection {
+            match selection {
+                RequestSelection::Model(pin) => (pin, "pinned", None, None),
+                RequestSelection::Preset { name, models } => {
+                    let chosen = models[0].clone();
+                    (chosen, "preset", Some(models), Some(name))
+                }
+            }
+        } else if let Some(slash_pin) = slash_resolution.and_then(|resolution| resolution.pin) {
+            (slash_pin, "slash-pinned", None, None)
         } else {
-            (
-                decision.recommendation.clone(),
-                "scored",
-                routing.tiers.clone(),
-            )
-        };
-        if sticky && routing.classifier.is_none() && effective_tiers.len() >= 2 {
-            let latched = match conversation_high_water(
-                &messages,
-                &routing,
-                &effective_tiers,
-                sticky_cooldown,
-            ) {
+            let threshold_header = match request_header(&headers, THRESHOLD_HEADER) {
+                Ok(value) => value,
+                Err(message) => return bad_override_response(&request_id, message),
+            };
+            let threshold = match parse_threshold_header(threshold_header) {
                 Ok(value) => value,
                 Err(error) => return bad_override_response(&request_id, error.to_string()),
             };
-            if let Some(latched) = latched {
-                let current_rank = effective_tiers
-                    .iter()
-                    .position(|tier| tier.model == chosen)
-                    .unwrap_or(0);
-                let latched_rank = effective_tiers
-                    .iter()
-                    .position(|tier| tier.model == latched)
-                    .unwrap_or(0);
-                if latched_rank > current_rank {
-                    chosen = latched;
-                    mode = "sticky";
+            let (mut chosen, mut mode, effective_tiers) = if let Some(threshold) = threshold {
+                let tiers = match threshold_tiers(&routing, threshold) {
+                    Ok(tiers) => tiers,
+                    Err(error) => return bad_override_response(&request_id, error.to_string()),
+                };
+                let Some(model) = recommend_tier(decision.score, &tiers) else {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "wayfinder_router_misconfigured",
+                        "routing configuration contains no selectable tier".to_owned(),
+                        request_id_headers(&request_id),
+                    );
+                };
+                (model.to_owned(), "threshold-override", tiers)
+            } else {
+                (
+                    decision.recommendation.clone(),
+                    "scored",
+                    routing.tiers.clone(),
+                )
+            };
+            if sticky && routing.classifier.is_none() && effective_tiers.len() >= 2 {
+                let latched = match conversation_high_water(
+                    &messages,
+                    &routing,
+                    &effective_tiers,
+                    sticky_cooldown,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => return bad_override_response(&request_id, error.to_string()),
+                };
+                if let Some(latched) = latched {
+                    let current_rank = effective_tiers
+                        .iter()
+                        .position(|tier| tier.model == chosen)
+                        .unwrap_or(0);
+                    let latched_rank = effective_tiers
+                        .iter()
+                        .position(|tier| tier.model == latched)
+                        .unwrap_or(0);
+                    if latched_rank > current_rank {
+                        chosen = latched;
+                        mode = "sticky";
+                    }
                 }
             }
-        }
-        (chosen, mode)
-    };
+            (chosen, mode, None, None)
+        };
+    let mut preset_route_active = preset_name.is_some();
 
     let offline = state.offline() || offline_override(&headers);
     let key_id = state
@@ -1708,6 +1775,9 @@ async fn chat_completions(
                         if cheapest != chosen {
                             chosen = cheapest;
                             mode = "budget-degraded";
+                            preset_models = None;
+                            preset_name = None;
+                            preset_route_active = false;
                         }
                     }
                 }
@@ -1766,6 +1836,20 @@ async fn chat_completions(
         };
     if let Some(budget_state) = budget_state {
         routing_headers.insert(ROUTER_BUDGET_HEADER, HeaderValue::from_static(budget_state));
+    }
+    if let Some(route_name) = preset_name.as_deref() {
+        if let Err(message) = insert_header(
+            &mut routing_headers,
+            ROUTER_ROUTE_HEADER,
+            &format!("{ROUTE_PRESET_PREFIX}{route_name}"),
+        ) {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "wayfinder_router_misconfigured",
+                message,
+                request_id_headers(&request_id),
+            );
+        }
     }
     if let (Some(policy), Some(grant)) = (state.access_policy(), access_grant) {
         if let Some(workspace) = policy.workspace_id(grant) {
@@ -1843,7 +1927,8 @@ async fn chat_completions(
     }
 
     let request_is_pinned = matches!(mode, "pinned" | "slash-pinned");
-    let delivery_name = if offline && !request_is_pinned {
+    let request_is_preset = preset_route_active;
+    let delivery_name = if offline && !request_is_pinned && !request_is_preset {
         decision
             .tiers
             .as_ref()
@@ -1989,10 +2074,15 @@ async fn chat_completions(
     let failover_header = request_header(&headers, FAILOVER_HEADER).ok().flatten();
     let mut candidates = if request_is_pinned {
         Vec::new()
+    } else if let Some(preset_models) = preset_models.take() {
+        preset_models
+            .into_iter()
+            .filter(|model| model != &delivery_name)
+            .collect()
     } else {
         target.fallbacks().to_vec()
     };
-    if !request_is_pinned && (!offline || ladder.is_empty()) {
+    if !request_is_pinned && !request_is_preset && (!offline || ladder.is_empty()) {
         candidates.extend(failover_candidates(
             &chosen,
             &ladder,
@@ -3192,24 +3282,57 @@ fn clamp_to_allowed(chosen: &str, ladder: &[&str], allowed: &[String]) -> String
     in_ladder[0].to_owned()
 }
 
-fn resolve_request_pin(model_field: Option<&Value>, state: &AppState) -> Option<String> {
-    let name = model_field?.as_str()?.trim();
+enum RequestSelection {
+    Model(String),
+    Preset { name: String, models: Vec<String> },
+}
+
+fn resolve_request_selection(
+    model_field: Option<&Value>,
+    state: &AppState,
+) -> Result<Option<RequestSelection>, String> {
+    let Some(model_field) = model_field else {
+        return Ok(None);
+    };
+    let Some(name) = model_field.as_str() else {
+        return Ok(None);
+    };
+    let name = name.trim();
     if name.is_empty() || name == AUTO_MODEL {
-        return None;
+        return Ok(None);
+    }
+    if let Some(route_name) = name.strip_prefix(ROUTE_PRESET_PREFIX) {
+        let Some(route) = state.route_preset(route_name) else {
+            return Err(format!(
+                "unknown routing preset '{name}'; configure [gateway.routes.{route_name}] first"
+            ));
+        };
+        return Ok(Some(RequestSelection::Preset {
+            name: route_name.to_owned(),
+            models: route.models.clone(),
+        }));
     }
     if state.supports_tier_directives() {
         if name == PREFER_LOW {
-            return state.routing().tiers.first().map(|tier| tier.model.clone());
+            return Ok(state
+                .routing()
+                .tiers
+                .first()
+                .map(|tier| RequestSelection::Model(tier.model.clone())));
         }
         if name == PREFER_HIGH || name == PREFER_HIGH_ALIAS {
-            return state.routing().tiers.last().map(|tier| tier.model.clone());
+            return Ok(state
+                .routing()
+                .tiers
+                .last()
+                .map(|tier| RequestSelection::Model(tier.model.clone())));
         }
     }
-    state
+    Ok(state
         .models()
         .iter()
         .any(|model| model.name() == name)
-        .then(|| name.to_owned())
+        .then(|| RequestSelection::Model(name.to_owned())))
 }
 
 fn offline_override(headers: &HeaderMap) -> bool {
@@ -3621,12 +3744,13 @@ mod tests {
     use axum::http::{Request, StatusCode, header};
     use axum::response::Response;
     use bytes::Bytes;
+    use indexmap::IndexMap;
     use serde_json::{Value, json};
     use tokio::sync::{Barrier, Semaphore, oneshot};
     use tower::ServiceExt;
     use wayfinder_config::gateway::{
-        Budget as GatewayBudget, GatewayConfig, ProviderKind, ProviderTier, RateLimit, VirtualKey,
-        Workspace,
+        Budget as GatewayBudget, GatewayConfig, ProviderKind, ProviderTier, RateLimit, RoutePreset,
+        VirtualKey, Workspace,
     };
     use wayfinder_routing_core::{ClassifierModel, RoutingConfig};
     use wayfinder_service::pricing::{SavingsLedger, UtcDate, turn_cost};
@@ -5281,6 +5405,163 @@ mod tests {
                 .get("x-wayfinder-router-model")
                 .and_then(|value| value.to_str().ok()),
             Some("local")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn named_route_selects_ordered_models_and_exposes_route_metadata() -> TestResult {
+        let state = AppState::new(
+            RoutingConfig::binary(0.5),
+            vec![
+                ConfiguredModel::new("local", "http://127.0.0.1:11434/v1", "local", None, true),
+                ConfiguredModel::new("cloud", "https://cloud.example/v1", "cloud", None, true),
+            ],
+            false,
+            "test",
+        )
+        .with_dry_run(true)
+        .with_route_presets(IndexMap::from([(
+            "coding".to_owned(),
+            RoutePreset {
+                models: vec!["cloud".to_owned(), "local".to_owned()],
+            },
+        )]));
+
+        let response = post_json(
+            &state,
+            "/v1/chat/completions",
+            &json!({
+                "model": "@route/coding",
+                "messages": [{"role": "user", "content": "write a function"}]
+            }),
+            &[],
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-wayfinder-router-model")
+                .and_then(|value| value.to_str().ok()),
+            Some("cloud")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-wayfinder-router-mode")
+                .and_then(|value| value.to_str().ok()),
+            Some("preset")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-wayfinder-router-route")
+                .and_then(|value| value.to_str().ok()),
+            Some("@route/coding")
+        );
+        assert_eq!(json_body(response).await?["wayfinder"]["mode"], "preset");
+
+        let routes = get(&state, "/router/routes").await?;
+        assert_eq!(routes.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(routes).await?,
+            json!({"routes": [{"name": "coding", "models": ["cloud", "local"]}]})
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unknown_named_route_fails_closed_without_falling_back_to_automatic() -> TestResult {
+        let state = AppState::new(
+            RoutingConfig::binary(0.5),
+            vec![ConfiguredModel::new(
+                "local",
+                "http://127.0.0.1:11434/v1",
+                "local",
+                None,
+                true,
+            )],
+            false,
+            "test",
+        );
+        let response = post_json(
+            &state,
+            "/v1/chat/completions",
+            &json!({
+                "model": "@route/missing",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            &[],
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(response).await?["error"]["type"],
+            "wayfinder_router_unknown_route"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn named_route_failover_stays_within_its_ordered_aliases() -> TestResult {
+        let config = GatewayConfig {
+            retries: 0,
+            ..GatewayConfig::default()
+        };
+        let (state, seen) = reliability_live_state(
+            &config,
+            Vec::new(),
+            BTreeMap::from([
+                (
+                    "cloud".to_owned(),
+                    VecDeque::from([ScriptedOutcome::Transport]),
+                ),
+                (
+                    "cloud-backup".to_owned(),
+                    VecDeque::from([ScriptedOutcome::Response(
+                        StatusCode::OK,
+                        br#"{"id":"route-ok","choices":[{"message":{"content":"ok"}}]}"#,
+                    )]),
+                ),
+            ]),
+        )?;
+        let state = state.with_route_presets(IndexMap::from([(
+            "coding".to_owned(),
+            RoutePreset {
+                models: vec!["cloud".to_owned(), "cloud-backup".to_owned()],
+            },
+        )]));
+        let response = post_json(
+            &state,
+            "/v1/chat/completions",
+            &json!({
+                "model": "@route/coding",
+                "messages": [{"role": "user", "content": "write code"}]
+            }),
+            &[],
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-wayfinder-router-served-by")
+                .and_then(|value| value.to_str().ok()),
+            Some("cloud-backup")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-wayfinder-router-route")
+                .and_then(|value| value.to_str().ok()),
+            Some("@route/coding")
+        );
+        assert_eq!(
+            seen.lock()
+                .map_err(|_| std::io::Error::other("seen lock poisoned"))?
+                .as_slice(),
+            ["cloud", "cloud-backup"]
         );
         Ok(())
     }
