@@ -26,6 +26,7 @@ use wayfinder_config::{
     CONFIG_PATH_ENV, THRESHOLD_ENV, TierOrderPolicy, find_config_file, load_routing_config,
     routing_config_from_toml,
 };
+use wayfinder_gateway::audit::AuditLog;
 use wayfinder_gateway::delivery::{
     AppleFoundationModelDelivery, BufferedProviderDelivery, CodexAppServerDelivery,
     CredentialError, CredentialSource, OpenAiCompatibleDelivery, ProviderDelivery,
@@ -48,6 +49,7 @@ use wayfinder_service::credentials::{LegacyCommandLimits, resolve_legacy_command
 use wayfinder_service::pricing::{LedgerLoad, SavingsLedger};
 
 const SAVINGS_FILE_ENV: &str = "WAYFINDER_ROUTER_SAVINGS_FILE";
+const AUDIT_FILE_ENV: &str = "WAYFINDER_ROUTER_AUDIT_FILE";
 /// Successful command.
 pub const EXIT_OK: i32 = 0;
 /// Invalid configuration or deterministic-core failure.
@@ -377,8 +379,25 @@ pub async fn run_serve_process(
                 Err(error) => Err(error),
             };
             let outcome = reload_holder.refresh(version, || loaded);
-            if let Ok(ReloadOutcome::Retained { current, .. }) = outcome {
-                let _ = current.metrics().record_reload_failure();
+            match outcome {
+                Ok(ReloadOutcome::Reloaded(current)) => {
+                    let _ = current.audit_log().record(
+                        "system",
+                        "config.reload",
+                        None,
+                        Some(json!({"version": version.to_string()})),
+                    );
+                }
+                Ok(ReloadOutcome::Retained { current, .. }) => {
+                    let _ = current.metrics().record_reload_failure();
+                    let _ = current.audit_log().record(
+                        "system",
+                        "config.reload_failed",
+                        None,
+                        Some(json!({"version": version.to_string()})),
+                    );
+                }
+                Ok(ReloadOutcome::Unchanged(_)) | Err(_) => {}
             }
         }
     });
@@ -620,6 +639,16 @@ async fn build_serve_state<W: Write>(
         "all" => RouteOn::All,
         _ => return Err("validated gateway route_on is unsupported".to_owned()),
     };
+    let audit_path = std::env::var_os(AUDIT_FILE_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            selected_config_path(options)
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("wayfinder-audit.jsonl")
+        });
+    let audit_log = AuditLog::from_path(audit_path).map_err(|error| error.to_string())?;
     let mut state = AppState::new(routing, models, gateway.offline, product_version())
         .with_dry_run(options.dry_run)
         .with_route_on(route_on)
@@ -627,6 +656,7 @@ async fn build_serve_state<W: Write>(
         .with_slash_directives(gateway.slash_directives)
         .with_route_presets(gateway.routes.clone())
         .with_gateway_budget(&gateway)
+        .with_audit_log(audit_log)
         .with_gateway_operator_auth(&gateway)
         .map_err(|error| error.to_string())?;
     let savings_path = std::env::var_os(SAVINGS_FILE_ENV)
