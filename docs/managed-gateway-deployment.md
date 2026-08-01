@@ -37,6 +37,36 @@ wayfinder-router serve \
 The process refuses to start if the data plane has no virtual keys or no model
 destinations. A non-loopback bind without `--surface data-plane` also fails.
 
+## Concurrent users and overload
+
+One process admits 32 simultaneous upstream deliveries and up to 64 bounded
+waiters by default. That leaves headroom for twenty concurrent cloud-style
+requests without serializing them inside the router. Tune the process boundary
+explicitly when the provider and host have measured capacity:
+
+```toml
+[gateway.concurrency]
+max_in_flight = 32
+max_queued = 64
+queue_timeout = 2.0
+```
+
+`max_queued = 0` disables waiting. When every delivery and queue slot is
+occupied, or a waiter exceeds `queue_timeout`, inference returns HTTP `503`
+with `Retry-After`, error type `wayfinder_router_overloaded`, and
+`x-wayfinder-router-overload: queue-full|queue-timeout`.
+
+Streaming requests retain a delivery slot until the response body finishes or
+the client disconnects. Cache hits and decision-only requests do not use a
+delivery slot. The local operator metrics include current/peak in-flight
+deliveries, queue wait, and overload totals; the managed listener still does
+not expose metrics.
+
+These limits protect the router process; they do not increase the capacity of
+an upstream. In particular, the ChatGPT/Codex account runtime remains
+single-turn, while local-model capacity depends on its host. Validate provider
+latency and token throughput before raising the defaults.
+
 ## Network contract
 
 The managed listener exposes only:
@@ -75,4 +105,6 @@ model ingress.
   those capabilities.
 
 See [WF-ADR-0050](../decisions/WF-ADR-0050-managed-gateway-surfaces.md) for the
-authority separation and threat model.
+authority separation and threat model, and
+[WF-ADR-0051](../decisions/WF-ADR-0051-bounded-delivery-concurrency.md) for the
+process-local throughput contract.

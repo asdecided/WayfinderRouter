@@ -28,6 +28,12 @@ pub const DEFAULT_CACHE_MAX_ENTRIES: u64 = 1_024;
 pub const DEFAULT_CACHE_MAX_BYTES: u64 = 64 * 1_024 * 1_024;
 /// Default rate-limit window, in seconds.
 pub const DEFAULT_RATE_LIMIT_WINDOW: f64 = 60.0;
+/// Default simultaneous upstream deliveries accepted by one process.
+pub const DEFAULT_MAX_IN_FLIGHT: u64 = 32;
+/// Default requests allowed to wait for an upstream delivery slot.
+pub const DEFAULT_MAX_QUEUED: u64 = 64;
+/// Default maximum time a queued request waits for a delivery slot.
+pub const DEFAULT_QUEUE_TIMEOUT: f64 = 2.0;
 
 /// Stable delivery identity for a configured gateway model.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -144,6 +150,27 @@ pub struct RateLimit {
     pub window: f64,
 }
 
+/// Process-local upstream delivery admission bounds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConcurrencyConfig {
+    /// Maximum simultaneous upstream deliveries.
+    pub max_in_flight: u64,
+    /// Maximum requests waiting for a delivery slot.
+    pub max_queued: u64,
+    /// Maximum queue wait in seconds.
+    pub queue_timeout: f64,
+}
+
+impl Default for ConcurrencyConfig {
+    fn default() -> Self {
+        Self {
+            max_in_flight: DEFAULT_MAX_IN_FLIGHT,
+            max_queued: DEFAULT_MAX_QUEUED,
+            queue_timeout: DEFAULT_QUEUE_TIMEOUT,
+        }
+    }
+}
+
 /// A gateway-issued virtual credential and its optional restrictions.
 #[derive(Clone, PartialEq)]
 pub struct VirtualKey {
@@ -201,6 +228,8 @@ pub struct GatewayConfig {
     pub cache: Option<CacheConfig>,
     /// Optional gateway-wide request/token limit.
     pub rate_limit: Option<RateLimit>,
+    /// Process-local upstream delivery admission bounds.
+    pub concurrency: ConcurrencyConfig,
     /// Virtual credentials keyed by operator-selected identifier.
     pub keys: IndexMap<String, VirtualKey>,
 }
@@ -221,6 +250,7 @@ impl Default for GatewayConfig {
             budget: None,
             cache: None,
             rate_limit: None,
+            concurrency: ConcurrencyConfig::default(),
             keys: IndexMap::new(),
         }
     }
@@ -291,6 +321,7 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
     let budget = parse_budget(gateway.get("budget"), where_)?;
     let cache = parse_cache(gateway.get("cache"), where_)?;
     let rate_limit = parse_rate_limit(gateway.get("rate_limit"), where_)?;
+    let concurrency = parse_concurrency(gateway.get("concurrency"), where_)?;
     let keys = parse_keys(gateway.get("keys"), where_)?;
     let models = parse_models(gateway.get("models"), where_)?;
 
@@ -311,6 +342,7 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
         budget,
         cache,
         rate_limit,
+        concurrency,
         keys,
     })
 }
@@ -404,6 +436,25 @@ fn render_gateway_toml(gateway: &GatewayConfig) -> String {
     }
     if let Some(rate_limit) = &gateway.rate_limit {
         blocks.push(render_rate_limit("[gateway.rate_limit]", rate_limit));
+    }
+    if gateway.concurrency != ConcurrencyConfig::default() {
+        let mut lines = vec!["[gateway.concurrency]".to_owned()];
+        if gateway.concurrency.max_in_flight != DEFAULT_MAX_IN_FLIGHT {
+            lines.push(format!(
+                "max_in_flight = {}",
+                gateway.concurrency.max_in_flight
+            ));
+        }
+        if gateway.concurrency.max_queued != DEFAULT_MAX_QUEUED {
+            lines.push(format!("max_queued = {}", gateway.concurrency.max_queued));
+        }
+        if gateway.concurrency.queue_timeout != DEFAULT_QUEUE_TIMEOUT {
+            lines.push(format!(
+                "queue_timeout = {}",
+                format_number(gateway.concurrency.queue_timeout)
+            ));
+        }
+        blocks.push(lines.join("\n"));
     }
 
     for (key_id, key) in &gateway.keys {
@@ -614,6 +665,38 @@ fn parse_rate_limit(value: Option<&Value>, where_: &str) -> Result<Option<RateLi
         "gateway.rate_limit.window",
     )?;
     Ok(Some(RateLimit { rpm, tpm, window }))
+}
+
+fn parse_concurrency(
+    value: Option<&Value>,
+    where_: &str,
+) -> Result<ConcurrencyConfig, ConfigError> {
+    let Some(value) = value else {
+        return Ok(ConcurrencyConfig::default());
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| invalid(where_, "'[gateway.concurrency]' must be a table"))?;
+    Ok(ConcurrencyConfig {
+        max_in_flight: optional_positive_integer(
+            table.get("max_in_flight"),
+            DEFAULT_MAX_IN_FLIGHT,
+            where_,
+            "gateway.concurrency.max_in_flight",
+        )?,
+        max_queued: optional_non_negative_integer(
+            table.get("max_queued"),
+            DEFAULT_MAX_QUEUED,
+            where_,
+            "gateway.concurrency.max_queued",
+        )?,
+        queue_timeout: optional_positive_number(
+            table.get("queue_timeout"),
+            DEFAULT_QUEUE_TIMEOUT,
+            where_,
+            "gateway.concurrency.queue_timeout",
+        )?,
+    })
 }
 
 fn parse_keys(
@@ -1274,6 +1357,32 @@ rpm = 5
         assert!(key.models.is_empty());
         assert!(key.budget.is_none());
         assert!(key.rate_limit.is_none());
+        assert_eq!(config.concurrency, ConcurrencyConfig::default());
+        Ok(())
+    }
+
+    #[test]
+    fn concurrency_bounds_parse_validate_and_round_trip() -> Result<(), ConfigError> {
+        let text =
+            "[gateway.concurrency]\nmax_in_flight = 20\nmax_queued = 40\nqueue_timeout = 1.5";
+        let config = parse(text)?;
+        assert_eq!(
+            config.concurrency,
+            ConcurrencyConfig {
+                max_in_flight: 20,
+                max_queued: 40,
+                queue_timeout: 1.5,
+            }
+        );
+        assert_eq!(dump_gateway_toml(&config)?, text);
+
+        for invalid_text in [
+            "[gateway.concurrency]\nmax_in_flight = 0",
+            "[gateway.concurrency]\nmax_queued = -1",
+            "[gateway.concurrency]\nqueue_timeout = 0",
+        ] {
+            assert!(parse(invalid_text).is_err(), "accepted: {invalid_text}");
+        }
         Ok(())
     }
 

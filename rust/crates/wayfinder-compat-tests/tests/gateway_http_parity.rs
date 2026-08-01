@@ -148,8 +148,41 @@ fn latency_metrics(text: &str) -> String {
     normalized
 }
 
+// The fixture is immutable migration evidence. Metrics added after the Rust cutover
+// have dedicated Rust tests and are intentionally outside that frozen snapshot.
+fn migration_metric_families(text: &str) -> String {
+    const RUST_ONLY_PREFIXES: [&str; 4] = [
+        "wayfinder_router_in_flight_deliveries",
+        "wayfinder_router_peak_in_flight_deliveries",
+        "wayfinder_router_admission_queue_wait_seconds",
+        "wayfinder_router_admission_rejected_total",
+    ];
+    let mut normalized = String::new();
+    for line in text.lines() {
+        let metric = line
+            .strip_prefix("# HELP ")
+            .or_else(|| line.strip_prefix("# TYPE "))
+            .unwrap_or(line)
+            .split(['{', ' '])
+            .next()
+            .unwrap_or_default();
+        if RUST_ONLY_PREFIXES
+            .iter()
+            .any(|prefix| metric.starts_with(prefix))
+        {
+            continue;
+        }
+        normalized.push_str(line);
+        normalized.push('\n');
+    }
+    if !text.ends_with('\n') {
+        let _ = normalized.pop();
+    }
+    normalized
+}
+
 #[tokio::test]
-async fn gateway_http_matches_python() -> Result<(), Box<dyn Error>> {
+async fn gateway_http_preserves_the_frozen_migration_contract() -> Result<(), Box<dyn Error>> {
     let corpus: Corpus = serde_json::from_str(GATEWAY_HTTP_VECTORS)?;
     assert_eq!(corpus.schema, 1);
     assert_eq!(corpus.version, "2026.7.0");
@@ -213,6 +246,9 @@ async fn gateway_http_matches_python() -> Result<(), Box<dyn Error>> {
             },
             BodyFixture::Text(_) => {
                 let mut value = String::from_utf8(bytes.to_vec())?;
+                if case.request.path == "/metrics" {
+                    value = migration_metric_families(&value);
+                }
                 if case.name == "metrics_after_one_dry_run" {
                     value = latency_metrics(&value);
                 }
@@ -222,26 +258,26 @@ async fn gateway_http_matches_python() -> Result<(), Box<dyn Error>> {
 
         if status != StatusCode::from_u16(case.response.status)? {
             mismatches.push(format!(
-                "{} status: Python {}, Rust {}",
+                "{} status: fixture {}, actual {}",
                 case.name, case.response.status, status
             ));
         }
         if actual_headers != case.response.headers {
             mismatches.push(format!(
-                "{} headers:\n  Python: {:?}\n  Rust:   {:?}",
+                "{} headers:\n  fixture: {:?}\n  actual:  {:?}",
                 case.name, case.response.headers, actual_headers
             ));
         }
         match (&case.response.body, actual_body) {
             (BodyFixture::Json(expected), BodyFixture::Json(actual)) if expected != &actual => {
                 mismatches.push(format!(
-                    "{} JSON body:\n  Python: {}\n  Rust:   {}",
+                    "{} JSON body:\n  fixture: {}\n  actual:  {}",
                     case.name, expected, actual
                 ));
             }
             (BodyFixture::Text(expected), BodyFixture::Text(actual)) if expected != &actual => {
                 mismatches.push(format!(
-                    "{} text body:\n  Python: {:?}\n  Rust:   {:?}",
+                    "{} text body:\n  fixture: {:?}\n  actual:  {:?}",
                     case.name, expected, actual
                 ));
             }
@@ -255,7 +291,7 @@ async fn gateway_http_matches_python() -> Result<(), Box<dyn Error>> {
 
     assert!(
         mismatches.is_empty(),
-        "Python/Rust gateway HTTP mismatches:\n{}",
+        "gateway migration-contract mismatches:\n{}",
         mismatches.join("\n")
     );
     Ok(())

@@ -81,6 +81,12 @@ verification. See
 | `[gateway] failover = same-tier\|degrade\|escalate` | on exhaustion, stay on the tier (default), fall to a cheaper one (never raises cost), or a dearer one (opt-in); per-request `X-Wayfinder-Failover` |
 | `[gateway.models.<name>] fallbacks = [...]` / `context_window` | same-tier endpoints to try on failure; skip a target whose window can't fit the prompt. Responses carry `x-wayfinder-router-served-by` |
 
+## Concurrency and backpressure
+
+| setting | effect |
+| --- | --- |
+| `[gateway.concurrency] max_in_flight` / `max_queued` / `queue_timeout` | bound simultaneous provider deliveries (default 32), waiting requests (default 64), and queue wait in seconds (default 2). Saturation returns `503 wayfinder_router_overloaded` with `Retry-After` and `x-wayfinder-router-overload`; streams hold capacity for their body lifetime. Cache hits and decision-only requests bypass delivery admission (WF-ADR-0051) |
+
 ## Budget
 
 | setting | effect |

@@ -2193,6 +2193,7 @@ dependencies = [
  "http",
  "http-body-util",
  "indexmap",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",

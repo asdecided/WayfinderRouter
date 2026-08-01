@@ -613,6 +613,8 @@ async fn build_serve_state<W: Write>(
         .with_savings_ledger(Arc::new(ledger))
         .with_savings_path(savings_path);
     state = state
+        .with_gateway_admission(&gateway)
+        .map_err(|error| error.to_string())?
         .with_gateway_reliability(&gateway)
         .map_err(|error| error.to_string())?;
     state = state
