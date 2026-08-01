@@ -105,6 +105,12 @@ existing per-key attribution and budget behavior. Workspace and key rate
 limits both apply, and successful responses identify the bounded policy scope
 through `x-wayfinder-router-workspace`.
 
+When exact-response caching is enabled, entries are partitioned by the
+authenticated virtual-key identifier, effective privacy posture, selected
+public route, and upstream model identity. An identical request from another
+virtual key or privacy boundary is therefore a cache miss rather than a
+cross-tenant or cross-boundary replay.
+
 Every inference candidate is hard-filtered for the request's capabilities and
 privacy posture before delivery. Callers may send
 `x-wayfinder-privacy-posture: on-device-only|local-devices|hosted-allowed`;
@@ -112,9 +118,18 @@ privacy posture before delivery. Callers may send
 echoed as `x-wayfinder-router-privacy-posture`. Missing credentials,
 insufficient context, unsupported image/tool/streaming requirements, and
 disallowed execution boundaries are excluded from primary and fallback plans.
+A deployment pool does not weaken that rule: every concrete member is checked
+independently before rotation or failover, so an alias cannot hide a member
+that crosses the requested privacy/offline boundary or lacks readiness or
+context.
 A pinned destination with no eligible path fails with
 `422 wayfinder_router_destination_ineligible`; it never silently crosses the
 requested boundary.
+
+The OpenAI- and Anthropic-compatible surfaces accept the same bounded
+Wayfinder routing controls, including privacy posture and offline mode. The
+Anthropic adapter forwards only that explicit control-header allowlist into the
+shared chat path; arbitrary client headers are not trusted as router controls.
 
 Model names in this API are stable Wayfinder aliases. A configured alias maps
 to its provider model and ordered same-tier fallbacks, allowing operators to
@@ -128,7 +143,9 @@ gateway.
 Application-owned delivery policy can use a configured named preset through
 `model = "@route/<name>"` on a request. Presets are not exposed on the managed
 `/router/*` surface; they select only the operator-defined model aliases that
-are already allowed for the presented virtual key. An unknown preset fails
+are also allowed by the effective workspace/virtual-key policy. An empty
+intersection fails with `422 wayfinder_router_destination_ineligible`; the
+gateway never escapes the preset or the allowlist. An unknown preset fails
 closed with `400 wayfinder_router_unknown_route` rather than becoming
 `Automatic`.
 

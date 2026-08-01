@@ -44,7 +44,10 @@ and client-visible `model` names remain the public alias.
 Pool members inherit provider kind, locality, cost, and context from the
 parent. Pools are therefore capability-homogeneous and are currently limited
 to the OpenAI-compatible adapter. A member's credential readiness is resolved
-at startup; the alias is ready when any member is ready.
+at startup; the alias is ready when any member is ready. Before each delivery,
+the gateway nevertheless assesses every concrete member independently for
+credential readiness, request context, and the effective privacy/offline
+boundary. Rotation and failover can select only from that eligible subset.
 
 ## Consequences
 

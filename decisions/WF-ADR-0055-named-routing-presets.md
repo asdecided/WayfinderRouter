@@ -34,6 +34,12 @@ later candidates are used for the existing transport/`429`/`5xx` failover
 semantics. The preset does not add provider credentials, change the score, or
 invoke a model to make a routing decision.
 
+The preset's ordered aliases are intersected with the effective workspace and
+virtual-key model allowlist before eligibility or delivery. An empty
+intersection returns `422 wayfinder_router_destination_ineligible`; a preset
+cannot widen a caller's model policy, and a model-policy clamp cannot escape
+the selected preset.
+
 Preset names are secret-free visible identifiers, limited to 64 routes with 32
 unique aliases per route. Configuration validation rejects empty, duplicate,
 or unknown model references. The local operator surface exposes a read-only

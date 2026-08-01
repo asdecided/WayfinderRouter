@@ -153,7 +153,7 @@ unchanged). See [WF-ADR-0058](../decisions/WF-ADR-0058-opentelemetry-observabili
 
 | setting | effect |
 | --- | --- |
-| `[gateway.cache] enabled` / `ttl` / `max_entries` / `max_bytes` | exact-match response cache: replay a stored answer for an identical deterministic request — instant, free repeats. Off by default; in-memory only; raise `max_bytes` (default 64 MiB) for more. A hit is free and surfaced via `x-wayfinder-router-cache: hit\|miss`; disabling purges it (WF-ADR-0033) |
+| `[gateway.cache] enabled` / `ttl` / `max_entries` / `max_bytes` | exact-match response cache: replay a stored answer for an identical deterministic request — instant, free repeats. Managed requests are partitioned by virtual-key ID, effective privacy posture, public route, and upstream model, so entries are never replayed across tenants or privacy boundaries. Off by default; in-memory only; raise `max_bytes` (default 64 MiB) for more. A hit is free and surfaced via `x-wayfinder-router-cache: hit\|miss`; disabling purges it (WF-ADR-0033) |
 
 ## Rate limiting
 
@@ -192,10 +192,16 @@ excluded for image/tool requests; OpenAI-compatible adapters retain their
 existing pass-through contract. Missing credentials, declared windows that are
 too small, unsupported capabilities, and denied privacy boundaries are
 excluded before reliability retries or failover. Models that omit
-`context_window` retain the legacy prompt-precheck behavior. A pinned destination or
-named preset with no eligible member returns
+`context_window` retain the legacy prompt-precheck behavior. Every concrete
+deployment-pool member is checked independently before rotation, rather than
+inheriting eligibility from its public alias. A pinned destination or named
+preset with no eligible member returns
 `422 wayfinder_router_destination_ineligible` with stable reason names rather
 than silently switching privacy boundary (WF-ADR-0056).
+
+OpenAI- and Anthropic-compatible chat endpoints preserve the same bounded
+Wayfinder control-header allowlist. In particular, privacy and offline controls
+cannot disappear when an Anthropic-shaped request enters the shared router.
 
 ## Named routing presets
 
@@ -214,6 +220,10 @@ the first compatible, available alias wins and later aliases are tried on
 transport/`429`/`5xx` failure. This is an explicit route choice, not a new
 scoring model or a credential-broker path. Unknown `@route/...` names fail with
 `400 wayfinder_router_unknown_route` rather than silently becoming `Automatic`.
+The preset list is intersected with the effective workspace/key model
+allowlist before delivery. An empty intersection returns
+`422 wayfinder_router_destination_ineligible`; neither policy can widen the
+other.
 
 The local operator surface exposes the configured, secret-free inventory at
 `GET /router/routes`. Responses identify the selected preset with

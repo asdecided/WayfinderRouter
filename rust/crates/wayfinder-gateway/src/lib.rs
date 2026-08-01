@@ -129,6 +129,16 @@ const PRIVACY_POSTURE_HEADER: &str = "x-wayfinder-privacy-posture";
 const ROUTER_PRIVACY_POSTURE_HEADER: &str = "x-wayfinder-router-privacy-posture";
 const DEBUG_HEADER: &str = "x-wayfinder-debug";
 const ROUTE_PRESET_PREFIX: &str = "@route/";
+const CHAT_CONTROL_HEADERS: [&str; 8] = [
+    OFFLINE_HEADER,
+    FAILOVER_HEADER,
+    PRIVACY_POSTURE_HEADER,
+    DEBUG_HEADER,
+    THRESHOLD_HEADER,
+    ROUTE_ON_HEADER,
+    STICKY_HEADER,
+    STICKY_COOLDOWN_HEADER,
+];
 
 type MonotonicClock = Arc<dyn Fn() -> f64 + Send + Sync>;
 
@@ -849,6 +859,17 @@ impl AppState {
         (0..targets.len())
             .map(|offset| (start + offset) % targets.len())
             .map(|index| model.for_deployment(&targets[index]))
+            .collect()
+    }
+
+    fn configured_deployment_targets(&self, alias: &str) -> Vec<ConfiguredModel> {
+        let Some(model) = self.models.iter().find(|model| model.name() == alias) else {
+            return Vec::new();
+        };
+        model
+            .deployment_targets()
+            .iter()
+            .map(|deployment| model.for_deployment(deployment))
             .collect()
     }
 
@@ -1840,54 +1861,63 @@ async fn chat_completions(
         };
     let mut preset_route_active = preset_name.is_some();
 
-    if !state.dry_run() {
-        if let Some(preset_models) = preset_models.as_mut() {
-            let mut reasons = Vec::new();
-            preset_models.retain(|name| {
-                let Some(model) = state.models().iter().find(|model| model.name() == name) else {
-                    reasons.push(format!("{name}: unknown-model"));
-                    return false;
-                };
-                let assessment = assess_model(&routing_request, model);
-                if assessment.is_eligible() {
-                    true
-                } else {
-                    reasons.push(format!(
-                        "{name}: {}",
-                        assessment
-                            .exclusions
-                            .iter()
-                            .map(|reason| exclusion_reason_name(*reason))
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    ));
-                    false
-                }
-            });
-            let Some(first) = preset_models.first().cloned() else {
-                return error_response(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "wayfinder_router_destination_ineligible",
-                    format!(
-                        "routing preset '{}' has no eligible destination for this request: {}",
-                        preset_name.as_deref().unwrap_or("unknown"),
-                        reasons.join("; ")
-                    ),
-                    privacy_response_headers(&request_id, privacy_posture),
-                );
+    if let Some(preset_models) = preset_models.as_mut() {
+        let allowed_models = state
+            .access_policy()
+            .and_then(|policy| access_grant.map(|grant| policy.allowed_models(grant)))
+            .filter(|allowed| !allowed.is_empty());
+        let mut reasons = Vec::new();
+        preset_models.retain(|name| {
+            if allowed_models.is_some_and(|allowed| !allowed.iter().any(|model| model == name)) {
+                reasons.push(format!("{name}: not-allowed-by-key"));
+                return false;
+            }
+            if state.dry_run() {
+                return true;
+            }
+            let Some(model) = state.models().iter().find(|model| model.name() == name) else {
+                reasons.push(format!("{name}: unknown-model"));
+                return false;
             };
-            chosen = first;
-        } else if matches!(mode, "pinned" | "slash-pinned") {
-            if let Some(model) = state.models().iter().find(|model| model.name() == chosen) {
-                let assessment = assess_model(&routing_request, model);
-                if !assessment.is_eligible() {
-                    return destination_ineligible_response(
-                        &chosen,
-                        &assessment,
-                        privacy_response_headers(&request_id, privacy_posture),
-                        offline,
-                    );
-                }
+            let assessment = assess_model(&routing_request, model);
+            if assessment.is_eligible() {
+                true
+            } else {
+                reasons.push(format!(
+                    "{name}: {}",
+                    assessment
+                        .exclusions
+                        .iter()
+                        .map(|reason| exclusion_reason_name(*reason))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ));
+                false
+            }
+        });
+        let Some(first) = preset_models.first().cloned() else {
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "wayfinder_router_destination_ineligible",
+                format!(
+                    "routing preset '{}' has no eligible destination for this request: {}",
+                    preset_name.as_deref().unwrap_or("unknown"),
+                    reasons.join("; ")
+                ),
+                privacy_response_headers(&request_id, privacy_posture),
+            );
+        };
+        chosen = first;
+    } else if !state.dry_run() && matches!(mode, "pinned" | "slash-pinned") {
+        if let Some(model) = state.models().iter().find(|model| model.name() == chosen) {
+            let assessment = assess_model(&routing_request, model);
+            if !assessment.is_eligible() {
+                return destination_ineligible_response(
+                    &chosen,
+                    &assessment,
+                    privacy_response_headers(&request_id, privacy_posture),
+                    offline,
+                );
             }
         }
     }
@@ -2147,13 +2177,27 @@ async fn chat_completions(
     // ChatGPT subscription replies are account-scoped while the normalized
     // boundary intentionally exposes no stable account identifier suitable for
     // a cache key. Never replay or retain them across sign-in state changes.
+    let cache_partition = format!(
+        "{}:{}",
+        key_id.unwrap_or("local"),
+        privacy_posture_name(privacy_posture)
+    );
+    let cache_route = preset_name.as_deref().map_or_else(
+        || format!("{mode}:{delivery_name}"),
+        |name| format!("{ROUTE_PRESET_PREFIX}{name}"),
+    );
     let cacheable = cache_enabled
         && target.provider() != ProviderKind::CodexAppServer
         && !debug
         && is_cacheable(&request_body);
     let mut cache_state = None;
     if cacheable {
-        let key = match cache_key(target.provider_model(), &request_body) {
+        let key = match cache_key(
+            &cache_partition,
+            &cache_route,
+            target.provider_model(),
+            &request_body,
+        ) {
             Ok(key) => key,
             Err(error) => {
                 return error_response(
@@ -2272,6 +2316,13 @@ async fn chat_completions(
                     assess_model(&routing_request, model).is_eligible()
                         && (!offline || model_is_proven_local(model))
                         && precheck_ok(prompt_estimate, model.context_window())
+                        && has_eligible_deployment_target(
+                            &state,
+                            name,
+                            &routing_request,
+                            offline,
+                            prompt_estimate,
+                        )
                         && allowed_models
                             .is_none_or(|allowed| allowed.iter().any(|allowed| allowed == name))
                 })
@@ -2295,6 +2346,22 @@ async fn chat_completions(
                     &assessment,
                     routing_headers,
                     offline,
+                );
+            }
+            if !has_eligible_deployment_target(
+                &state,
+                &chosen,
+                &routing_request,
+                offline,
+                prompt_estimate,
+            ) {
+                return error_response(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "wayfinder_router_destination_ineligible",
+                    format!(
+                        "destination '{chosen}' has no eligible concrete deployment for this request"
+                    ),
+                    routing_headers,
                 );
             }
         }
@@ -2337,6 +2404,8 @@ async fn chat_completions(
             plan,
             chosen,
             offline,
+            routing_request,
+            prompt_estimate,
             request_body,
             request_id,
             messages,
@@ -2360,38 +2429,47 @@ async fn chat_completions(
             routing_headers,
         );
     };
-    let (served_by, response) =
-        match deliver_with_reliability(&state, delivery, &plan, &request_body).await {
-            Ok(delivered) => delivered,
-            Err(ReliableDeliveryFailure::Exhausted(message)) => {
-                return error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "wayfinder_router_upstream_error",
-                    message,
-                    routing_headers,
-                );
-            }
-            Err(ReliableDeliveryFailure::State(error)) => {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "wayfinder_router_state_error",
-                    error.to_string(),
-                    routing_headers,
-                );
-            }
-            Err(ReliableDeliveryFailure::Misconfigured(message)) => {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "wayfinder_router_misconfigured",
-                    message,
-                    routing_headers,
-                );
-            }
-            Err(ReliableDeliveryFailure::Fatal(error)) => {
-                let (status, kind) = fatal_delivery_status(&error);
-                return error_response(status, kind, error.to_string(), routing_headers);
-            }
-        };
+    let (served_by, response) = match deliver_with_reliability(
+        &state,
+        delivery,
+        &plan,
+        &routing_request,
+        offline,
+        prompt_estimate,
+        &request_body,
+    )
+    .await
+    {
+        Ok(delivered) => delivered,
+        Err(ReliableDeliveryFailure::Exhausted(message)) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                "wayfinder_router_upstream_error",
+                message,
+                routing_headers,
+            );
+        }
+        Err(ReliableDeliveryFailure::State(error)) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "wayfinder_router_state_error",
+                error.to_string(),
+                routing_headers,
+            );
+        }
+        Err(ReliableDeliveryFailure::Misconfigured(message)) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "wayfinder_router_misconfigured",
+                message,
+                routing_headers,
+            );
+        }
+        Err(ReliableDeliveryFailure::Fatal(error)) => {
+            let (status, kind) = fatal_delivery_status(&error);
+            return error_response(status, kind, error.to_string(), routing_headers);
+        }
+    };
     let status = response.status();
     let response_content_type = response.content_type().to_owned();
     let content_type = HeaderValue::from_str(&response_content_type)
@@ -2422,7 +2500,12 @@ async fn chat_completions(
                 .find(|model| model.name() == served_by)
             {
                 if served_target.provider() != ProviderKind::CodexAppServer {
-                    if let Ok(key) = cache_key(served_target.provider_model(), &request_body) {
+                    if let Ok(key) = cache_key(
+                        &cache_partition,
+                        &cache_route,
+                        served_target.provider_model(),
+                        &request_body,
+                    ) {
                         let _ = state.response_cache().put_at(
                             key,
                             CachedResponse {
@@ -2536,6 +2619,8 @@ struct StreamingChatInput {
     plan: Vec<String>,
     chosen: String,
     offline: bool,
+    routing_request: RoutingRequest,
+    prompt_estimate: u64,
     request_body: Value,
     request_id: String,
     messages: Value,
@@ -2555,6 +2640,8 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
         plan,
         chosen,
         offline,
+        routing_request,
+        prompt_estimate,
         request_body,
         request_id,
         messages,
@@ -2578,9 +2665,21 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
     let mut last_failure = (StatusCode::BAD_GATEWAY, "wayfinder_router_upstream_error");
     let mut established = None;
     for target_name in &plan {
-        let targets = state.deployment_candidates(target_name);
-        if targets.is_empty() {
+        let configured_targets = state.deployment_candidates(target_name);
+        if configured_targets.is_empty() {
             last_error = format!("configured delivery target '{target_name}' is missing");
+            continue;
+        }
+        let targets = eligible_deployment_targets(
+            configured_targets,
+            &routing_request,
+            offline,
+            prompt_estimate,
+        );
+        if targets.is_empty() {
+            last_error = format!(
+                "configured delivery target '{target_name}' has no eligible deployment for this request"
+            );
             continue;
         }
         let Some(delivery) = state.streaming_delivery() else {
@@ -2880,7 +2979,7 @@ async fn anthropic_messages(
                 .into_response();
         }
     };
-    let mut inner_headers = HeaderMap::new();
+    let mut inner_headers = chat_control_headers(&headers);
     if let Some(authorization) = headers.get(header::AUTHORIZATION) {
         inner_headers.insert(header::AUTHORIZATION, authorization.clone());
     }
@@ -3020,6 +3119,16 @@ async fn anthropic_messages(
         .into_response()
 }
 
+fn chat_control_headers(source: &HeaderMap) -> HeaderMap {
+    let mut forwarded = HeaderMap::new();
+    for name in CHAT_CONTROL_HEADERS {
+        if let Some(value) = source.get(name) {
+            forwarded.insert(name, value.clone());
+        }
+    }
+    forwarded
+}
+
 struct AnthropicRelay {
     upstream: axum::body::BodyDataStream,
     translator: MessagesStreamTranslator,
@@ -3050,15 +3159,30 @@ async fn deliver_with_reliability(
     state: &AppState,
     delivery: &dyn BufferedDelivery,
     plan: &[String],
+    routing_request: &RoutingRequest,
+    offline: bool,
+    prompt_estimate: u64,
     request_body: &Value,
 ) -> Result<(String, BufferedDeliveryResponse), ReliableDeliveryFailure> {
     let mut last_error = "no upstream available".to_owned();
     for target_name in plan {
-        let targets = state.deployment_candidates(target_name);
-        if targets.is_empty() {
+        let configured_targets = state.deployment_candidates(target_name);
+        if configured_targets.is_empty() {
             return Err(ReliableDeliveryFailure::Misconfigured(format!(
                 "no gateway endpoint configured for model '{target_name}'"
             )));
+        }
+        let targets = eligible_deployment_targets(
+            configured_targets,
+            routing_request,
+            offline,
+            prompt_estimate,
+        );
+        if targets.is_empty() {
+            last_error = format!(
+                "configured delivery target '{target_name}' has no eligible deployment for this request"
+            );
+            continue;
         }
         for target in targets {
             let target_id = target.delivery_id();
@@ -3262,6 +3386,39 @@ fn assess_model(request: &RoutingRequest, model: &ConfiguredModel) -> CandidateA
         .exclusions
         .retain(|reason| *reason != ExclusionReason::ContextWindowUnknown);
     assessment
+}
+
+fn eligible_deployment_targets(
+    targets: Vec<ConfiguredModel>,
+    request: &RoutingRequest,
+    offline: bool,
+    prompt_estimate: u64,
+) -> Vec<ConfiguredModel> {
+    targets
+        .into_iter()
+        .filter(|target| {
+            assess_model(request, target).is_eligible()
+                && (!offline || model_is_proven_local(target))
+                && precheck_ok(prompt_estimate, target.context_window())
+        })
+        .collect()
+}
+
+fn has_eligible_deployment_target(
+    state: &AppState,
+    alias: &str,
+    request: &RoutingRequest,
+    offline: bool,
+    prompt_estimate: u64,
+) -> bool {
+    state
+        .configured_deployment_targets(alias)
+        .into_iter()
+        .any(|target| {
+            assess_model(request, &target).is_eligible()
+                && (!offline || model_is_proven_local(&target))
+                && precheck_ok(prompt_estimate, target.context_window())
+        })
 }
 
 fn privacy_posture_name(posture: PrivacyPosture) -> &'static str {
@@ -4141,14 +4298,17 @@ mod tests {
         Budget as GatewayBudget, GatewayConfig, ProviderKind, ProviderTier, RateLimit, RoutePreset,
         VirtualKey, Workspace,
     };
-    use wayfinder_routing_core::{ClassifierModel, RoutingConfig};
+    use wayfinder_routing_core::{
+        ClassifierModel, PrivacyPosture, RoutingConfig, RoutingRequest, RoutingRequirements,
+    };
     use wayfinder_service::pricing::{SavingsLedger, UtcDate, turn_cost};
 
     use super::{
-        AppState, ConfiguredDeployment, ConfiguredModel, DataPlaneError, ROUTER_OVERLOAD_HEADER,
-        ROUTER_WORKSPACE_HEADER, RouteOn, build_data_plane_router, build_reloadable_router,
-        build_router, deliver_with_reliability, model_is_proven_local, utc_date_from_unix_days,
-        utc_today, validate_data_plane_state,
+        AppState, ConfiguredDeployment, ConfiguredModel, DataPlaneError, OFFLINE_HEADER,
+        PRIVACY_POSTURE_HEADER, ROUTER_CACHE_HEADER, ROUTER_OVERLOAD_HEADER,
+        ROUTER_PRIVACY_POSTURE_HEADER, ROUTER_ROUTE_HEADER, ROUTER_WORKSPACE_HEADER, RouteOn,
+        build_data_plane_router, build_reloadable_router, build_router, deliver_with_reliability,
+        model_is_proven_local, utc_date_from_unix_days, utc_today, validate_data_plane_state,
     };
     use crate::delivery::{
         BufferedDelivery, BufferedDeliveryResponse, DeliveryError, DeliveryFuture,
@@ -4230,6 +4390,70 @@ mod tests {
         }
     }
 
+    struct PoolBoundaryDelivery {
+        seen: SeenTargets,
+    }
+
+    impl BufferedDelivery for PoolBoundaryDelivery {
+        fn send<'a>(&'a self, model: &'a ConfiguredModel, _body: Value) -> DeliveryFuture<'a> {
+            Box::pin(async move {
+                self.seen
+                    .lock()
+                    .map_err(|_| {
+                        DeliveryError::Provider(
+                            wayfinder_providers::openai_compat::ProviderError::Transport,
+                        )
+                    })?
+                    .push(model.provider_model().to_owned());
+                if model.provider_model() == "local-default" {
+                    return Err(DeliveryError::Provider(
+                        wayfinder_providers::openai_compat::ProviderError::Transport,
+                    ));
+                }
+                Ok(BufferedDeliveryResponse::new(
+                    StatusCode::OK,
+                    "application/json",
+                    Bytes::from_static(EXACT_USAGE_BODY),
+                ))
+            })
+        }
+    }
+
+    struct PoolBoundaryStreamingDelivery {
+        seen: SeenTargets,
+    }
+
+    impl StreamingDelivery for PoolBoundaryStreamingDelivery {
+        fn send_stream<'a>(
+            &'a self,
+            model: &'a ConfiguredModel,
+            _body: Value,
+        ) -> StreamingDeliveryFuture<'a> {
+            Box::pin(async move {
+                self.seen
+                    .lock()
+                    .map_err(|_| {
+                        DeliveryError::Provider(
+                            wayfinder_providers::openai_compat::ProviderError::Transport,
+                        )
+                    })?
+                    .push(model.provider_model().to_owned());
+                if model.provider_model() == "local-default" {
+                    return Err(DeliveryError::Provider(
+                        wayfinder_providers::openai_compat::ProviderError::Transport,
+                    ));
+                }
+                Ok(StreamingDeliveryResponse::new(
+                    StatusCode::OK,
+                    "text/event-stream",
+                    Box::pin(futures_util::stream::iter([Ok(Bytes::from_static(
+                        b"data: [DONE]\n\n",
+                    ))])),
+                ))
+            })
+        }
+    }
+
     #[tokio::test]
     async fn buffered_pool_delivery_uses_member_but_returns_public_alias() -> TestResult {
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -4257,6 +4481,15 @@ mod tests {
             &state,
             &delivery,
             &["cloud".to_owned()],
+            &RoutingRequest {
+                schema_version: wayfinder_routing_core::RUNTIME_CONTRACT_VERSION,
+                request_id: "test-request".to_owned(),
+                prompt: "hello".to_owned(),
+                privacy_posture: PrivacyPosture::HostedAllowed,
+                requirements: RoutingRequirements::default(),
+            },
+            false,
+            1,
             &json!({"model": "cloud"}),
         )
         .await
@@ -4267,6 +4500,103 @@ mod tests {
                 .map_err(|_| std::io::Error::other("seen lock poisoned"))?[0]
                 .0,
             "gpt-primary"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn buffered_pool_never_crosses_the_requested_privacy_boundary() -> TestResult {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let model = ConfiguredModel::new(
+            "local",
+            "http://127.0.0.1:11434/v1",
+            "local-default",
+            None,
+            true,
+        )
+        .with_deployments(vec![ConfiguredDeployment::new(
+            "hosted",
+            "https://hosted.example/v1",
+            "hosted-child",
+            None,
+            true,
+            1,
+        )]);
+        let state = AppState::new(RoutingConfig::binary(0.5), vec![model], false, "test")
+            .with_gateway_reliability(&GatewayConfig {
+                retries: 0,
+                ..GatewayConfig::default()
+            })?
+            .with_delivery(Arc::new(PoolBoundaryDelivery {
+                seen: Arc::clone(&seen),
+            }));
+
+        let response = post_json(
+            &state,
+            "/v1/chat/completions",
+            &json!({
+                "model": "local",
+                "messages": [{"role": "user", "content": "keep this here"}]
+            }),
+            &[(PRIVACY_POSTURE_HEADER, "on-device-only")],
+        )
+        .await?;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            seen.lock()
+                .map_err(|_| std::io::Error::other("seen lock poisoned"))?
+                .as_slice(),
+            ["local-default"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streaming_pool_never_crosses_the_offline_boundary() -> TestResult {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let model = ConfiguredModel::new(
+            "local",
+            "http://127.0.0.1:11434/v1",
+            "local-default",
+            None,
+            true,
+        )
+        .with_deployments(vec![ConfiguredDeployment::new(
+            "hosted",
+            "https://hosted.example/v1",
+            "hosted-child",
+            None,
+            true,
+            1,
+        )]);
+        let state = AppState::new(RoutingConfig::binary(0.5), vec![model], false, "test")
+            .with_gateway_reliability(&GatewayConfig {
+                retries: 0,
+                ..GatewayConfig::default()
+            })?
+            .with_streaming_delivery(Arc::new(PoolBoundaryStreamingDelivery {
+                seen: Arc::clone(&seen),
+            }));
+
+        let response = post_json(
+            &state,
+            "/v1/chat/completions",
+            &json!({
+                "model": "local",
+                "stream": true,
+                "messages": [{"role": "user", "content": "stay offline"}]
+            }),
+            &[(OFFLINE_HEADER, "true")],
+        )
+        .await?;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            seen.lock()
+                .map_err(|_| std::io::Error::other("seen lock poisoned"))?
+                .as_slice(),
+            ["local-default"]
         );
         Ok(())
     }
@@ -5542,6 +5872,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anthropic_adapter_preserves_privacy_and_offline_controls() -> TestResult {
+        for (name, value, expected_status) in [
+            (
+                PRIVACY_POSTURE_HEADER,
+                "on-device-only",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (OFFLINE_HEADER, "true", StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let state = budget_live_state(&GatewayConfig::default(), false, Arc::clone(&calls))?;
+            let response = post_json(
+                &state,
+                "/v1/messages",
+                &json!({
+                    "model": "cloud",
+                    "max_tokens": 32,
+                    "messages": [{"role": "user", "content": "do not send this remotely"}]
+                }),
+                &[(name, value)],
+            )
+            .await?;
+
+            assert_eq!(response.status(), expected_status);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            if name == PRIVACY_POSTURE_HEADER {
+                assert_eq!(
+                    response
+                        .headers()
+                        .get(ROUTER_PRIVACY_POSTURE_HEADER)
+                        .and_then(|header| header.to_str().ok()),
+                    Some("on-device-only")
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn recent_route_is_shared_bounded_and_prompt_free() -> TestResult {
         let state = configured_state();
         let secret_prompt = "a secret prompt body that must never enter recent metadata";
@@ -5952,6 +6321,142 @@ mod tests {
                 .as_slice(),
             ["cloud", "cloud-backup"]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn named_route_intersects_the_virtual_key_allowlist() -> TestResult {
+        let mut config = GatewayConfig::default();
+        let mut key = access_key("wf-secret");
+        key.models = vec!["local".to_owned()];
+        config.keys.insert("team-a".to_owned(), key);
+        let policy = AccessPolicy::from_gateway_config_with_clock(&config, || 1_000.0)?;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let state = AppState::new(
+            RoutingConfig::binary(0.5),
+            vec![
+                ConfiguredModel::new(
+                    "local",
+                    "http://127.0.0.1:11434/v1",
+                    "local-upstream",
+                    None,
+                    true,
+                ),
+                ConfiguredModel::new(
+                    "cloud",
+                    "https://cloud.example/v1",
+                    "cloud-upstream",
+                    None,
+                    true,
+                ),
+            ],
+            false,
+            "test",
+        )
+        .with_access_policy(policy)
+        .with_route_presets(IndexMap::from([(
+            "coding".to_owned(),
+            RoutePreset {
+                models: vec!["cloud".to_owned(), "local".to_owned()],
+            },
+        )]))
+        .with_delivery(Arc::new(FakeDelivery {
+            seen: Arc::clone(&seen),
+            fail: false,
+        }));
+
+        let response = post_json(
+            &state,
+            "/v1/chat/completions",
+            &json!({
+                "model": "@route/coding",
+                "messages": [{"role": "user", "content": "use my allowed route"}]
+            }),
+            &[("authorization", "Bearer wf-secret")],
+        )
+        .await?;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            response
+                .headers()
+                .get(ROUTER_ROUTE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("@route/coding")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-wayfinder-router-served-by")
+                .and_then(|value| value.to_str().ok()),
+            Some("local")
+        );
+        assert_eq!(
+            seen.lock()
+                .map_err(|_| std::io::Error::other("seen lock poisoned"))?[0]
+                .0,
+            "local-upstream"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn named_route_with_empty_allowlist_intersection_fails_closed() -> TestResult {
+        let mut config = GatewayConfig::default();
+        let mut key = access_key("wf-secret");
+        key.models = vec!["local".to_owned()];
+        config.keys.insert("team-a".to_owned(), key);
+        let policy = AccessPolicy::from_gateway_config_with_clock(&config, || 1_000.0)?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = AppState::new(
+            RoutingConfig::binary(0.5),
+            vec![
+                ConfiguredModel::new(
+                    "local",
+                    "http://127.0.0.1:11434/v1",
+                    "local-upstream",
+                    None,
+                    true,
+                ),
+                ConfiguredModel::new(
+                    "cloud",
+                    "https://cloud.example/v1",
+                    "cloud-upstream",
+                    None,
+                    true,
+                ),
+            ],
+            false,
+            "test",
+        )
+        .with_access_policy(policy)
+        .with_route_presets(IndexMap::from([(
+            "cloud-only".to_owned(),
+            RoutePreset {
+                models: vec!["cloud".to_owned()],
+            },
+        )]))
+        .with_delivery(Arc::new(CountingUsageDelivery {
+            calls: Arc::clone(&calls),
+        }));
+
+        let response = post_json(
+            &state,
+            "/v1/chat/completions",
+            &json!({
+                "model": "@route/cloud-only",
+                "messages": [{"role": "user", "content": "do not escape this preset"}]
+            }),
+            &[("authorization", "Bearer wf-secret")],
+        )
+        .await?;
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(response).await?["error"]["type"],
+            "wayfinder_router_destination_ineligible"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
         Ok(())
     }
 
@@ -6545,6 +7050,151 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_cache_never_replays_across_virtual_keys() -> TestResult {
+        let mut config = GatewayConfig::default();
+        for (id, secret) in [("tenant-a", "secret-a"), ("tenant-b", "secret-b")] {
+            let mut key = access_key(secret);
+            key.models = vec!["cloud".to_owned()];
+            config.keys.insert(id.to_owned(), key);
+        }
+        let policy = AccessPolicy::from_gateway_config_with_clock(&config, || 1_000.0)?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = cached_live_state(Arc::clone(&calls))?.with_access_policy(policy);
+        let payload = json!({
+            "model": "cloud",
+            "messages": [{"role": "user", "content": "same deterministic request"}]
+        });
+
+        let first = post_json(
+            &state,
+            "/v1/chat/completions",
+            &payload,
+            &[("authorization", "Bearer secret-a")],
+        )
+        .await?;
+        assert_eq!(
+            first
+                .headers()
+                .get(ROUTER_CACHE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("miss")
+        );
+
+        let second = post_json(
+            &state,
+            "/v1/chat/completions",
+            &payload,
+            &[("authorization", "Bearer secret-b")],
+        )
+        .await?;
+        assert_eq!(
+            second
+                .headers()
+                .get(ROUTER_CACHE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("miss")
+        );
+
+        let replay = post_json(
+            &state,
+            "/v1/chat/completions",
+            &payload,
+            &[("authorization", "Bearer secret-a")],
+        )
+        .await?;
+        assert_eq!(
+            replay
+                .headers()
+                .get(ROUTER_CACHE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("hit")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_cache_never_replays_across_privacy_postures_or_routes() -> TestResult {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = cached_live_state(Arc::clone(&calls))?.with_route_presets(IndexMap::from([(
+            "local-only".to_owned(),
+            RoutePreset {
+                models: vec!["local".to_owned()],
+            },
+        )]));
+        let direct = json!({
+            "model": "local",
+            "messages": [{"role": "user", "content": "same deterministic request"}]
+        });
+
+        let hosted = post_json(
+            &state,
+            "/v1/chat/completions",
+            &direct,
+            &[(PRIVACY_POSTURE_HEADER, "hosted-allowed")],
+        )
+        .await?;
+        assert_eq!(
+            hosted
+                .headers()
+                .get(ROUTER_CACHE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("miss")
+        );
+
+        let on_device = post_json(
+            &state,
+            "/v1/chat/completions",
+            &direct,
+            &[(PRIVACY_POSTURE_HEADER, "on-device-only")],
+        )
+        .await?;
+        assert_eq!(
+            on_device
+                .headers()
+                .get(ROUTER_CACHE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("miss")
+        );
+
+        let preset = json!({
+            "model": "@route/local-only",
+            "messages": [{"role": "user", "content": "same deterministic request"}]
+        });
+        let preset_miss = post_json(
+            &state,
+            "/v1/chat/completions",
+            &preset,
+            &[(PRIVACY_POSTURE_HEADER, "on-device-only")],
+        )
+        .await?;
+        assert_eq!(
+            preset_miss
+                .headers()
+                .get(ROUTER_CACHE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("miss")
+        );
+
+        let preset_hit = post_json(
+            &state,
+            "/v1/chat/completions",
+            &preset,
+            &[(PRIVACY_POSTURE_HEADER, "on-device-only")],
+        )
+        .await?;
+        assert_eq!(
+            preset_hit
+                .headers()
+                .get(ROUTER_CACHE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("hit")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn codex_account_routes_never_replay_or_store_exact_response_cache_entries() -> TestResult
     {
         let payload = json!({
@@ -6581,7 +7231,7 @@ mod tests {
             )?;
 
             state.response_cache().put_at(
-                cache_key("shared-provider-model", &payload)?,
+                cache_key("local", "chatgpt", "shared-provider-model", &payload)?,
                 CachedResponse {
                     status: StatusCode::OK.as_u16(),
                     content_type: "application/json".to_owned(),
