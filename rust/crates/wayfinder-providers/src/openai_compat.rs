@@ -11,7 +11,7 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use futures_util::{Stream, StreamExt};
 use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
-use http::{HeaderValue, StatusCode};
+use http::{HeaderMap, HeaderValue, StatusCode};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Url};
 use serde_json::Value;
@@ -329,11 +329,33 @@ impl OpenAiProviderClient {
         body: &Value,
         credential: Option<&SecretValue>,
     ) -> Result<BufferedProviderResponse, ProviderError> {
+        self.send_buffered_with_headers(endpoint, body, credential, None)
+            .await
+    }
+
+    /// POST a buffered JSON request with bounded W3C propagation headers.
+    ///
+    /// Only `traceparent` and `tracestate` are copied from `headers`; callers
+    /// cannot override authorization or content negotiation through this seam.
+    pub async fn send_buffered_with_headers(
+        &self,
+        endpoint: &OpenAiEndpoint,
+        body: &Value,
+        credential: Option<&SecretValue>,
+        headers: Option<&HeaderMap>,
+    ) -> Result<BufferedProviderResponse, ProviderError> {
         let mut request = self
             .client
             .post(endpoint.chat_completions_url().clone())
             .header(ACCEPT, "application/json")
             .json(body);
+        if let Some(headers) = headers {
+            for name in ["traceparent", "tracestate"] {
+                if let Some(value) = headers.get(name) {
+                    request = request.header(name, value.clone());
+                }
+            }
+        }
         if let Some(credential) = credential {
             request = request.header(AUTHORIZATION, credential.bearer_header()?);
         }
@@ -389,11 +411,30 @@ impl OpenAiProviderClient {
         body: &Value,
         credential: Option<&SecretValue>,
     ) -> Result<StreamingProviderResponse, ProviderError> {
+        self.send_stream_with_headers(endpoint, body, credential, None)
+            .await
+    }
+
+    /// POST a streaming JSON request with bounded W3C propagation headers.
+    pub async fn send_stream_with_headers(
+        &self,
+        endpoint: &OpenAiEndpoint,
+        body: &Value,
+        credential: Option<&SecretValue>,
+        headers: Option<&HeaderMap>,
+    ) -> Result<StreamingProviderResponse, ProviderError> {
         let mut request = self
             .client
             .post(endpoint.chat_completions_url().clone())
             .header(ACCEPT, "text/event-stream")
             .json(body);
+        if let Some(headers) = headers {
+            for name in ["traceparent", "tracestate"] {
+                if let Some(value) = headers.get(name) {
+                    request = request.header(name, value.clone());
+                }
+            }
+        }
         if let Some(credential) = credential {
             request = request.header(AUTHORIZATION, credential.bearer_header()?);
         }
@@ -578,6 +619,36 @@ mod tests {
         assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"));
         assert!(request.contains("authorization: Bearer provider-test-value\r\n"));
         assert!(request.contains("{\"model\":\"small\"}"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn propagation_headers_are_bounded_to_w3c_context() -> TestResult {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_vec();
+        let (base_url, task) = spawn_one_response(response)?;
+        let endpoint = OpenAiEndpoint::parse(&base_url)?;
+        let client = OpenAiProviderClient::new(test_config(1_024))?;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            HeaderValue::from_static("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+        );
+        headers.insert("tracestate", HeaderValue::from_static("vendor=value"));
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer must-not-forward"),
+        );
+        let _ = client
+            .send_buffered_with_headers(&endpoint, &json!({}), None, Some(&headers))
+            .await?;
+        let request = String::from_utf8(join_request(task)?)?;
+        assert!(
+            request.contains(
+                "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\n"
+            )
+        );
+        assert!(request.contains("tracestate: vendor=value\r\n"));
+        assert!(!request.contains("must-not-forward"));
         Ok(())
     }
 

@@ -7,6 +7,10 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+otel = ["wayfinder-gateway/otel"]
+
 [[bin]]
 name = "wayfinder-router"
 path = "src/main.rs"

@@ -321,6 +321,13 @@ pub async fn run_serve_process(
             return EXIT_USAGE;
         }
     };
+    let _telemetry = match wayfinder_gateway::otel::init_from_env() {
+        Ok(telemetry) => telemetry,
+        Err(message) => {
+            write_error(stderr, &format!("wayfinder-router: {message}"));
+            return EXIT_CONFIG;
+        }
+    };
     let mut startup_warnings = Vec::new();
     let state = match build_serve_state(&options, &mut startup_warnings).await {
         Ok(state) => state,

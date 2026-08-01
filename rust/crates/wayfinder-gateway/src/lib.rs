@@ -17,6 +17,7 @@ pub mod decision_policy;
 pub mod delivery;
 pub mod metrics;
 pub mod operator_auth;
+pub mod otel;
 pub mod rate_limit;
 pub mod recent;
 pub mod reliability;
@@ -1072,6 +1073,7 @@ pub fn build_router(state: AppState) -> Router {
     application
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
+        .layer(middleware::from_fn(otel::request_middleware))
         .layer(DefaultBodyLimit::max(request_body_limit))
         .with_state(state)
 }
@@ -1114,6 +1116,7 @@ pub fn build_data_plane_router(state: AppState) -> Result<Router, DataPlaneError
         .route("/messages", post(anthropic_messages))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
+        .layer(middleware::from_fn(otel::request_middleware))
         .layer(DefaultBodyLimit::max(request_body_limit))
         .with_state(state))
 }
@@ -1660,6 +1663,10 @@ struct CostResponse {
     word_count: u64,
 }
 
+#[cfg_attr(
+    feature = "otel",
+    tracing::instrument(skip_all, name = "wayfinder.chat")
+)]
 async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1739,7 +1746,8 @@ async fn chat_completions(
         requirements,
     };
     let decision_started = Instant::now();
-    let decision = match score_complexity(&prompt, &routing) {
+    let decision_span = tracing::info_span!("wayfinder.decision");
+    let decision = match decision_span.in_scope(|| score_complexity(&prompt, &routing)) {
         Ok(decision) => decision,
         Err(error) => {
             return error_response(
@@ -2536,6 +2544,10 @@ struct StreamingChatInput {
     admission_permit: ObservedAdmissionPermit,
 }
 
+#[cfg_attr(
+    feature = "otel",
+    tracing::instrument(skip_all, name = "wayfinder.delivery.stream")
+)]
 async fn streaming_chat_response(input: StreamingChatInput) -> Response {
     let StreamingChatInput {
         state,
@@ -3030,6 +3042,10 @@ enum ReliableDeliveryFailure {
     State(ReliabilityError),
 }
 
+#[cfg_attr(
+    feature = "otel",
+    tracing::instrument(skip_all, name = "wayfinder.delivery")
+)]
 async fn deliver_with_reliability(
     state: &AppState,
     delivery: &dyn BufferedDelivery,
