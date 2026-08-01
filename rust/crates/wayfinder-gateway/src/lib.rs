@@ -106,6 +106,7 @@ const ROUTER_MODEL_HEADER: &str = "x-wayfinder-router-model";
 const ROUTER_SCORE_HEADER: &str = "x-wayfinder-router-score";
 const ROUTER_MODE_HEADER: &str = "x-wayfinder-router-mode";
 const ROUTER_REQUEST_ID_HEADER: &str = "x-wayfinder-router-request-id";
+const ROUTER_WORKSPACE_HEADER: &str = "x-wayfinder-router-workspace";
 const ROUTER_OFFLINE_HEADER: &str = "x-wayfinder-router-offline";
 const ROUTER_DECISION_ONLY_HEADER: &str = "x-wayfinder-router-decision-only";
 const ROUTER_RATE_LIMIT_HEADER: &str = "x-wayfinder-router-rate-limit";
@@ -1614,6 +1615,20 @@ async fn chat_completions(
         routing_headers.insert(ROUTER_BUDGET_HEADER, HeaderValue::from_static(budget_state));
     }
     if let (Some(policy), Some(grant)) = (state.access_policy(), access_grant) {
+        if let Some(workspace) = policy.workspace_id(grant) {
+            let value = match HeaderValue::from_str(workspace) {
+                Ok(value) => value,
+                Err(_) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "wayfinder_router_misconfigured",
+                        "workspace id cannot be represented as a response header".to_owned(),
+                        request_id_headers(&request_id),
+                    );
+                }
+            };
+            routing_headers.insert(ROUTER_WORKSPACE_HEADER, value);
+        }
         match policy.tightest_snapshot(grant) {
             Ok(Some(snapshot)) => {
                 if let Err(message) = insert_rate_snapshot_headers(&mut routing_headers, snapshot) {
@@ -3401,14 +3416,15 @@ mod tests {
     use tower::ServiceExt;
     use wayfinder_config::gateway::{
         Budget as GatewayBudget, GatewayConfig, ProviderKind, ProviderTier, RateLimit, VirtualKey,
+        Workspace,
     };
     use wayfinder_routing_core::{ClassifierModel, RoutingConfig};
     use wayfinder_service::pricing::{SavingsLedger, UtcDate, turn_cost};
 
     use super::{
-        AppState, ConfiguredModel, DataPlaneError, ROUTER_OVERLOAD_HEADER, RouteOn,
-        build_data_plane_router, build_reloadable_router, build_router, model_is_proven_local,
-        utc_date_from_unix_days, utc_today, validate_data_plane_state,
+        AppState, ConfiguredModel, DataPlaneError, ROUTER_OVERLOAD_HEADER, ROUTER_WORKSPACE_HEADER,
+        RouteOn, build_data_plane_router, build_reloadable_router, build_router,
+        model_is_proven_local, utc_date_from_unix_days, utc_today, validate_data_plane_state,
     };
     use crate::delivery::{
         BufferedDelivery, BufferedDeliveryResponse, DeliveryError, DeliveryFuture,
@@ -3719,6 +3735,7 @@ mod tests {
             VirtualKey {
                 hash: auth::hash_key("wf-secret"),
                 tags: vec!["engineering".to_owned()],
+                workspace: None,
                 budget: None,
                 rate_limit: None,
                 models: vec!["local".to_owned()],
@@ -4071,7 +4088,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn twenty_concurrent_users_reach_delivery_without_router_serialization() -> TestResult {
+    async fn twenty_workspace_users_send_multi_turn_chats_without_router_serialization()
+    -> TestResult {
         const USERS: usize = 20;
         let barrier = Arc::new(Barrier::new(USERS + 1));
         let current = Arc::new(AtomicUsize::new(0));
@@ -4082,16 +4100,30 @@ mod tests {
             peak: Arc::clone(&peak),
         });
         let mut config = GatewayConfig::default();
-        config.keys.insert(
-            "team-a".to_owned(),
-            VirtualKey {
-                hash: auth::hash_key("wf-throughput-test"),
-                tags: vec!["load-test".to_owned()],
-                budget: None,
-                rate_limit: None,
+        config.workspaces.insert(
+            "production".to_owned(),
+            Workspace {
                 models: vec!["local".to_owned()],
+                rate_limit: Some(RateLimit {
+                    rpm: Some(100),
+                    tpm: None,
+                    window: 60.0,
+                }),
             },
         );
+        for user in 0..USERS {
+            config.keys.insert(
+                format!("user-{user}"),
+                VirtualKey {
+                    hash: auth::hash_key(&format!("wf-throughput-{user}")),
+                    tags: vec!["load-test".to_owned()],
+                    workspace: Some("production".to_owned()),
+                    budget: None,
+                    rate_limit: None,
+                    models: Vec::new(),
+                },
+            );
+        }
         let state = AppState::new(
             RoutingConfig::binary(0.5),
             vec![ConfiguredModel::new(
@@ -4126,10 +4158,14 @@ mod tests {
             tasks.push(tokio::spawn(async move {
                 client
                     .post(url)
-                    .bearer_auth("wf-throughput-test")
+                    .bearer_auth(format!("wf-throughput-{user}"))
                     .json(&json!({
                         "model": "local",
-                        "messages": [{"role": "user", "content": format!("user {user}")}]
+                        "messages": [
+                            {"role": "user", "content": format!("user {user} first turn")},
+                            {"role": "assistant", "content": "first reply"},
+                            {"role": "user", "content": "follow up"}
+                        ]
                     }))
                     .send()
                     .await
@@ -6961,6 +6997,7 @@ mod tests {
         VirtualKey {
             hash: auth::hash_key(secret),
             tags: Vec::new(),
+            workspace: None,
             budget: None,
             rate_limit: None,
             models: Vec::new(),
@@ -7112,6 +7149,91 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("tpm")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_scopes_a_multi_turn_request_without_storing_the_conversation() -> TestResult
+    {
+        let mut config = GatewayConfig::default();
+        config.workspaces.insert(
+            "mobile".to_owned(),
+            Workspace {
+                models: vec!["local".to_owned()],
+                rate_limit: None,
+            },
+        );
+        let mut key = access_key("mobile-secret");
+        key.workspace = Some("mobile".to_owned());
+        config.keys.insert("alice".to_owned(), key);
+        let policy = AccessPolicy::from_gateway_config_with_clock(&config, || 1_000.0)?;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let state = AppState::new(
+            RoutingConfig::binary(0.2),
+            vec![
+                ConfiguredModel::new(
+                    "local",
+                    "http://127.0.0.1:11434/v1",
+                    "qwen-upstream",
+                    None,
+                    true,
+                ),
+                ConfiguredModel::new(
+                    "cloud",
+                    "https://cloud.example/v1",
+                    "gpt-upstream",
+                    None,
+                    true,
+                ),
+            ],
+            false,
+            "test",
+        )
+        .with_sticky(true, 0)
+        .with_access_policy(policy)
+        .with_delivery(Arc::new(FakeDelivery {
+            seen: Arc::clone(&seen),
+            fail: false,
+        }));
+        let hard_turn = (0..450).map(|_| "word").collect::<Vec<_>>().join(" ");
+        let payload = json!({
+            "model": "auto",
+            "messages": [
+                {"role": "user", "content": hard_turn},
+                {"role": "assistant", "content": "Let us work through it."},
+                {"role": "user", "content": "Now summarize that in one sentence."}
+            ]
+        });
+        let headers = [("authorization", "Bearer mobile-secret")];
+
+        let response = post_json(&state, "/v1/chat/completions", &payload, &headers).await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            response
+                .headers()
+                .get(ROUTER_WORKSPACE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("mobile")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-wayfinder-router-model")
+                .and_then(|value| value.to_str().ok()),
+            Some("local")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-wayfinder-router-mode")
+                .and_then(|value| value.to_str().ok()),
+            Some("key-scoped")
+        );
+        let seen = seen
+            .lock()
+            .map_err(|_| std::io::Error::other("delivery lock poisoned"))?;
+        assert_eq!(seen[0].0, "qwen-upstream");
+        assert_eq!(seen[0].1["messages"], payload["messages"]);
         Ok(())
     }
 

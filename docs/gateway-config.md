@@ -110,6 +110,13 @@ verification. See
 | setting | effect |
 | --- | --- |
 | `[gateway.keys.<id>] hash` / `tags` / `models` (+ nested `budget` / `rate_limit`) | virtual API keys: when any is set, inference requires a valid `Authorization: Bearer` token (else `401`). Mint with `wayfinder-router keys new --id <id>`; the plaintext is printed once and only the SHA-256 hash belongs in config. Spend & **savings** are attributed per key (`by_key` in `/v1/savings`, `wayfinder_router_key_requests_total`); a key can carry its own budget/rate-limit (strictest wins) and a `models` allowlist (clamps to the nearest allowed tier) (WF-ADR-0035) |
+| `[gateway.workspaces.<id>] models` (+ nested `rate_limit`) / `[gateway.keys.<id>] workspace` | group multiple keys under one model policy and shared process-local RPM/TPM envelope. A key inherits the workspace model list and may only narrow it. Successful inference returns `x-wayfinder-router-workspace`; discovery uses the same effective list (WF-ADR-0052) |
+
+Names under `[gateway.models.<name>]` are public Wayfinder model aliases. The
+alias is what clients discover and request; `model = "..."` is the provider's
+upstream identifier, and `fallbacks` gives the alias an ordered same-tier
+delivery ladder. Multi-turn chats remain stateless: clients resend their full
+transcript, while `route_on` and optional `sticky` decide how it is routed.
 
 For a non-loopback listener, follow the [managed gateway deployment](managed-gateway-deployment.md)
 contract. The local surface refuses external binds; the managed surface omits

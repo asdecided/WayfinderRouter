@@ -39,6 +39,13 @@ requests reach delivery without router serialization. These are single-process
 limits; shared admission and accounting remain prerequisites for a truthful
 multi-replica claim.
 
+WF-ADR-0052 adds bounded workspace policy above virtual keys: shared
+process-local RPM/TPM, inherited model allowlists, stable public model aliases,
+and explicit workspace response attribution. It also fixes the enterprise
+multi-turn contract as stateless transcript forwarding plus deterministic
+route/latch evaluation. This is useful single-process isolation, not a
+substitute for Initiative 4's Redis-backed fleet consistency.
+
 ## Context
 
 Every conversation about adopting a router — any router — ends on the same question: **"will
