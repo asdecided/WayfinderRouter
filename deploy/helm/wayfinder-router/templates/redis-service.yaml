@@ -1,0 +1,19 @@
+{{- if .Values.redis.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "wayfinder-router.redisName" . }}
+  labels:
+    {{- include "wayfinder-router.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  clusterIP: None
+  ports:
+    - name: redis
+      port: {{ .Values.redis.port }}
+      targetPort: redis
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: {{ include "wayfinder-router.name" . }}-redis
+    app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}

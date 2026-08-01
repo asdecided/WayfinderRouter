@@ -1,0 +1,13 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "wayfinder-router.fullname" . }}
+  labels:
+    {{- include "wayfinder-router.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "wayfinder-router.selectorLabels" . | nindent 6 }}
+{{- end }}

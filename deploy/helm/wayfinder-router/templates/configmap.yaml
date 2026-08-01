@@ -1,0 +1,14 @@
+{{- if and .Values.config.existingSecret .Values.config.existingConfigMap }}
+{{- fail "config.existingSecret and config.existingConfigMap are mutually exclusive" }}
+{{- end }}
+{{- if and (not .Values.config.existingSecret) (not .Values.config.existingConfigMap) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "wayfinder-router.fullname" . }}-config
+  labels:
+    {{- include "wayfinder-router.labels" . | nindent 4 }}
+data:
+  wayfinder-router.toml: |
+    {{- tpl .Values.config.inline . | nindent 4 }}
+{{- end }}
