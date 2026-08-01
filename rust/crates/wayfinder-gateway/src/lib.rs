@@ -648,9 +648,16 @@ impl AppState {
         let policy = AccessPolicy::from_gateway_config_with_backend(
             config,
             move || started.elapsed().as_secs_f64(),
-            backend,
+            Arc::clone(&backend),
         )?;
-        Ok(self.with_access_policy(policy))
+        let mut state = self.with_access_policy(policy);
+        if config.state.backend == "redis" {
+            state = state.with_audit_log(audit::AuditLog::from_shared_backend(
+                backend,
+                config.state.namespace.clone(),
+            ));
+        }
+        Ok(state)
     }
 
     /// Attach the separately authenticated operator surface when configured.

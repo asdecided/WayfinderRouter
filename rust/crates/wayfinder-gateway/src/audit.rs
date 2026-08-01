@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -16,6 +17,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use tokio::runtime::Handle;
+
+use crate::state::StateBackend;
 
 const MAX_ACTOR_BYTES: usize = 128;
 const MAX_ACTION_BYTES: usize = 96;
@@ -36,6 +40,9 @@ pub enum AuditError {
     /// The event could not be encoded as JSON.
     #[error("audit event serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
+    /// A shared audit event was requested outside an async runtime.
+    #[error("shared audit sink requires an async runtime")]
+    RuntimeUnavailable,
 }
 
 /// One prompt-free operator event.
@@ -58,9 +65,20 @@ pub struct AuditEvent {
 }
 
 /// A cheap clone of an optional audit destination.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct AuditLog {
-    sink: Option<Arc<FileAuditSink>>,
+    local: Option<Arc<FileAuditSink>>,
+    shared: Option<SharedAuditSink>,
+}
+
+impl fmt::Debug for AuditLog {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuditLog")
+            .field("path", &self.path())
+            .field("shared", &self.shared.is_some())
+            .finish()
+    }
 }
 
 impl AuditLog {
@@ -68,7 +86,10 @@ impl AuditLog {
     /// opt into an operator audit path.
     #[must_use]
     pub const fn disabled() -> Self {
-        Self { sink: None }
+        Self {
+            local: None,
+            shared: None,
+        }
     }
 
     /// Open an append-only JSONL file, creating its parent directory when it
@@ -83,11 +104,27 @@ impl AuditLog {
         }
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
-            sink: Some(Arc::new(FileAuditSink {
+            local: Some(Arc::new(FileAuditSink {
                 path,
                 file: Mutex::new(file),
             })),
+            shared: None,
         })
+    }
+
+    /// Construct a shared Redis-backed audit destination.
+    #[must_use]
+    pub fn from_shared_backend(
+        backend: Arc<dyn StateBackend>,
+        namespace: impl Into<Arc<str>>,
+    ) -> Self {
+        Self {
+            local: None,
+            shared: Some(SharedAuditSink {
+                backend,
+                key: namespace.into(),
+            }),
+        }
     }
 
     /// Append one bounded event. Disabled logs intentionally succeed so
@@ -99,21 +136,29 @@ impl AuditLog {
         before: Option<Value>,
         after: Option<Value>,
     ) -> Result<(), AuditError> {
-        let Some(sink) = &self.sink else {
+        if self.local.is_none() && self.shared.is_none() {
             return Ok(());
-        };
-        sink.append(AuditEvent::new(
-            actor.as_ref(),
-            action.as_ref(),
-            before,
-            after,
-        )?)
+        }
+        let event = AuditEvent::new(actor.as_ref(), action.as_ref(), before, after)?;
+        if let Some(sink) = &self.local {
+            sink.append(event.clone())?;
+        }
+        if let Some(shared) = &self.shared {
+            let encoded = serde_json::to_string(&event)?;
+            let backend = Arc::clone(&shared.backend);
+            let key = Arc::clone(&shared.key);
+            let handle = Handle::try_current().map_err(|_| AuditError::RuntimeUnavailable)?;
+            handle.spawn(async move {
+                let _ = backend.append_audit(&key, &encoded).await;
+            });
+        }
+        Ok(())
     }
 
     /// Path of the local file, when enabled, for diagnostics and tests.
     #[must_use]
     pub fn path(&self) -> Option<&Path> {
-        self.sink.as_deref().map(|sink| sink.path.as_path())
+        self.local.as_deref().map(|sink| sink.path.as_path())
     }
 }
 
@@ -148,6 +193,12 @@ impl AuditEvent {
 struct FileAuditSink {
     path: PathBuf,
     file: Mutex<File>,
+}
+
+#[derive(Clone)]
+struct SharedAuditSink {
+    backend: Arc<dyn StateBackend>,
+    key: Arc<str>,
 }
 
 impl FileAuditSink {
