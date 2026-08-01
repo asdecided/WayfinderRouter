@@ -84,6 +84,13 @@ pub trait StateBackend: Send + Sync {
         now_seconds: f64,
     ) -> StateFuture<'a, Option<RateSnapshot>>;
 
+    /// Append one prompt-free operator audit event when the backend supports
+    /// shared event storage. The memory backend deliberately returns an
+    /// unavailable result so callers can retain their local JSONL sink.
+    fn append_audit<'a>(&'a self, _key: &'a str, _event: &'a str) -> StateFuture<'a, ()> {
+        Box::pin(async { Err(StateBackendError::Unavailable) })
+    }
+
     /// Whether the backend has recently failed.
     fn degraded(&self) -> bool;
 }
@@ -277,6 +284,10 @@ impl RedisStateBackend {
         format!("{}:ratelimit:{key}", self.namespace)
     }
 
+    fn audit_key(&self, key: &str) -> String {
+        format!("{}:audit:{key}", self.namespace)
+    }
+
     fn mark<T>(&self, result: Result<T, StateBackendError>) -> Result<T, StateBackendError> {
         match result {
             Ok(value) => {
@@ -374,6 +385,22 @@ impl StateBackend for RedisStateBackend {
                         })
                     })
                     .ok_or(StateBackendError::Unavailable),
+            )
+        })
+    }
+
+    fn append_audit<'a>(&'a self, key: &'a str, event: &'a str) -> StateFuture<'a, ()> {
+        Box::pin(async move {
+            let mut connection = self.connection.clone();
+            let result: Result<i64, _> = redis::cmd("RPUSH")
+                .arg(self.audit_key(key))
+                .arg(event)
+                .query_async(&mut connection)
+                .await;
+            self.mark(
+                result
+                    .map(|_| ())
+                    .map_err(|_| StateBackendError::Unavailable),
             )
         })
     }
