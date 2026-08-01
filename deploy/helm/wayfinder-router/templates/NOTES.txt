@@ -1,0 +1,26 @@
+Wayfinder Router {{ .Chart.AppVersion }} has been installed as {{ include "wayfinder-router.fullname" . }}.
+
+The gateway is bound to the cluster-internal Service on port {{ .Values.service.port }}.
+It is configured for the authenticated data-plane surface. Before sending traffic,
+provide a complete gateway TOML through config.existingSecret or config.existingConfigMap
+with at least one virtual key and one model destination.
+
+{{- if .Values.redis.enabled }}
+This release includes a single-replica Redis instance for shared policy state.
+It is ephemeral unless redis.persistence.enabled=true; use redis.url for a managed
+production Redis service.
+{{- else }}
+Redis is disabled. Ensure config.inline or your existing configuration points at
+an external shared state backend when replicas are enabled.
+{{- end }}
+
+{{- if .Values.ingress.enabled }}
+Ingress is enabled. Terminate TLS at the ingress controller and keep the gateway
+service private unless the ingress policy explicitly requires external access.
+{{- else }}
+Ingress is disabled. Use port-forwarding for a local smoke test:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "wayfinder-router.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+{{- end }}
+
+Credentials are read from the referenced Secret as environment variables. Do not
+put API keys or bearer tokens in a ConfigMap, route receipt, or chart values file.

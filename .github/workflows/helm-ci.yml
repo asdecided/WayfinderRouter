@@ -1,0 +1,69 @@
+name: Helm CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/helm-ci.yml"
+      - "deploy/helm/**"
+      - "decisions/WF-ADR-0059-helm-deployment.md"
+      - "docs/managed-gateway-deployment.md"
+      - "roadmaps/WF-ROADMAP-0010-verified-efficiency-evidence-engine.md"
+  pull_request:
+    paths:
+      - ".github/workflows/helm-ci.yml"
+      - "deploy/helm/**"
+      - "decisions/WF-ADR-0059-helm-deployment.md"
+      - "docs/managed-gateway-deployment.md"
+      - "roadmaps/WF-ROADMAP-0010-verified-efficiency-evidence-engine.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: helm-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-render:
+    name: Helm lint and render
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
+      - name: Lint chart
+        run: helm lint deploy/helm/wayfinder-router
+      - name: Render bundled Redis form
+        shell: bash
+        run: |
+          set -euo pipefail
+          helm template wayfinder deploy/helm/wayfinder-router \
+            --namespace wayfinder > "$RUNNER_TEMP/wayfinder-bundled.yaml"
+          grep -q 'kind: Deployment' "$RUNNER_TEMP/wayfinder-bundled.yaml"
+          grep -q -- '--surface' "$RUNNER_TEMP/wayfinder-bundled.yaml"
+          grep -q 'value: /etc/wayfinder/wayfinder-router.toml' "$RUNNER_TEMP/wayfinder-bundled.yaml"
+          grep -q 'kind: StatefulSet' "$RUNNER_TEMP/wayfinder-bundled.yaml"
+          grep -q 'kind: NetworkPolicy' "$RUNNER_TEMP/wayfinder-bundled.yaml"
+      - name: Render external configuration and ingress form
+        shell: bash
+        run: |
+          set -euo pipefail
+          helm template wayfinder deploy/helm/wayfinder-router \
+            --namespace wayfinder \
+            --set config.existingSecret=router-config \
+            --set credentials.existingSecret=router-credentials \
+            --set redis.enabled=false \
+            --set ingress.enabled=true \
+            --set ingress.className=nginx \
+            > "$RUNNER_TEMP/wayfinder-external.yaml"
+          grep -q 'kind: Ingress' "$RUNNER_TEMP/wayfinder-external.yaml"
+          grep -q 'secretName: router-config' "$RUNNER_TEMP/wayfinder-external.yaml"
+          grep -q 'name: router-credentials' "$RUNNER_TEMP/wayfinder-external.yaml"
+          ! grep -q 'kind: ConfigMap' "$RUNNER_TEMP/wayfinder-external.yaml"
+          ! grep -q 'kind: StatefulSet' "$RUNNER_TEMP/wayfinder-external.yaml"

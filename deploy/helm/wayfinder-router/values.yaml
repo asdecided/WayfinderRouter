@@ -1,0 +1,139 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/asdecided/wayfinder-router
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+service:
+  type: ClusterIP
+  port: 8088
+  annotations: {}
+
+config:
+  # Prefer an existing Secret for production configuration. The mounted file
+  # must contain the complete gateway TOML, including configured models/keys.
+  existingSecret: ""
+  existingSecretKey: wayfinder-router.toml
+  existingConfigMap: ""
+  existingConfigMapKey: wayfinder-router.toml
+  inline: |
+    [gateway.state]
+    backend = "redis"
+    url = '{{ include "wayfinder-router.redisURL" . }}'
+    namespace = "wayfinder"
+
+    # Add [models] and provider credentials through an existing Secret before
+    # using the data plane in production.
+
+credentials:
+  # The Secret is exposed only as environment variables whose names match the
+  # api_key_env values in the mounted TOML configuration.
+  existingSecret: ""
+
+redis:
+  enabled: true
+  name: ""
+  image:
+    repository: redis
+    tag: 7.4-alpine
+    pullPolicy: IfNotPresent
+  port: 6379
+  url: ""
+  persistence:
+    enabled: false
+    size: 8Gi
+    storageClass: ""
+  resources: {}
+
+otel:
+  # The container image must be built with the gateway `otel` feature for
+  # these settings to have an effect.
+  enabled: false
+  jsonLogs: false
+  endpoint: ""
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: wayfinder.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+networkPolicy:
+  enabled: true
+  # These defaults permit ingress from any namespace to the service and DNS,
+  # HTTPS, and Redis egress. Tighten them for a specific cluster.
+  ingress: []
+  egress: []
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+resources: {}
+
+livenessProbe:
+  httpGet:
+    path: /livez
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 6
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 6
+
+startupProbe:
+  httpGet:
+    path: /livez
+    port: http
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 30
+
+terminationGracePeriodSeconds: 30
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
