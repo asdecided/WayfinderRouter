@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
-use http::StatusCode;
+use http::{HeaderMap, StatusCode};
 use serde_json::Value;
 use thiserror::Error;
 use wayfinder_apple_foundation_xpc::{
@@ -1180,9 +1180,16 @@ where
                 "model".to_owned(),
                 Value::String(model.provider_model().to_owned()),
             );
+            let mut propagation = HeaderMap::new();
+            crate::otel::inject_traceparent(&mut propagation);
             let response = self
                 .client
-                .send_buffered(&endpoint, &body, credential.as_ref())
+                .send_buffered_with_headers(
+                    &endpoint,
+                    &body,
+                    credential.as_ref(),
+                    Some(&propagation),
+                )
                 .await
                 .map_err(DeliveryError::Provider)?;
             let status = response.status();
@@ -1220,9 +1227,11 @@ where
                 Value::String(model.provider_model().to_owned()),
             );
             body_object.insert("stream".to_owned(), Value::Bool(true));
+            let mut propagation = HeaderMap::new();
+            crate::otel::inject_traceparent(&mut propagation);
             let response = self
                 .client
-                .send_stream(&endpoint, &body, credential.as_ref())
+                .send_stream_with_headers(&endpoint, &body, credential.as_ref(), Some(&propagation))
                 .await
                 .map_err(DeliveryError::Provider)?;
             let status = response.status();
