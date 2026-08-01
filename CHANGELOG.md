@@ -50,12 +50,25 @@ details, release history over commit history.
 
 ### Changed
 
+- **Bounded gateway delivery concurrency** (WF-ADR-0051). The Rust gateway now admits up to 32
+  simultaneous provider deliveries by default, allows a bounded queue of 64 requests for up to two
+  seconds, and returns a retryable `503` when saturated. Streaming requests retain their slot until
+  the response body completes or is dropped. Operators can tune all three limits and inspect
+  in-flight, peak, queue-wait, and rejection metrics. An authenticated 20-client transport test
+  protects the expected shared-gateway concurrency behavior; provider capacity remains a separate
+  deployment constraint.
+
 - **Rust-only runtime cutover** (WF-ADR-0046, WF-ROADMAP-0014). Wayfinder now builds, tests,
   containers, and ships one native Rust router and gateway. The helper no longer delegates commands
   to Python, and the old package, PyPI release, Python container, and coexistence-only command
   surfaces are removed. Native Desktop Chat and setup remain the supported user experience. This
   does not change Automatic routing preferences, broaden the credential broker, or make Apple a
   global default.
+
+- **Python gateway retirement closeout** (WF-ADR-0046). Current release guidance, issue intake,
+  and Rust contract tests no longer present the removed Python implementation as a runnable
+  fallback or live oracle. Checked-in pre-cutover vectors remain immutable migration evidence only;
+  they execute entirely inside the Rust workspace.
 
 ## v2026.7.0 — 2026-07-01
 

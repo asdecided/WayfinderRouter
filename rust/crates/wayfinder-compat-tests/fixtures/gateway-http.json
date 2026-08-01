@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "authority": "wayfinder_router.gateway.build_app/FastAPI TestClient",
+  "authority": "frozen pre-Rust gateway wire snapshot; immutable migration evidence",
   "version": "2026.7.0",
   "normalization": [
     "request_id values preserve correlation through numbered markers",

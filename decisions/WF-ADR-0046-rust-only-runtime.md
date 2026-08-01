@@ -43,6 +43,15 @@ Checked compatibility vectors are retained as immutable migration evidence.
 Historical names or data that describe the former wire contract do not create a
 runtime, build, CI, or distribution dependency.
 
+### Retirement audit amendment (2026-08-01)
+
+The final current-facing coexistence language is removed. Release procedures do
+not offer a Python rollback, issue intake does not direct users to PyPI, and
+contract tests describe the checked-in vectors as frozen migration evidence
+rather than a live Python oracle. Historical ADRs, roadmaps, changelog entries,
+and benchmark records remain intact as dated evidence. They are not supported
+runtime instructions.
+
 ## Consequences
 
 There is one implementation and one set of production checks. Native changes no

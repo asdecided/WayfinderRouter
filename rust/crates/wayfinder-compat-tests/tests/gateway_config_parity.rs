@@ -28,11 +28,12 @@ enum Compatibility {
 #[serde(tag = "status", rename_all = "snake_case")]
 enum ExpectedOutcome {
     Valid { summary: Value },
-    Invalid { python_error: String },
+    Invalid { legacy_diagnostic: String },
 }
 
 #[test]
-fn gateway_config_matches_python_semantics_and_annotated_hardening() -> Result<(), Box<dyn Error>> {
+fn gateway_config_preserves_frozen_semantics_and_annotated_hardening() -> Result<(), Box<dyn Error>>
+{
     let cases: Vec<GatewayConfigCase> = serde_json::from_str(GATEWAY_CONFIG_VECTORS)?;
     let mut exact_valid = 0_usize;
     let mut exact_invalid = 0_usize;
@@ -65,12 +66,16 @@ fn gateway_config_matches_python_semantics_and_annotated_hardening() -> Result<(
                     case.name
                 );
             }
-            (Compatibility::Exact, ExpectedOutcome::Invalid { python_error }, Err(error)) => {
+            (Compatibility::Exact, ExpectedOutcome::Invalid { legacy_diagnostic }, Err(error)) => {
                 exact_invalid = exact_invalid.saturating_add(1);
-                assert!(!python_error.is_empty(), "{} Python diagnostic", case.name);
+                assert!(
+                    !legacy_diagnostic.is_empty(),
+                    "{} fixture diagnostic",
+                    case.name
+                );
                 assert!(
                     !error.to_string().is_empty(),
-                    "{} Rust diagnostic",
+                    "{} current diagnostic",
                     case.name
                 );
             }
@@ -82,25 +87,25 @@ fn gateway_config_matches_python_semantics_and_annotated_hardening() -> Result<(
                 nonfinite_hardening = nonfinite_hardening.saturating_add(1);
                 assert!(
                     contains_nonfinite_marker(summary),
-                    "{} must preserve Python's non-finite semantic evidence",
+                    "{} must preserve frozen non-finite semantic evidence",
                     case.name
                 );
                 assert!(
                     !error.to_string().is_empty(),
-                    "{} Rust hardening diagnostic",
+                    "{} current hardening diagnostic",
                     case.name
                 );
             }
             (Compatibility::Exact, ExpectedOutcome::Valid { .. }, Err(error)) => {
                 return Err(format!(
-                    "{}: Rust rejected Python-valid gateway TOML: {error}",
+                    "{}: current parser rejected fixture-valid gateway TOML: {error}",
                     case.name
                 )
                 .into());
             }
-            (Compatibility::Exact, ExpectedOutcome::Invalid { python_error }, Ok(_)) => {
+            (Compatibility::Exact, ExpectedOutcome::Invalid { legacy_diagnostic }, Ok(_)) => {
                 return Err(format!(
-                    "{}: Rust accepted Python-invalid gateway TOML ({python_error})",
+                    "{}: current parser accepted fixture-invalid gateway TOML ({legacy_diagnostic})",
                     case.name
                 )
                 .into());
@@ -112,9 +117,13 @@ fn gateway_config_matches_python_semantics_and_annotated_hardening() -> Result<(
                 )
                 .into());
             }
-            (Compatibility::RustRejectsNonfinite, ExpectedOutcome::Invalid { python_error }, _) => {
+            (
+                Compatibility::RustRejectsNonfinite,
+                ExpectedOutcome::Invalid { legacy_diagnostic },
+                _,
+            ) => {
                 return Err(format!(
-                    "{}: non-finite hardening annotation requires Python-valid input ({python_error})",
+                    "{}: non-finite hardening annotation requires fixture-valid input ({legacy_diagnostic})",
                     case.name
                 )
                 .into());

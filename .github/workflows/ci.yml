@@ -10,6 +10,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Enforce the Rust-only runtime boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          forbidden=(
+            wayfinder_router
+            pyproject.toml
+            uv.lock
+            requirements.txt
+          )
+          for artifact in "${forbidden[@]}"; do
+            if [[ -e "$artifact" ]]; then
+              echo "::error::obsolete Python runtime artifact returned: $artifact"
+              exit 1
+            fi
+          done
+          if git grep -IlE 'python[0-9.]*[[:space:]]+-m[[:space:]]+(wayfinder_router|pytest)|pip[[:space:]]+install[[:space:]]+wayfinder-router' \
+            -- Dockerfile Makefile .github/workflows; then
+            echo "::error::runtime, container, or CI still invokes the retired Python gateway"
+            exit 1
+          fi
       - name: Install the Rust toolchain and required components
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
       - name: Rust formatting

@@ -111,8 +111,8 @@ credentials, and publishing remains a manual maintainer action after physical ev
   never falls back to `PATH`.
 - A bundled helper requires `xpc-credential-broker-v1`; broker failure never falls back to an
   environment value, command output, argv, HTTP, or a temporary file.
-- Python/Homebrew selection remains explicit rollback behavior. Switching first boots out the
-  current job, verifies ownership, and then installs the selected backend through its service seam.
+- The bundled Rust helper is the only supported gateway runtime. Rollback restores a previously
+  verified Wayfinder app bundle; it never selects a removed Python backend.
 - ChatGPT account routing accepts only the runtime inside `/Applications/ChatGPT.app` after its
   production runtime, version, code-signing, and ownership checks pass. Development overrides and
   sibling executables are ignored in release builds.
@@ -134,7 +134,7 @@ Exercise the final extracted ZIP on a clean Apple Silicon user account and recor
 7. Interrupt setup after each external mutation and verify reassessment is idempotent.
 8. Replace an earlier build and verify config, history, ledger/cache state, and Keychain preservation.
 9. Force failed health/capability agreement and restore the previous verified app without data loss.
-10. Switch bundled Rust to and from explicit Python/Homebrew rollback and prove one label/port owner.
+10. Roll back to the previous verified app bundle and prove one launchd label/port owner.
 11. On an eligible macOS 26+ Mac, verify Apple inference while the UI is closed, cancellation, and
     rejection of copied, ad-hoc, or mismatched-Team components.
 12. With the supported signed ChatGPT app installed, verify login, refresh, logout, model discovery,

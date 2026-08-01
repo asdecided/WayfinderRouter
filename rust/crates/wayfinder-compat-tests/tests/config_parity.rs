@@ -28,7 +28,7 @@ enum OutcomeStatus {
 struct ExpectedOutcome {
     status: OutcomeStatus,
     summary: Option<ConfigSummary>,
-    python_error: Option<String>,
+    legacy_diagnostic: Option<String>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -70,7 +70,7 @@ struct DecisionSummary {
 }
 
 #[test]
-fn strict_input_matches_current_python_outcomes_and_decisions() -> Result<(), Box<dyn Error>> {
+fn strict_input_preserves_frozen_outcomes_and_decisions() -> Result<(), Box<dyn Error>> {
     let cases: Vec<ConfigCase> = serde_json::from_str(ROUTING_CONFIG_VECTORS)?;
     let mut valid_count = 0_usize;
     let mut invalid_count = 0_usize;
@@ -96,30 +96,36 @@ fn strict_input_matches_current_python_outcomes_and_decisions() -> Result<(), Bo
             }
             (OutcomeStatus::Invalid, Err(rust_error)) => {
                 invalid_count = invalid_count.saturating_add(1);
-                let python_error =
-                    case.outcome.python_error.as_deref().ok_or_else(|| {
+                let legacy_diagnostic =
+                    case.outcome.legacy_diagnostic.as_deref().ok_or_else(|| {
                         format!("{} invalid fixture omitted diagnostic", case.name)
                     })?;
-                assert!(!python_error.is_empty(), "{} Python diagnostic", case.name);
+                assert!(
+                    !legacy_diagnostic.is_empty(),
+                    "{} fixture diagnostic",
+                    case.name
+                );
                 assert!(
                     !rust_error.to_string().is_empty(),
-                    "{} Rust diagnostic",
+                    "{} current diagnostic",
                     case.name
                 );
             }
             (OutcomeStatus::Valid, Err(error)) => {
-                return Err(
-                    format!("{}: Rust rejected Python-valid TOML: {error}", case.name).into(),
-                );
+                return Err(format!(
+                    "{}: current parser rejected fixture-valid TOML: {error}",
+                    case.name
+                )
+                .into());
             }
             (OutcomeStatus::Invalid, Ok(_)) => {
-                let python_error = case
+                let legacy_diagnostic = case
                     .outcome
-                    .python_error
+                    .legacy_diagnostic
                     .as_deref()
-                    .unwrap_or("missing Python diagnostic");
+                    .unwrap_or("missing fixture diagnostic");
                 return Err(format!(
-                    "{}: Rust accepted Python-invalid TOML ({python_error})",
+                    "{}: current parser accepted fixture-invalid TOML ({legacy_diagnostic})",
                     case.name
                 )
                 .into());
@@ -136,7 +142,7 @@ fn compatibility_sort_restores_committed_unordered_tier_contract() -> Result<(),
     let cases: Vec<ConfigCase> = serde_json::from_str(ROUTING_CONFIG_VECTORS)?;
     let Some(case) = cases
         .iter()
-        .find(|case| case.name == "descending_tiers_are_rejected_by_current_python")
+        .find(|case| case.name == "descending_tiers_are_rejected_by_frozen_contract")
     else {
         return Err("descending-tier fixture is missing".into());
     };

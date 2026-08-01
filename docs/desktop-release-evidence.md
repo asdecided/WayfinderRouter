@@ -45,7 +45,7 @@ Record the observed state and bounded recovery for each scenario:
 - [ ] Missing, locked, denied, rotated, and deleted Keychain items with no secret output.
 - [ ] Upgrade/reinstall and forced rollback preserve config, history, ledger/cache state, and
   Keychain items.
-- [ ] Explicit switch between bundled Rust and Python/Homebrew rollback leaves one label/port owner.
+- [ ] Rollback to the previous verified app bundle leaves one Rust gateway label/port owner.
 
 ## Apple Foundation Models
 
@@ -89,7 +89,6 @@ recorded above:
 
 Record workflow URLs and exact local commands/results for:
 
-- [ ] Python tests and static checks.
 - [ ] Rust format, tests, docs, Clippy, compatibility, audit/policy checks.
 - [ ] Swift tests on macOS 14 and macOS 26 Apple Silicon runners.
 - [ ] Ad-hoc arm64 release-bundle build and deterministic architecture-policy test.
