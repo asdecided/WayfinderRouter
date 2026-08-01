@@ -648,7 +648,8 @@ async fn build_serve_state<W: Write>(
         .with_gateway_reliability(&gateway)
         .map_err(|error| error.to_string())?;
     state = state
-        .with_gateway_access(&gateway)
+        .with_gateway_shared_access(&gateway)
+        .await
         .map_err(|error| error.to_string())?;
     state = state
         .with_gateway_cache(&gateway)

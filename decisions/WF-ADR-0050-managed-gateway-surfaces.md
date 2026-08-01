@@ -95,7 +95,9 @@ the plaintext.
 2. Add bounded process-local concurrency/backpressure controls and a
    real-listener concurrency contract (WF-ADR-0051).
 3. Introduce a shared state backend and prove two-replica rate-limit, budget,
-   accounting, and admission consistency.
+   accounting, and admission consistency. The Redis-first rate/token counter
+   contract is now WF-ADR-0053; budget, ledger, cache, and distributed
+   admission remain follow-ons.
 4. Package the two-plane topology through a Helm chart with ingress TLS,
    NetworkPolicy, PodDisruptionBudget, and probe defaults.
 
