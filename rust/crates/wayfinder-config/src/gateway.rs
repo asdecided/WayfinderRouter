@@ -4,6 +4,7 @@
 //! environment variables, execute `api_key_cmd`, or otherwise resolve provider
 //! secret values.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use indexmap::IndexMap;
@@ -38,6 +39,10 @@ pub const DEFAULT_QUEUE_TIMEOUT: f64 = 2.0;
 pub const STATE_BACKENDS: [&str; 2] = ["memory", "redis"];
 /// Default namespace used for shared gateway state keys.
 pub const DEFAULT_STATE_NAMESPACE: &str = "wayfinder";
+/// Maximum number of additional deployments behind one public model alias.
+pub const MAX_MODEL_DEPLOYMENTS: usize = 32;
+/// Maximum weight accepted for one model deployment.
+pub const MAX_MODEL_DEPLOYMENT_WEIGHT: u64 = 100;
 
 /// Stable delivery identity for a configured gateway model.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -106,6 +111,27 @@ pub struct GatewayModel {
     pub fallbacks: Vec<String>,
     /// Optional maximum context size in tokens.
     pub context_window: Option<u64>,
+    /// Additional weighted deployments behind this public model alias.
+    pub deployments: Vec<GatewayDeployment>,
+}
+
+/// One additional delivery target behind a stable model alias.
+///
+/// Provider kind, locality, cost, and context are inherited from the parent
+/// [`GatewayModel`]. This keeps a pool capability-homogeneous while allowing
+/// endpoint/model/key references to vary per deployment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GatewayDeployment {
+    /// Stable operator-selected deployment identifier.
+    pub id: String,
+    /// OpenAI-compatible endpoint base URL.
+    pub base_url: String,
+    /// Provider model identifier sent to this deployment.
+    pub model: String,
+    /// Optional environment-variable name holding this deployment's key.
+    pub api_key_env: Option<String>,
+    /// Relative selection weight; higher values receive more turns.
+    pub weight: u64,
 }
 
 /// A spend cap over the gateway's realized-cost ledger.
@@ -602,6 +628,12 @@ fn render_gateway_toml(gateway: &GatewayConfig) -> String {
                 render_string_list(&model.fallbacks)
             ));
         }
+        if !model.deployments.is_empty() {
+            lines.push(format!(
+                "deployments = {}",
+                render_deployments(&model.deployments)
+            ));
+        }
         if let Some(context_window) = model.context_window {
             lines.push(format!("context_window = {context_window}"));
         }
@@ -663,6 +695,30 @@ fn render_string_list(values: &[String]) -> String {
         values
             .iter()
             .map(|value| quote_toml_string(value))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn render_deployments(values: &[GatewayDeployment]) -> String {
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(|deployment| {
+                let mut fields = vec![
+                    format!("id = {}", quote_toml_string(&deployment.id)),
+                    format!("base_url = {}", quote_toml_string(&deployment.base_url)),
+                    format!("model = {}", quote_toml_string(&deployment.model)),
+                ];
+                if let Some(api_key_env) = &deployment.api_key_env {
+                    fields.push(format!("api_key_env = {}", quote_toml_string(api_key_env)));
+                }
+                if deployment.weight != 1 {
+                    fields.push(format!("weight = {}", deployment.weight));
+                }
+                format!("{{ {} }}", fields.join(", "))
+            })
             .collect::<Vec<_>>()
             .join(", ")
     )
@@ -1124,6 +1180,7 @@ fn parse_models(
             where_,
             &format!("gateway.models.{name}.context_window"),
         )?;
+        let deployments = parse_deployments(entry.get("deployments"), where_, name, provider)?;
         models.insert(
             name.clone(),
             GatewayModel {
@@ -1136,10 +1193,96 @@ fn parse_models(
                 cost_per_1k,
                 fallbacks,
                 context_window,
+                deployments,
             },
         );
     }
     Ok(models)
+}
+
+fn parse_deployments(
+    value: Option<&Value>,
+    where_: &str,
+    model_name: &str,
+    provider: ProviderKind,
+) -> Result<Vec<GatewayDeployment>, ConfigError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if provider != ProviderKind::OpenAiCompatible {
+        return Err(invalid(
+            where_,
+            format!(
+                "'gateway.models.{model_name}.deployments' is only valid for openai-compatible providers"
+            ),
+        ));
+    }
+    let entries = value.as_array().ok_or_else(|| {
+        invalid(
+            where_,
+            format!("'gateway.models.{model_name}.deployments' must be an array"),
+        )
+    })?;
+    if entries.len() > MAX_MODEL_DEPLOYMENTS {
+        return Err(invalid(
+            where_,
+            format!(
+                "'gateway.models.{model_name}.deployments' may contain at most {MAX_MODEL_DEPLOYMENTS} entries"
+            ),
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    let mut deployments = Vec::with_capacity(entries.len());
+    for (index, value) in entries.iter().enumerate() {
+        let label = format!("gateway.models.{model_name}.deployments[{index}]");
+        let entry = value
+            .as_table()
+            .ok_or_else(|| invalid(where_, format!("'{label}' must be an inline table")))?;
+        let id =
+            required_non_empty_string(entry.get("id"), where_, &format!("{label}.id"), "a string")?;
+        if id == "default" || !valid_policy_id(&id) {
+            return Err(invalid(
+                where_,
+                format!("'{label}.id' must be a non-default visible ASCII identifier"),
+            ));
+        }
+        if !ids.insert(id.clone()) {
+            return Err(invalid(where_, format!("'{label}.id' is duplicated")));
+        }
+        let base_url = required_non_empty_string(
+            entry.get("base_url"),
+            where_,
+            &format!("{label}.base_url"),
+            "a string",
+        )?;
+        let model = required_non_empty_string(
+            entry.get("model"),
+            where_,
+            &format!("{label}.model"),
+            "a string",
+        )?;
+        let api_key_env = optional_non_empty_string(
+            entry.get("api_key_env"),
+            where_,
+            &format!("{label}.api_key_env"),
+        )?;
+        let weight =
+            optional_positive_integer(entry.get("weight"), 1, where_, &format!("{label}.weight"))?;
+        if weight > MAX_MODEL_DEPLOYMENT_WEIGHT {
+            return Err(invalid(
+                where_,
+                format!("'{label}.weight' must be at most {MAX_MODEL_DEPLOYMENT_WEIGHT}"),
+            ));
+        }
+        deployments.push(GatewayDeployment {
+            id,
+            base_url,
+            model,
+            api_key_env,
+            weight,
+        });
+    }
+    Ok(deployments)
 }
 
 fn validate_model_fallbacks(
@@ -1646,6 +1789,26 @@ rpm = 5
     }
 
     #[test]
+    fn weighted_model_deployments_round_trip_and_validate() -> Result<(), ConfigError> {
+        let text = "[gateway.models.cloud]\nbase_url = \"https://primary.example/v1\"\nmodel = \"gpt-5\"\ndeployments = [{ id = \"eu\", base_url = \"https://eu.example/v1\", model = \"gpt-5\", weight = 2 }, { id = \"backup\", base_url = \"https://backup.example/v1\", model = \"gpt-5-mini\", api_key_env = \"BACKUP_KEY\" }]";
+        let config = parse(text)?;
+        let deployments = &config.models["cloud"].deployments;
+        assert_eq!(deployments.len(), 2);
+        assert_eq!(deployments[0].id, "eu");
+        assert_eq!(deployments[0].weight, 2);
+        assert_eq!(deployments[1].api_key_env.as_deref(), Some("BACKUP_KEY"));
+        assert_eq!(dump_gateway_toml(&config)?, text);
+        for invalid_text in [
+            "[gateway.models.cloud]\nbase_url = \"https://primary.example/v1\"\nmodel = \"gpt-5\"\ndeployments = [{ id = \"default\", base_url = \"https://eu.example/v1\", model = \"gpt-5\" }]",
+            "[gateway.models.cloud]\nbase_url = \"https://primary.example/v1\"\nmodel = \"gpt-5\"\ndeployments = [{ id = \"eu\", base_url = \"https://eu.example/v1\", model = \"gpt-5\" }, { id = \"eu\", base_url = \"https://backup.example/v1\", model = \"gpt-5\" }]",
+            "[gateway.models.apple]\nprovider = \"apple-foundation-models\"\nmodel = \"system-default\"\ntier = \"local\"\ndeployments = [{ id = \"eu\", base_url = \"https://eu.example/v1\", model = \"gpt-5\" }]",
+        ] {
+            assert!(parse(invalid_text).is_err(), "accepted: {invalid_text}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn dump_defaults_to_an_empty_document() -> Result<(), ConfigError> {
         assert_eq!(dump_gateway_toml(&GatewayConfig::default())?, "");
         Ok(())
@@ -1738,6 +1901,7 @@ cost_per_1k = 0.0"#;
                 cost_per_1k: Some(0.0),
                 fallbacks: Vec::new(),
                 context_window: Some(8_192),
+                deployments: Vec::new(),
             },
         );
         config.keys.insert(

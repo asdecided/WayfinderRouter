@@ -107,9 +107,12 @@ through `x-wayfinder-router-workspace`.
 
 Model names in this API are stable Wayfinder aliases. A configured alias maps
 to its provider model and ordered same-tier fallbacks, allowing operators to
-change upstream revisions without changing every client. Multi-turn requests
-remain OpenAI/Anthropic-compatible and stateless: the caller sends the complete
-transcript each turn, so no conversation content is retained by the gateway.
+change upstream revisions without changing every client. An alias may also
+rotate a bounded pool of equivalent deployments; the public model name remains
+the alias while per-deployment health is isolated internally. Multi-turn
+requests remain OpenAI/Anthropic-compatible and stateless: the caller sends the
+complete transcript each turn, so no conversation content is retained by the
+gateway.
 
 The listener deliberately does **not** expose `/healthz`, `/metrics`,
 `/router/*`, savings, config rendering, or local ChatGPT/Codex account controls.
@@ -140,4 +143,6 @@ process-local throughput contract, and
 [WF-ADR-0052](../decisions/WF-ADR-0052-workspace-scoped-model-routing.md) for
 workspace, alias, and multi-turn boundaries, and
 [WF-ADR-0053](../decisions/WF-ADR-0053-shared-state-backend.md) for the
-shared-state contract and degradation behavior.
+shared-state contract and degradation behavior, and
+[WF-ADR-0054](../decisions/WF-ADR-0054-model-deployment-pools.md) for stable
+aliases and weighted deployment pools.

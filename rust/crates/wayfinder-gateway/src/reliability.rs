@@ -119,6 +119,11 @@ impl ReliabilityPolicy {
         ))
     }
 
+    /// Whether one concrete target is currently outside its circuit cooldown.
+    pub fn target_available(&self, target: &str) -> Result<bool, ReliabilityError> {
+        Ok(!self.delivery_plan(target, &[], |_| true)?.is_empty())
+    }
+
     /// Fold one target-level outcome into the shared breaker.
     pub fn record(&self, target: &str, succeeded: bool) -> Result<(), ReliabilityError> {
         let mut breaker = self
@@ -221,6 +226,7 @@ mod tests {
             ["cloud", "local"]
         );
         policy.record("cloud", false)?;
+        assert!(!policy.target_available("cloud")?);
         assert_eq!(
             policy.delivery_plan("cloud", &["local".to_owned()], |_| true)?,
             ["local"]

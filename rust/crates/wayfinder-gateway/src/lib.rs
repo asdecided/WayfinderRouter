@@ -27,7 +27,7 @@ pub use crate::decision_policy::RouteOn;
 use std::collections::{BTreeMap, VecDeque};
 use std::convert::Infallible;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, to_bytes};
@@ -137,9 +137,46 @@ pub struct ConfiguredModel {
     tier: Option<ProviderTier>,
     api_key_env: Option<String>,
     key_ready: bool,
+    base_key_ready: bool,
     cost_per_1k: Option<f64>,
     fallbacks: Arc<[String]>,
     context_window: Option<u64>,
+    deployments: Arc<[ConfiguredDeployment]>,
+    deployment_id: Option<String>,
+}
+
+/// One concrete delivery target behind a public model alias.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConfiguredDeployment {
+    id: String,
+    endpoint: String,
+    provider_model: String,
+    api_key_env: Option<String>,
+    key_ready: bool,
+    weight: u64,
+}
+
+impl ConfiguredDeployment {
+    /// Build a pool member from non-secret startup metadata.
+    #[must_use]
+    pub fn new(
+        id: impl Into<String>,
+        endpoint: impl Into<String>,
+        provider_model: impl Into<String>,
+        api_key_env: Option<String>,
+        key_ready: bool,
+        weight: u64,
+    ) -> Self {
+        let key_ready = api_key_env.is_none() || key_ready;
+        Self {
+            id: id.into(),
+            endpoint: endpoint.into(),
+            provider_model: provider_model.into(),
+            api_key_env,
+            key_ready,
+            weight: weight.max(1),
+        }
+    }
 }
 
 impl ConfiguredModel {
@@ -152,17 +189,21 @@ impl ConfiguredModel {
         api_key_env: Option<String>,
         key_ready: bool,
     ) -> Self {
+        let base_key_ready = api_key_env.is_none() || key_ready;
         Self {
             name: name.into(),
             endpoint: endpoint.into(),
             provider_model: provider_model.into(),
             provider: ProviderKind::OpenAiCompatible,
             tier: None,
-            key_ready: api_key_env.is_none() || key_ready,
+            key_ready: base_key_ready,
+            base_key_ready,
             api_key_env,
             cost_per_1k: None,
             fallbacks: Arc::from([]),
             context_window: None,
+            deployments: Arc::from([]),
+            deployment_id: None,
         }
     }
 
@@ -220,6 +261,49 @@ impl ConfiguredModel {
         .with_fallbacks(model.fallbacks.clone())
         .with_context_window(model.context_window)
         .with_provider(model.provider, model.tier)
+    }
+
+    /// Attach additional weighted deployments behind this public alias.
+    #[must_use]
+    pub fn with_deployments(mut self, deployments: Vec<ConfiguredDeployment>) -> Self {
+        self.key_ready =
+            self.key_ready || deployments.iter().any(|deployment| deployment.key_ready);
+        self.deployments = Arc::from(deployments);
+        self
+    }
+
+    fn for_deployment(&self, deployment: &ConfiguredDeployment) -> Self {
+        let mut selected = self.clone();
+        selected.endpoint = deployment.endpoint.clone();
+        selected.provider_model = deployment.provider_model.clone();
+        selected.api_key_env = deployment.api_key_env.clone();
+        selected.key_ready = deployment.key_ready;
+        selected.deployments = Arc::from([]);
+        selected.deployment_id = Some(deployment.id.clone());
+        selected
+    }
+
+    fn deployment_targets(&self) -> Vec<ConfiguredDeployment> {
+        let mut targets = Vec::with_capacity(self.deployments.len() + 1);
+        targets.push(ConfiguredDeployment::new(
+            "default",
+            self.endpoint.clone(),
+            self.provider_model.clone(),
+            self.api_key_env.clone(),
+            self.base_key_ready,
+            1,
+        ));
+        targets.extend(self.deployments.iter().cloned());
+        targets
+    }
+
+    /// Stable internal identity used for per-deployment health and metrics.
+    #[must_use]
+    pub fn delivery_id(&self) -> String {
+        self.deployment_id.as_ref().map_or_else(
+            || self.name.clone(),
+            |deployment| format!("{}#{deployment}", self.name),
+        )
     }
 
     /// Configured routing name.
@@ -317,6 +401,7 @@ fn configured_price_table(
 pub struct AppState {
     routing: Arc<RoutingConfig>,
     models: Arc<[ConfiguredModel]>,
+    deployment_cursors: Arc<Mutex<BTreeMap<String, u64>>>,
     offline: bool,
     dry_run: bool,
     route_on: RouteOn,
@@ -373,6 +458,7 @@ impl AppState {
         Self {
             routing: Arc::new(routing),
             models: Arc::from(models),
+            deployment_cursors: Arc::new(Mutex::new(BTreeMap::new())),
             offline,
             dry_run: false,
             route_on: RouteOn::Turn,
@@ -645,6 +731,7 @@ impl AppState {
     pub fn with_runtime_state_from(mut self, previous: &Self) -> Self {
         self.recent = Arc::clone(&previous.recent);
         self.metrics = Arc::clone(&previous.metrics);
+        self.deployment_cursors = Arc::clone(&previous.deployment_cursors);
         self.savings_ledger = Arc::clone(&previous.savings_ledger);
         self.savings_path = previous.savings_path.clone();
         self
@@ -660,6 +747,50 @@ impl AppState {
     #[must_use]
     pub fn models(&self) -> &[ConfiguredModel] {
         &self.models
+    }
+
+    /// Return a deterministic weighted order of concrete targets for an alias.
+    ///
+    /// The first target rotates according to configured weights. Remaining
+    /// targets stay in stable order so a transient failure can fail over within
+    /// the same alias before the outer routing ladder is considered.
+    pub(crate) fn deployment_candidates(&self, alias: &str) -> Vec<ConfiguredModel> {
+        let Some(model) = self.models.iter().find(|model| model.name() == alias) else {
+            return Vec::new();
+        };
+        let targets = model.deployment_targets();
+        if targets.len() <= 1 {
+            return vec![model.clone()];
+        }
+        let total_weight = targets.iter().map(|target| target.weight).sum::<u64>();
+        let slot = match self.deployment_cursors.lock() {
+            Ok(mut cursors) => {
+                let cursor = cursors.entry(alias.to_owned()).or_default();
+                let slot = *cursor % total_weight;
+                *cursor = cursor.saturating_add(1);
+                slot
+            }
+            Err(poisoned) => {
+                let mut cursors = poisoned.into_inner();
+                let cursor = cursors.entry(alias.to_owned()).or_default();
+                let slot = *cursor % total_weight;
+                *cursor = cursor.saturating_add(1);
+                slot
+            }
+        };
+        let mut start = 0;
+        let mut remaining = slot;
+        for (index, target) in targets.iter().enumerate() {
+            if remaining < target.weight {
+                start = index;
+                break;
+            }
+            remaining -= target.weight;
+        }
+        (0..targets.len())
+            .map(|offset| (start + offset) % targets.len())
+            .map(|index| model.for_deployment(&targets[index]))
+            .collect()
     }
 
     /// Whether the configured router is constrained to offline delivery.
@@ -2121,6 +2252,7 @@ async fn acquire_delivery(state: &AppState) -> Result<ObservedAdmissionPermit, A
 struct StreamRelayContext {
     state: AppState,
     target_name: String,
+    target_id: String,
     request_id: String,
     messages: Value,
     access_grant: Option<AccessGrant>,
@@ -2175,59 +2307,78 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
     let mut last_failure = (StatusCode::BAD_GATEWAY, "wayfinder_router_upstream_error");
     let mut established = None;
     for target_name in &plan {
-        let Some(target) = state
-            .models()
-            .iter()
-            .find(|model| model.name() == target_name)
-        else {
+        let targets = state.deployment_candidates(target_name);
+        if targets.is_empty() {
             last_error = format!("configured delivery target '{target_name}' is missing");
             continue;
-        };
+        }
         let Some(delivery) = state.streaming_delivery() else {
             break;
         };
-        match delivery.send_stream(target, request_body.clone()).await {
-            Ok(response) if response.status().is_success() => {
-                established = Some((target_name.clone(), response));
-                break;
+        for target in targets {
+            let target_id = target.delivery_id();
+            if target.deployment_id.is_some() && !target.key_ready() {
+                last_error = format!("deployment '{target_id}' credential is unavailable");
+                continue;
             }
-            Ok(response) if is_retryable(Some(response.status().as_u16())) => {
-                last_error = format!("upstream returned {}", response.status().as_u16());
-                let _ = state.reliability_policy().record(target_name, false);
-                let _ = state.metrics().observe_upstream_error(target_name);
-            }
-            Ok(response) => {
-                let status = response.status();
-                let content_type = HeaderValue::from_str(response.content_type())
-                    .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
-                headers.insert(header::CONTENT_TYPE, content_type);
-                if let Err(message) =
-                    insert_header(&mut headers, "x-wayfinder-router-served-by", target_name)
-                {
+            match state.reliability_policy().target_available(&target_id) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
                     return error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        "wayfinder_router_misconfigured",
-                        message,
+                        "wayfinder_router_state_error",
+                        error.to_string(),
                         request_id_headers(&request_id),
                     );
                 }
-                return (status, headers, Body::from_stream(response.into_stream()))
-                    .into_response();
             }
-            Err(error) => {
-                last_error = error.to_string();
-                last_failure = fatal_delivery_status(&error);
-                if stream_failure_affects_reliability(&error) {
-                    let _ = state.reliability_policy().record(target_name, false);
+            match delivery.send_stream(&target, request_body.clone()).await {
+                Ok(response) if response.status().is_success() => {
+                    established = Some((target_name.clone(), target_id, response));
+                    break;
                 }
-                let _ = state.metrics().observe_upstream_error(target_name);
-                if !matches!(error, DeliveryError::Provider(ProviderError::Transport)) {
-                    return error_response(last_failure.0, last_failure.1, last_error, headers);
+                Ok(response) if is_retryable(Some(response.status().as_u16())) => {
+                    last_error = format!("upstream returned {}", response.status().as_u16());
+                    let _ = state.reliability_policy().record(&target_id, false);
+                    let _ = state.metrics().observe_upstream_error(&target_id);
+                }
+                Ok(response) => {
+                    let status = response.status();
+                    let content_type = HeaderValue::from_str(response.content_type())
+                        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+                    headers.insert(header::CONTENT_TYPE, content_type);
+                    if let Err(message) =
+                        insert_header(&mut headers, "x-wayfinder-router-served-by", target_name)
+                    {
+                        return error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "wayfinder_router_misconfigured",
+                            message,
+                            request_id_headers(&request_id),
+                        );
+                    }
+                    return (status, headers, Body::from_stream(response.into_stream()))
+                        .into_response();
+                }
+                Err(error) => {
+                    last_error = error.to_string();
+                    last_failure = fatal_delivery_status(&error);
+                    if stream_failure_affects_reliability(&error) {
+                        let _ = state.reliability_policy().record(&target_id, false);
+                    }
+                    let _ = state.metrics().observe_upstream_error(&target_id);
+                    if !matches!(error, DeliveryError::Provider(ProviderError::Transport)) {
+                        return error_response(last_failure.0, last_failure.1, last_error, headers);
+                    }
                 }
             }
         }
+        if established.is_some() {
+            break;
+        }
     }
-    let Some((served_by, response)) = established else {
+    let Some((served_by, served_by_id, response)) = established else {
         return error_response(last_failure.0, last_failure.1, last_error, headers);
     };
     if let Err(message) = insert_header(&mut headers, "x-wayfinder-router-served-by", &served_by) {
@@ -2248,6 +2399,7 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
     let context = StreamRelayContext {
         state,
         target_name: served_by,
+        target_id: served_by_id,
         request_id,
         messages,
         access_grant,
@@ -2342,11 +2494,11 @@ fn finish_stream_success(context: &StreamRelayContext) {
     let _ = context
         .state
         .metrics()
-        .observe_upstream(&context.target_name, elapsed);
+        .observe_upstream(&context.target_id, elapsed);
     let _ = context
         .state
         .reliability_policy()
-        .record(&context.target_name, true);
+        .record(&context.target_id, true);
     let _ = account_stream_success(
         &context.state,
         &context.target_name,
@@ -2404,12 +2556,12 @@ fn stream_failure_chunk(
     let _ = context
         .state
         .metrics()
-        .observe_upstream_error(&context.target_name);
+        .observe_upstream_error(&context.target_id);
     if affects_reliability {
         let _ = context
             .state
             .reliability_policy()
-            .record(&context.target_name, false);
+            .record(&context.target_id, false);
     }
     let payload = serde_json::to_string(&json!({
         "error": {
@@ -2627,60 +2779,71 @@ async fn deliver_with_reliability(
 ) -> Result<(String, BufferedDeliveryResponse), ReliableDeliveryFailure> {
     let mut last_error = "no upstream available".to_owned();
     for target_name in plan {
-        let Some(target) = state
-            .models()
-            .iter()
-            .find(|model| model.name() == target_name)
-        else {
+        let targets = state.deployment_candidates(target_name);
+        if targets.is_empty() {
             return Err(ReliableDeliveryFailure::Misconfigured(format!(
                 "no gateway endpoint configured for model '{target_name}'"
             )));
-        };
-        let delays = state.reliability_policy().retry_delays();
-        for attempt in 0..=state.reliability_policy().retries() {
-            let started = Instant::now();
-            match delivery.send(target, request_body.clone()).await {
-                Ok(response) => {
-                    let status = response.status().as_u16();
-                    if !is_retryable(Some(status)) {
-                        if is_auth_failure(Some(status)) {
-                            let _ = state.metrics().observe_upstream_error(target_name);
-                            state
-                                .reliability_policy()
-                                .record(target_name, false)
-                                .map_err(ReliableDeliveryFailure::State)?;
-                        } else {
-                            let _ = state
-                                .metrics()
-                                .observe_upstream(target_name, started.elapsed().as_secs_f64());
-                            state
-                                .reliability_policy()
-                                .record(target_name, true)
-                                .map_err(ReliableDeliveryFailure::State)?;
-                        }
-                        return Ok((target_name.clone(), response));
-                    }
-                    last_error = format!("upstream returned {status}");
-                    let _ = state.metrics().observe_upstream_error(target_name);
-                }
-                Err(error) => {
-                    let _ = state.metrics().observe_upstream_error(target_name);
-                    if !matches!(error, DeliveryError::Provider(ProviderError::Transport)) {
-                        return Err(ReliableDeliveryFailure::Fatal(error));
-                    }
-                    last_error = error.to_string();
-                }
-            }
-            if attempt < state.reliability_policy().retries() {
-                if let Some(delay) = delays.get(attempt) {
-                    sleep_retry(*delay).await;
-                }
-            }
         }
-        state
-            .reliability_policy()
-            .record(target_name, false)
-            .map_err(ReliableDeliveryFailure::State)?;
+        for target in targets {
+            let target_id = target.delivery_id();
+            if target.deployment_id.is_some() && !target.key_ready() {
+                last_error = format!("deployment '{target_id}' credential is unavailable");
+                continue;
+            }
+            if !state
+                .reliability_policy()
+                .target_available(&target_id)
+                .map_err(ReliableDeliveryFailure::State)?
+            {
+                continue;
+            }
+            let delays = state.reliability_policy().retry_delays();
+            for attempt in 0..=state.reliability_policy().retries() {
+                let started = Instant::now();
+                match delivery.send(&target, request_body.clone()).await {
+                    Ok(response) => {
+                        let status = response.status().as_u16();
+                        if !is_retryable(Some(status)) {
+                            if is_auth_failure(Some(status)) {
+                                let _ = state.metrics().observe_upstream_error(&target_id);
+                                state
+                                    .reliability_policy()
+                                    .record(&target_id, false)
+                                    .map_err(ReliableDeliveryFailure::State)?;
+                            } else {
+                                let _ = state
+                                    .metrics()
+                                    .observe_upstream(&target_id, started.elapsed().as_secs_f64());
+                                state
+                                    .reliability_policy()
+                                    .record(&target_id, true)
+                                    .map_err(ReliableDeliveryFailure::State)?;
+                            }
+                            return Ok((target_name.clone(), response));
+                        }
+                        last_error = format!("upstream returned {status}");
+                        let _ = state.metrics().observe_upstream_error(&target_id);
+                    }
+                    Err(error) => {
+                        let _ = state.metrics().observe_upstream_error(&target_id);
+                        if !matches!(error, DeliveryError::Provider(ProviderError::Transport)) {
+                            return Err(ReliableDeliveryFailure::Fatal(error));
+                        }
+                        last_error = error.to_string();
+                    }
+                }
+                if attempt < state.reliability_policy().retries() {
+                    if let Some(delay) = delays.get(attempt) {
+                        sleep_retry(*delay).await;
+                    }
+                }
+            }
+            state
+                .reliability_policy()
+                .record(&target_id, false)
+                .map_err(ReliableDeliveryFailure::State)?;
+        }
     }
     Err(ReliableDeliveryFailure::Exhausted(last_error))
 }
@@ -3469,9 +3632,10 @@ mod tests {
     use wayfinder_service::pricing::{SavingsLedger, UtcDate, turn_cost};
 
     use super::{
-        AppState, ConfiguredModel, DataPlaneError, ROUTER_OVERLOAD_HEADER, ROUTER_WORKSPACE_HEADER,
-        RouteOn, build_data_plane_router, build_reloadable_router, build_router,
-        model_is_proven_local, utc_date_from_unix_days, utc_today, validate_data_plane_state,
+        AppState, ConfiguredDeployment, ConfiguredModel, DataPlaneError, ROUTER_OVERLOAD_HEADER,
+        ROUTER_WORKSPACE_HEADER, RouteOn, build_data_plane_router, build_reloadable_router,
+        build_router, deliver_with_reliability, model_is_proven_local, utc_date_from_unix_days,
+        utc_today, validate_data_plane_state,
     };
     use crate::delivery::{
         BufferedDelivery, BufferedDeliveryResponse, DeliveryError, DeliveryFuture,
@@ -3487,6 +3651,41 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn Error>>;
     type SeenTargets = Arc<Mutex<Vec<String>>>;
+
+    #[test]
+    fn deployment_pool_rotates_weighted_targets_without_changing_the_public_alias() {
+        let model = ConfiguredModel::new(
+            "cloud",
+            "https://primary.example/v1",
+            "gpt-primary",
+            None,
+            true,
+        )
+        .with_deployments(vec![
+            ConfiguredDeployment::new("eu", "https://eu.example/v1", "gpt-eu", None, true, 2),
+            ConfiguredDeployment::new(
+                "backup",
+                "https://backup.example/v1",
+                "gpt-backup",
+                None,
+                true,
+                1,
+            ),
+        ]);
+        let state = AppState::new(RoutingConfig::binary(0.5), vec![model], false, "test");
+
+        let first = state.deployment_candidates("cloud");
+        let second = state.deployment_candidates("cloud");
+        let third = state.deployment_candidates("cloud");
+        let fourth = state.deployment_candidates("cloud");
+        assert_eq!(first[0].name(), "cloud");
+        assert_eq!(first[0].delivery_id(), "cloud#default");
+        assert_eq!(second[0].delivery_id(), "cloud#eu");
+        assert_eq!(third[0].delivery_id(), "cloud#eu");
+        assert_eq!(fourth[0].delivery_id(), "cloud#backup");
+        assert_eq!(second[1].delivery_id(), "cloud#backup");
+        assert_eq!(second[2].delivery_id(), "cloud#default");
+    }
 
     struct FakeDelivery {
         seen: Arc<Mutex<Vec<(String, Value)>>>,
@@ -3516,6 +3715,47 @@ mod tests {
                 ))
             })
         }
+    }
+
+    #[tokio::test]
+    async fn buffered_pool_delivery_uses_member_but_returns_public_alias() -> TestResult {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let model = ConfiguredModel::new(
+            "cloud",
+            "https://primary.example/v1",
+            "gpt-primary",
+            None,
+            true,
+        )
+        .with_deployments(vec![ConfiguredDeployment::new(
+            "eu",
+            "https://eu.example/v1",
+            "gpt-eu",
+            None,
+            true,
+            1,
+        )]);
+        let state = AppState::new(RoutingConfig::binary(0.5), vec![model], false, "test");
+        let delivery = FakeDelivery {
+            seen: Arc::clone(&seen),
+            fail: false,
+        };
+        let (served_by, _) = deliver_with_reliability(
+            &state,
+            &delivery,
+            &["cloud".to_owned()],
+            &json!({"model": "cloud"}),
+        )
+        .await
+        .map_err(|_| std::io::Error::other("delivery failed"))?;
+        assert_eq!(served_by, "cloud");
+        assert_eq!(
+            seen.lock()
+                .map_err(|_| std::io::Error::other("seen lock poisoned"))?[0]
+                .0,
+            "gpt-primary"
+        );
+        Ok(())
     }
 
     const EXACT_USAGE_BODY: &[u8] =
