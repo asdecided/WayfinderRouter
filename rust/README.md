@@ -71,4 +71,5 @@ separate pull requests under WF-ROADMAP-0016.
 - `decisions/WF-ADR-0053-shared-state-backend.md`
 - `decisions/WF-ADR-0054-model-deployment-pools.md`
 - `decisions/WF-ADR-0055-named-routing-presets.md`
+- `decisions/WF-ADR-0056-hard-destination-eligibility.md`
 - `docs/apple-platform-capability-matrix.md`

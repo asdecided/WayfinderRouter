@@ -300,6 +300,11 @@ list, exposes a secret-free `/router/routes` inventory, and fails closed on an
 unknown route. Presets do not alter the deterministic score or expand the
 credential boundary.
 
+WF-ADR-0056 wires the shared destination contract into the Rust gateway. Hard
+capability, readiness, context, and privacy-boundary filters now run before
+delivery retries and fallback, with explicit pins failing closed and the
+effective privacy posture echoed in response metadata.
+
 **Acceptance:**
 
 - Two gateway replicas against one Redis enforce a **single** shared RPM limit and budget: N

@@ -58,8 +58,10 @@ use wayfinder_providers::reliability::{
 use wayfinder_providers::sse::{SseDecoder, SseEvent};
 use wayfinder_routing_core::profiles::{LexiconProfile, profiles};
 use wayfinder_routing_core::{
-    ComplexityScore, FeatureContribution, Features, RoutingConfig, Tier, explain_score,
-    python_round, recommend_tier, score_complexity,
+    CandidateAssessment, ComplexityScore, DestinationCapabilities, DestinationSnapshot,
+    ExclusionReason, ExecutionBoundary, FeatureContribution, Features, PrivacyPosture,
+    ProviderReadiness, RoutingConfig, RoutingRequest, RoutingRequirements, Tier,
+    assess_destination, explain_score, python_round, recommend_tier, score_complexity,
 };
 use wayfinder_service::pricing::{
     LedgerError, PriceTable, SavingsLedger, SavingsReport, UtcDate, estimate_tokens, price_table,
@@ -80,7 +82,7 @@ use crate::decision_policy::{
 };
 use crate::delivery::{
     BufferedDelivery, BufferedDeliveryResponse, DeliveryError, StreamingDelivery,
-    endpoint_is_literal_loopback,
+    endpoint_is_literal_local_network, endpoint_is_literal_loopback,
 };
 use crate::metrics::{DEFAULT_MAX_LABEL_SERIES, GatewayMetrics};
 use crate::rate_limit::{RateResult, RateSnapshot};
@@ -120,6 +122,8 @@ const RATE_LIMIT_RESET_HEADER: &str = "x-ratelimit-reset";
 const ROUTER_CACHE_HEADER: &str = "x-wayfinder-router-cache";
 const ROUTER_OVERLOAD_HEADER: &str = "x-wayfinder-router-overload";
 const ROUTER_ROUTE_HEADER: &str = "x-wayfinder-router-route";
+const PRIVACY_POSTURE_HEADER: &str = "x-wayfinder-privacy-posture";
+const ROUTER_PRIVACY_POSTURE_HEADER: &str = "x-wayfinder-router-privacy-posture";
 const DEBUG_HEADER: &str = "x-wayfinder-debug";
 const ROUTE_PRESET_PREFIX: &str = "@route/";
 
@@ -1643,6 +1647,20 @@ async fn chat_completions(
         body.insert("messages".to_owned(), messages.clone());
     }
     let prompt = extract_prompt(&messages, route_on);
+    let offline = state.offline() || offline_override(&headers);
+    let privacy_posture = match parse_privacy_posture(&headers, offline) {
+        Ok(value) => value,
+        Err(message) => return bad_override_response(&request_id, message),
+    };
+    let prompt_estimate = estimate_tokens(&extract_prompt(&messages, RouteOn::All));
+    let requirements = request_requirements(&body, &messages, prompt_estimate);
+    let routing_request = RoutingRequest {
+        schema_version: wayfinder_routing_core::RUNTIME_CONTRACT_VERSION,
+        request_id: request_id.clone(),
+        prompt: prompt.clone(),
+        privacy_posture,
+        requirements,
+    };
     let decision_started = Instant::now();
     let decision = match score_complexity(&prompt, &routing) {
         Ok(decision) => decision,
@@ -1737,7 +1755,58 @@ async fn chat_completions(
         };
     let mut preset_route_active = preset_name.is_some();
 
-    let offline = state.offline() || offline_override(&headers);
+    if !state.dry_run() {
+        if let Some(preset_models) = preset_models.as_mut() {
+            let mut reasons = Vec::new();
+            preset_models.retain(|name| {
+                let Some(model) = state.models().iter().find(|model| model.name() == name) else {
+                    reasons.push(format!("{name}: unknown-model"));
+                    return false;
+                };
+                let assessment = assess_model(&routing_request, model);
+                if assessment.is_eligible() {
+                    true
+                } else {
+                    reasons.push(format!(
+                        "{name}: {}",
+                        assessment
+                            .exclusions
+                            .iter()
+                            .map(|reason| exclusion_reason_name(*reason))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ));
+                    false
+                }
+            });
+            let Some(first) = preset_models.first().cloned() else {
+                return error_response(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "wayfinder_router_destination_ineligible",
+                    format!(
+                        "routing preset '{}' has no eligible destination for this request: {}",
+                        preset_name.as_deref().unwrap_or("unknown"),
+                        reasons.join("; ")
+                    ),
+                    privacy_response_headers(&request_id, privacy_posture),
+                );
+            };
+            chosen = first;
+        } else if matches!(mode, "pinned" | "slash-pinned") {
+            if let Some(model) = state.models().iter().find(|model| model.name() == chosen) {
+                let assessment = assess_model(&routing_request, model);
+                if !assessment.is_eligible() {
+                    return destination_ineligible_response(
+                        &chosen,
+                        &assessment,
+                        privacy_response_headers(&request_id, privacy_posture),
+                        offline,
+                    );
+                }
+            }
+        }
+    }
+
     let key_id = state
         .access_policy()
         .and_then(|policy| access_grant.and_then(|grant| policy.key_id(grant)));
@@ -1834,6 +1903,18 @@ async fn chat_completions(
                 );
             }
         };
+    if let Err(message) = insert_header(
+        &mut routing_headers,
+        ROUTER_PRIVACY_POSTURE_HEADER,
+        privacy_posture_name(privacy_posture),
+    ) {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "wayfinder_router_misconfigured",
+            message,
+            request_id_headers(&request_id),
+        );
+    }
     if let Some(budget_state) = budget_state {
         routing_headers.insert(ROUTER_BUDGET_HEADER, HeaderValue::from_static(budget_state));
     }
@@ -2091,7 +2172,6 @@ async fn chat_completions(
                 .effective_failover(failover_header),
         ));
     }
-    let prompt_estimate = estimate_tokens(&extract_prompt(&messages, RouteOn::All));
     let allowed_models = state
         .access_policy()
         .and_then(|policy| access_grant.map(|grant| policy.allowed_models(grant)))
@@ -2104,7 +2184,8 @@ async fn chat_completions(
                 .iter()
                 .find(|model| model.name() == name)
                 .is_some_and(|model| {
-                    (!offline || model_is_proven_local(model))
+                    assess_model(&routing_request, model).is_eligible()
+                        && (!offline || model_is_proven_local(model))
                         && precheck_ok(prompt_estimate, model.context_window())
                         && allowed_models
                             .is_none_or(|allowed| allowed.iter().any(|allowed| allowed == name))
@@ -2121,6 +2202,17 @@ async fn chat_completions(
         }
     };
     if plan.is_empty() {
+        if let Some(model) = state.models().iter().find(|model| model.name() == chosen) {
+            let assessment = assess_model(&routing_request, model);
+            if !assessment.is_eligible() {
+                return destination_ineligible_response(
+                    &chosen,
+                    &assessment,
+                    routing_headers,
+                    offline,
+                );
+            }
+        }
         return error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "wayfinder_router_circuit_open",
@@ -3002,6 +3094,210 @@ fn model_is_proven_local(model: &ConfiguredModel) -> bool {
         && model.tier() == Some(ProviderTier::Local))
         || (model.provider() == ProviderKind::OpenAiCompatible
             && endpoint_is_literal_loopback(model.endpoint()))
+}
+
+fn model_execution_boundary(model: &ConfiguredModel) -> ExecutionBoundary {
+    if model_is_proven_local(model) {
+        return ExecutionBoundary::OnDevice;
+    }
+    if model.provider() == ProviderKind::OpenAiCompatible
+        && endpoint_is_literal_local_network(model.endpoint())
+    {
+        return ExecutionBoundary::LocalNetwork;
+    }
+    ExecutionBoundary::Hosted
+}
+
+fn model_capabilities(model: &ConfiguredModel) -> DestinationCapabilities {
+    match model.provider() {
+        // The OpenAI-compatible adapter is deliberately a pass-through. Its
+        // request contract supports multimodal messages and tool declarations;
+        // provider-specific rejection still remains a delivery failure.
+        ProviderKind::OpenAiCompatible => DestinationCapabilities {
+            text: true,
+            streaming: true,
+            image_input: true,
+            tools: true,
+        },
+        // The bounded native adapters currently accept text-only turns. They
+        // both expose ordered streaming, but reject images and tools before
+        // any provider call is attempted.
+        ProviderKind::AppleFoundationModels | ProviderKind::CodexAppServer => {
+            DestinationCapabilities {
+                text: true,
+                streaming: true,
+                image_input: false,
+                tools: false,
+            }
+        }
+    }
+}
+
+fn destination_snapshot(model: &ConfiguredModel) -> DestinationSnapshot {
+    DestinationSnapshot {
+        id: model.name().to_owned(),
+        provider_id: model.provider().as_str().to_owned(),
+        model_id: model.provider_model().to_owned(),
+        display_name: model.name().to_owned(),
+        route_tier: model
+            .tier()
+            .map_or_else(|| model.name().to_owned(), |tier| tier.as_str().to_owned()),
+        execution_boundary: model_execution_boundary(model),
+        readiness: if model.key_ready() {
+            ProviderReadiness::Ready
+        } else {
+            ProviderReadiness::Unavailable
+        },
+        billing_class: match model.provider() {
+            ProviderKind::AppleFoundationModels => wayfinder_routing_core::BillingClass::OnDevice,
+            ProviderKind::CodexAppServer => wayfinder_routing_core::BillingClass::Subscription,
+            ProviderKind::OpenAiCompatible => wayfinder_routing_core::BillingClass::ApiMetered,
+        },
+        context_window: model.context_window(),
+        capabilities: model_capabilities(model),
+        automatic_eligible: true,
+    }
+}
+
+fn assess_model(request: &RoutingRequest, model: &ConfiguredModel) -> CandidateAssessment {
+    let mut assessment = assess_destination(request, &destination_snapshot(model));
+    // The legacy gateway permits models without an advertised context window
+    // and lets the existing prompt precheck decide what the provider can take.
+    // Preserve that compatibility while still enforcing every known hard
+    // capability and boundary exclusion here.
+    assessment
+        .exclusions
+        .retain(|reason| *reason != ExclusionReason::ContextWindowUnknown);
+    assessment
+}
+
+fn privacy_posture_name(posture: PrivacyPosture) -> &'static str {
+    match posture {
+        PrivacyPosture::OnDeviceOnly => "on-device-only",
+        PrivacyPosture::LocalDevices => "local-devices",
+        PrivacyPosture::HostedAllowed => "hosted-allowed",
+    }
+}
+
+fn parse_privacy_posture(headers: &HeaderMap, offline: bool) -> Result<PrivacyPosture, String> {
+    if offline {
+        return Ok(PrivacyPosture::OnDeviceOnly);
+    }
+    let value = request_header(headers, PRIVACY_POSTURE_HEADER)?;
+    match value.map(str::trim) {
+        None => Ok(PrivacyPosture::HostedAllowed),
+        Some("on-device-only") => Ok(PrivacyPosture::OnDeviceOnly),
+        Some("local-devices") => Ok(PrivacyPosture::LocalDevices),
+        Some("hosted-allowed") => Ok(PrivacyPosture::HostedAllowed),
+        Some(value) => Err(format!(
+            "{PRIVACY_POSTURE_HEADER}: expected on-device-only, local-devices, or hosted-allowed; got {value:?}"
+        )),
+    }
+}
+
+fn request_requires_image_input(messages: &Value) -> bool {
+    fn contains_image(value: &Value) -> bool {
+        match value {
+            Value::Array(values) => values.iter().any(contains_image),
+            Value::Object(object) => {
+                object
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| matches!(kind, "image_url" | "input_image" | "image"))
+                    || object.values().any(contains_image)
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+        }
+    }
+
+    contains_image(messages)
+}
+
+fn request_requires_tools(body: &serde_json::Map<String, Value>) -> bool {
+    ["tools", "functions"].iter().any(|field| {
+        body.get(*field)
+            .and_then(Value::as_array)
+            .is_some_and(|v| !v.is_empty())
+    })
+}
+
+fn request_requirements(
+    body: &serde_json::Map<String, Value>,
+    messages: &Value,
+    prompt_estimate: u64,
+) -> RoutingRequirements {
+    let requested_output = ["max_tokens", "max_completion_tokens"]
+        .iter()
+        .filter_map(|field| body.get(*field).and_then(Value::as_u64))
+        .max()
+        .unwrap_or(0);
+    RoutingRequirements {
+        // Existing gateway model entries may intentionally omit a context
+        // window. Preserve that compatibility when the caller did not make an
+        // explicit output-size promise; the delivery precheck still applies
+        // the prompt estimate to every configured window that is known.
+        context_tokens: (requested_output > 0)
+            .then_some(prompt_estimate.saturating_add(requested_output)),
+        image_input: request_requires_image_input(messages),
+        tools: request_requires_tools(body),
+        streaming: body.get("stream").and_then(Value::as_bool) == Some(true),
+    }
+}
+
+fn exclusion_reason_name(reason: ExclusionReason) -> &'static str {
+    match reason {
+        ExclusionReason::ProviderNotReady => "provider-not-ready",
+        ExclusionReason::PrivacyBoundaryDenied => "privacy-boundary-denied",
+        ExclusionReason::TextUnsupported => "text-unsupported",
+        ExclusionReason::ContextWindowUnknown => "context-window-unknown",
+        ExclusionReason::ContextWindowTooSmall => "context-window-too-small",
+        ExclusionReason::ImageInputUnsupported => "image-input-unsupported",
+        ExclusionReason::ToolsUnsupported => "tools-unsupported",
+        ExclusionReason::StreamingUnsupported => "streaming-unsupported",
+        ExclusionReason::AutomaticNotAllowed => "automatic-not-allowed",
+    }
+}
+
+fn destination_ineligible_response(
+    model: &str,
+    assessment: &CandidateAssessment,
+    headers: HeaderMap,
+    offline: bool,
+) -> Response {
+    let reasons = assessment
+        .exclusions
+        .iter()
+        .map(|reason| exclusion_reason_name(*reason))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let offline_boundary_error = offline
+        && assessment.exclusions.len() == 1
+        && assessment.exclusions[0] == ExclusionReason::PrivacyBoundaryDenied;
+    if offline_boundary_error {
+        error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "wayfinder_router_offline_unavailable",
+            "offline delivery requires a literal loopback provider endpoint".to_owned(),
+            headers,
+        )
+    } else {
+        error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "wayfinder_router_destination_ineligible",
+            format!("destination '{model}' is not eligible for this request: {reasons}"),
+            headers,
+        )
+    }
+}
+
+fn privacy_response_headers(request_id: &str, posture: PrivacyPosture) -> HeaderMap {
+    let mut headers = request_id_headers(request_id);
+    let _ = insert_header(
+        &mut headers,
+        ROUTER_PRIVACY_POSTURE_HEADER,
+        privacy_posture_name(posture),
+    );
+    headers
 }
 
 fn parse_chat_body(bytes: &[u8]) -> Result<serde_json::Map<String, Value>, Box<Response>> {
@@ -5563,6 +5859,131 @@ mod tests {
                 .as_slice(),
             ["cloud", "cloud-backup"]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn privacy_posture_rejects_hosted_pin_before_delivery() -> TestResult {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = budget_live_state(&GatewayConfig::default(), false, Arc::clone(&calls))?;
+        let response = post_json(
+            &state,
+            "/v1/chat/completions",
+            &json!({
+                "model": "cloud",
+                "messages": [{"role": "user", "content": "keep this local"}]
+            }),
+            &[("x-wayfinder-privacy-posture", "on-device-only")],
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-wayfinder-router-privacy-posture")
+                .and_then(|value| value.to_str().ok()),
+            Some("on-device-only")
+        );
+        assert_eq!(
+            json_body(response).await?["error"]["type"],
+            "wayfinder_router_destination_ineligible"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn local_privacy_preset_filters_hosted_members_before_failover() -> TestResult {
+        let config = GatewayConfig {
+            retries: 0,
+            ..GatewayConfig::default()
+        };
+        let (state, seen) = reliability_live_state(
+            &config,
+            Vec::new(),
+            BTreeMap::from([(
+                "local".to_owned(),
+                VecDeque::from([ScriptedOutcome::Response(
+                    StatusCode::OK,
+                    br#"{"id":"local-ok","choices":[{"message":{"content":"ok"}}]}"#,
+                )]),
+            )]),
+        )?;
+        let state = state.with_route_presets(IndexMap::from([(
+            "private".to_owned(),
+            RoutePreset {
+                models: vec!["cloud".to_owned(), "local".to_owned()],
+            },
+        )]));
+        let response = post_json(
+            &state,
+            "/v1/chat/completions",
+            &json!({
+                "model": "@route/private",
+                "messages": [{"role": "user", "content": "stay nearby"}]
+            }),
+            &[("x-wayfinder-privacy-posture", "local-devices")],
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-wayfinder-router-served-by")
+                .and_then(|value| value.to_str().ok()),
+            Some("local")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-wayfinder-router-privacy-posture")
+                .and_then(|value| value.to_str().ok()),
+            Some("local-devices")
+        );
+        assert_eq!(
+            seen.lock()
+                .map_err(|_| std::io::Error::other("seen lock poisoned"))?
+                .as_slice(),
+            ["local"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_text_only_provider_rejects_tool_request_before_delivery() -> TestResult {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = AppState::new(
+            RoutingConfig::binary(0.5),
+            vec![
+                ConfiguredModel::new("apple-local", "", "system-default", None, true)
+                    .with_provider(
+                        ProviderKind::AppleFoundationModels,
+                        Some(ProviderTier::Local),
+                    ),
+            ],
+            false,
+            "test",
+        )
+        .with_delivery(Arc::new(CountingUsageDelivery {
+            calls: Arc::clone(&calls),
+        }));
+        let response = post_json(
+            &state,
+            "/v1/chat/completions",
+            &json!({
+                "model": "apple-local",
+                "tools": [{"type": "function", "function": {"name": "lookup"}}],
+                "messages": [{"role": "user", "content": "use a tool"}]
+            }),
+            &[],
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(response).await?["error"]["type"],
+            "wayfinder_router_destination_ineligible"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
         Ok(())
     }
 
