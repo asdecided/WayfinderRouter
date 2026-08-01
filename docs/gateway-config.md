@@ -50,7 +50,9 @@ operator-auth failures, and routing/savings exports; they contain only a
 bounded actor, action, timestamp, and sanitized metadata. Prompt and provider
 payloads are never written. The file is opened in append mode and serialized
 under one process-wide lock so concurrent writers cannot interleave JSONL
-records. Shared Redis audit storage remains a separate migration.
+records. With `[gateway.state] backend = "redis"`, the same bounded event is
+queued to the namespace's shared Redis audit list so replicas retain one
+operator history; the local JSONL sink remains the fallback for memory mode.
 
 ## ChatGPT account provider (opt-in)
 

@@ -56,7 +56,8 @@ the gateway does not add in-process TLS.
   a downloaded provider plugin.
 - The adjacent audit slice uses the same operator boundary and records
   authentication failures, configuration reloads, and exports without prompt
-  or provider payloads.
+  or provider payloads. Redis-backed deployments enqueue the same event into a
+  namespace-scoped shared list; memory mode uses the append-locked JSONL file.
 
 ## Verification
 
