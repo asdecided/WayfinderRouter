@@ -43,7 +43,7 @@ struct SystemdCase {
 }
 
 #[test]
-fn service_units_match_python_byte_for_byte() -> Result<(), Box<dyn Error>> {
+fn service_units_preserve_frozen_bytes() -> Result<(), Box<dyn Error>> {
     let corpus: Corpus = serde_json::from_str(SERVICE_UNIT_VECTORS)?;
     assert_eq!(corpus.schema_version, "1");
     assert_eq!(corpus.launchd.len(), 3);

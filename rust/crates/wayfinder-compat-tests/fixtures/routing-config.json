@@ -1290,7 +1290,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: invalid TOML: Expected ']' at the end of a table declaration (at line 1, column 9)"
+   "legacy_diagnostic": "compat-vector: invalid TOML: Expected ']' at the end of a table declaration (at line 1, column 9)"
   }
  },
  {
@@ -1299,7 +1299,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: '[routing]' must be a table"
+   "legacy_diagnostic": "compat-vector: '[routing]' must be a table"
   }
  },
  {
@@ -1308,7 +1308,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: 'routing.threshold' must be a number in 0.0-1.0"
+   "legacy_diagnostic": "compat-vector: 'routing.threshold' must be a number in 0.0-1.0"
   }
  },
  {
@@ -1317,7 +1317,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: 'routing.threshold' must be a number in 0.0-1.0"
+   "legacy_diagnostic": "compat-vector: 'routing.threshold' must be a number in 0.0-1.0"
   }
  },
  {
@@ -1326,7 +1326,7 @@
   "threshold_environment": "not-a-number",
   "outcome": {
    "status": "invalid",
-   "python_error": "WAYFINDER_ROUTER_THRESHOLD must be a number, got 'not-a-number'"
+   "legacy_diagnostic": "WAYFINDER_ROUTER_THRESHOLD must be a number, got 'not-a-number'"
   }
  },
  {
@@ -1335,7 +1335,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: 'routing.weights' must be a table"
+   "legacy_diagnostic": "compat-vector: 'routing.weights' must be a table"
   }
  },
  {
@@ -1344,7 +1344,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: 'routing.weights.surprise' is not a known feature (one of word_count, heading_count, max_heading_depth, list_item_count, link_count, code_block_count, table_row_count, reasoning_term_count, math_symbol_count, constraint_term_count, question_count)"
+   "legacy_diagnostic": "compat-vector: 'routing.weights.surprise' is not a known feature (one of word_count, heading_count, max_heading_depth, list_item_count, link_count, code_block_count, table_row_count, reasoning_term_count, math_symbol_count, constraint_term_count, question_count)"
   }
  },
  {
@@ -1353,7 +1353,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: 'routing.weights.word_count' must be a non-negative number"
+   "legacy_diagnostic": "compat-vector: 'routing.weights.word_count' must be a non-negative number"
   }
  },
  {
@@ -1362,7 +1362,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: '[routing.lexicon]' must be a table"
+   "legacy_diagnostic": "compat-vector: '[routing.lexicon]' must be a table"
   }
  },
  {
@@ -1371,7 +1371,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: unknown 'routing.lexicon' keys: unknown_family (known: constraint_terms, reasoning_terms)"
+   "legacy_diagnostic": "compat-vector: unknown 'routing.lexicon' keys: unknown_family (known: constraint_terms, reasoning_terms)"
   }
  },
  {
@@ -1380,7 +1380,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: 'routing.lexicon.reasoning_terms' must be a list of non-empty strings"
+   "legacy_diagnostic": "compat-vector: 'routing.lexicon.reasoning_terms' must be a list of non-empty strings"
   }
  },
  {
@@ -1389,7 +1389,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: 'routing.tiers' must be a non-empty array of tables"
+   "legacy_diagnostic": "compat-vector: 'routing.tiers' must be a non-empty array of tables"
   }
  },
  {
@@ -1398,7 +1398,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: the first tier must have min_score = 0.0"
+   "legacy_diagnostic": "compat-vector: the first tier must have min_score = 0.0"
   }
  },
  {
@@ -1407,16 +1407,16 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: tier 'min_score' values must be strictly ascending"
+   "legacy_diagnostic": "compat-vector: tier 'min_score' values must be strictly ascending"
   }
  },
  {
-  "name": "descending_tiers_are_rejected_by_current_python",
+  "name": "descending_tiers_are_rejected_by_frozen_contract",
   "toml": "[[routing.tiers]]\nmin_score = 0.6\nmodel = \"large\"\n\n[[routing.tiers]]\nmin_score = 0.0\nmodel = \"small\"\n\n[[routing.tiers]]\nmin_score = 0.3\nmodel = \"medium\"\n",
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: the first tier must have min_score = 0.0"
+   "legacy_diagnostic": "compat-vector: the first tier must have min_score = 0.0"
   }
  },
  {
@@ -1425,7 +1425,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: tier 'model' must be a non-empty string"
+   "legacy_diagnostic": "compat-vector: tier 'model' must be a non-empty string"
   }
  },
  {
@@ -1434,7 +1434,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: tier 'cost' must be a non-negative number"
+   "legacy_diagnostic": "compat-vector: tier 'cost' must be a non-negative number"
   }
  },
  {
@@ -1443,7 +1443,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: '[routing.classifier]' must be a table"
+   "legacy_diagnostic": "compat-vector: '[routing.classifier]' must be a table"
   }
  },
  {
@@ -1452,7 +1452,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: 'routing.classifier.models' must be 2+ unique non-empty strings"
+   "legacy_diagnostic": "compat-vector: 'routing.classifier.models' must be 2+ unique non-empty strings"
   }
  },
  {
@@ -1461,7 +1461,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: 'routing.classifier.intercepts' must be a list of 2 numbers"
+   "legacy_diagnostic": "compat-vector: 'routing.classifier.intercepts' must be a list of 2 numbers"
   }
  },
  {
@@ -1470,7 +1470,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: '[routing.classifier.weights]' must be a table"
+   "legacy_diagnostic": "compat-vector: '[routing.classifier.weights]' must be a table"
   }
  },
  {
@@ -1479,7 +1479,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: 'routing.classifier.weights.surprise' is not a known feature"
+   "legacy_diagnostic": "compat-vector: 'routing.classifier.weights.surprise' is not a known feature"
   }
  },
  {
@@ -1488,7 +1488,7 @@
   "threshold_environment": null,
   "outcome": {
    "status": "invalid",
-   "python_error": "compat-vector: 'routing.classifier.weights.word_count' must be a list of 2 numbers"
+   "legacy_diagnostic": "compat-vector: 'routing.classifier.weights.word_count' must be a list of 2 numbers"
   }
  }
 ]

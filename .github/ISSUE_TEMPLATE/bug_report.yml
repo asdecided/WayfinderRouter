@@ -13,10 +13,10 @@ body:
     attributes:
       label: Which surface?
       options:
-        - Scored core (route / library / calibrate)
-        - Gateway (serve / proxy)
-        - Terminal chat (TUI)
-        - Local UI (ui)
+        - Scored routing core
+        - Rust gateway (serve / proxy)
+        - Wayfinder Desktop Chat or Settings
+        - Wayfinder iPhone or iPad
         - Other / not sure
     validations:
       required: true
@@ -24,8 +24,8 @@ body:
     id: version
     attributes:
       label: Version
-      description: From `pip show wayfinder-router`, or the release tag.
-      placeholder: "2026.7.0"
+      description: From `wayfinder-router --version`, Wayfinder About, or the release tag.
+      placeholder: "Desktop 0.1.0 (1); router 0.1.0"
     validations:
       required: true
   - type: textarea

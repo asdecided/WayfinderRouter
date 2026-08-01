@@ -64,7 +64,7 @@ fn rust_matches_all_21_migration_golden_decisions() -> Result<(), Box<dyn Error>
 }
 
 #[test]
-fn rust_matches_python_tier_and_classifier_boundaries() -> Result<(), Box<dyn Error>> {
+fn rust_preserves_frozen_tier_and_classifier_boundaries() -> Result<(), Box<dyn Error>> {
     let cases: Vec<BoundaryDecision> = serde_json::from_str(ROUTING_BOUNDARIES)?;
 
     assert_eq!(cases.len(), 8);

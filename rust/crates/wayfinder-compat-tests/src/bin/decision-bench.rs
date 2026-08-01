@@ -1,8 +1,8 @@
 //! Minimal dependency-free routing microbenchmark.
 //!
-//! This is not a pass/fail test. It runs the checked-in Python-authoritative
-//! corpus through the Rust kernel in one process so the companion Python
-//! runner can compare like-for-like decision throughput on the same machine.
+//! This is not a pass/fail test. It runs the checked-in migration corpus
+//! through the authoritative Rust kernel in one process for repeatable
+//! warm-loop measurements.
 
 use std::error::Error;
 use std::hint::black_box;

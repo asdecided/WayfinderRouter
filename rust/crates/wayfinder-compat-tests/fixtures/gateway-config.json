@@ -521,7 +521,7 @@
   "toml": "[gateway\noffline = true\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: invalid TOML: Expected ']' at the end of a table declaration (at line 1, column 9)"
+   "legacy_diagnostic": "gateway-compat-vector: invalid TOML: Expected ']' at the end of a table declaration (at line 1, column 9)"
   }
  },
  {
@@ -530,7 +530,7 @@
   "toml": "gateway = 1\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: '[gateway]' must be a table"
+   "legacy_diagnostic": "gateway-compat-vector: '[gateway]' must be a table"
   }
  },
  {
@@ -539,7 +539,7 @@
   "toml": "[gateway]\nroute_on = \"latest\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.route_on' must be one of turn, last_user, user, all"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.route_on' must be one of turn, last_user, user, all"
   }
  },
  {
@@ -548,7 +548,7 @@
   "toml": "[gateway]\nroute_on = false\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.route_on' must be one of turn, last_user, user, all"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.route_on' must be one of turn, last_user, user, all"
   }
  },
  {
@@ -557,7 +557,7 @@
   "toml": "[gateway]\nsticky = 1\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.sticky' must be a boolean"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.sticky' must be a boolean"
   }
  },
  {
@@ -566,7 +566,7 @@
   "toml": "[gateway]\nsticky_cooldown = -1\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.sticky_cooldown' must be a non-negative integer"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.sticky_cooldown' must be a non-negative integer"
   }
  },
  {
@@ -575,7 +575,7 @@
   "toml": "[gateway]\nsticky_cooldown = true\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.sticky_cooldown' must be a non-negative integer"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.sticky_cooldown' must be a non-negative integer"
   }
  },
  {
@@ -584,7 +584,7 @@
   "toml": "[gateway]\nsticky_cooldown = 1.0\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.sticky_cooldown' must be a non-negative integer"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.sticky_cooldown' must be a non-negative integer"
   }
  },
  {
@@ -593,7 +593,7 @@
   "toml": "[gateway]\nslash_directives = \"yes\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.slash_directives' must be a boolean"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.slash_directives' must be a boolean"
   }
  },
  {
@@ -602,7 +602,7 @@
   "toml": "[gateway]\noffline = 1\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.offline' must be a boolean"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.offline' must be a boolean"
   }
  },
  {
@@ -611,7 +611,7 @@
   "toml": "[gateway]\nretries = -1\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.retries' must be a non-negative integer"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.retries' must be a non-negative integer"
   }
  },
  {
@@ -620,7 +620,7 @@
   "toml": "[gateway]\nretries = true\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.retries' must be a non-negative integer"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.retries' must be a non-negative integer"
   }
  },
  {
@@ -629,7 +629,7 @@
   "toml": "[gateway]\nbreaker_threshold = 0\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.breaker_threshold' must be a positive integer"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.breaker_threshold' must be a positive integer"
   }
  },
  {
@@ -638,7 +638,7 @@
   "toml": "[gateway]\nbreaker_threshold = 1.0\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.breaker_threshold' must be a positive integer"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.breaker_threshold' must be a positive integer"
   }
  },
  {
@@ -647,7 +647,7 @@
   "toml": "[gateway]\nbreaker_cooldown = -0.1\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.breaker_cooldown' must be a non-negative number"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.breaker_cooldown' must be a non-negative number"
   }
  },
  {
@@ -656,7 +656,7 @@
   "toml": "[gateway]\nbreaker_cooldown = true\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.breaker_cooldown' must be a non-negative number"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.breaker_cooldown' must be a non-negative number"
   }
  },
  {
@@ -665,7 +665,7 @@
   "toml": "[gateway]\nfailover = \"random\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.failover' must be one of same-tier, degrade, escalate"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.failover' must be one of same-tier, degrade, escalate"
   }
  },
  {
@@ -674,7 +674,7 @@
   "toml": "[gateway]\nbudget = 5\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: '[gateway.budget]' must be a table"
+   "legacy_diagnostic": "gateway-compat-vector: '[gateway.budget]' must be a table"
   }
  },
  {
@@ -683,7 +683,7 @@
   "toml": "[gateway.budget]\nwindow = \"day\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.budget.limit' must be a positive number"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.budget.limit' must be a positive number"
   }
  },
  {
@@ -692,7 +692,7 @@
   "toml": "[gateway.budget]\nlimit = 0\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.budget.limit' must be a positive number"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.budget.limit' must be a positive number"
   }
  },
  {
@@ -701,7 +701,7 @@
   "toml": "[gateway.budget]\nlimit = true\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.budget.limit' must be a positive number"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.budget.limit' must be a positive number"
   }
  },
  {
@@ -710,7 +710,7 @@
   "toml": "[gateway.budget]\nlimit = 1\nwindow = \"year\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.budget.window' must be one of day, month, all"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.budget.window' must be one of day, month, all"
   }
  },
  {
@@ -719,7 +719,7 @@
   "toml": "[gateway.budget]\nlimit = 1\non_breach = \"panic\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.budget.on_breach' must be one of degrade, block"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.budget.on_breach' must be one of degrade, block"
   }
  },
  {
@@ -728,7 +728,7 @@
   "toml": "[gateway]\ncache = 5\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: '[gateway.cache]' must be a table"
+   "legacy_diagnostic": "gateway-compat-vector: '[gateway.cache]' must be a table"
   }
  },
  {
@@ -737,7 +737,7 @@
   "toml": "[gateway.cache]\nenabled = \"yes\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.cache.enabled' must be a boolean"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.cache.enabled' must be a boolean"
   }
  },
  {
@@ -746,7 +746,7 @@
   "toml": "[gateway.cache]\nttl = -1\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.cache.ttl' must be a non-negative number"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.cache.ttl' must be a non-negative number"
   }
  },
  {
@@ -755,7 +755,7 @@
   "toml": "[gateway.cache]\nmax_entries = 0\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.cache.max_entries' must be a positive integer"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.cache.max_entries' must be a positive integer"
   }
  },
  {
@@ -764,7 +764,7 @@
   "toml": "[gateway.cache]\nmax_bytes = true\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.cache.max_bytes' must be a positive integer"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.cache.max_bytes' must be a positive integer"
   }
  },
  {
@@ -773,7 +773,7 @@
   "toml": "[gateway]\nrate_limit = 5\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: '[gateway.rate_limit]' must be a table"
+   "legacy_diagnostic": "gateway-compat-vector: '[gateway.rate_limit]' must be a table"
   }
  },
  {
@@ -782,7 +782,7 @@
   "toml": "[gateway.rate_limit]\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: '[gateway.rate_limit]' must set 'rpm' and/or 'tpm'"
+   "legacy_diagnostic": "gateway-compat-vector: '[gateway.rate_limit]' must set 'rpm' and/or 'tpm'"
   }
  },
  {
@@ -791,7 +791,7 @@
   "toml": "[gateway.rate_limit]\nrpm = 0\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.rate_limit.rpm' must be a positive integer"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.rate_limit.rpm' must be a positive integer"
   }
  },
  {
@@ -800,7 +800,7 @@
   "toml": "[gateway.rate_limit]\ntpm = true\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.rate_limit.tpm' must be a positive integer"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.rate_limit.tpm' must be a positive integer"
   }
  },
  {
@@ -809,7 +809,7 @@
   "toml": "[gateway.rate_limit]\nrpm = 1\nwindow = 0\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.rate_limit.window' must be a positive number"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.rate_limit.window' must be a positive number"
   }
  },
  {
@@ -818,7 +818,7 @@
   "toml": "[gateway]\nkeys = 5\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: '[gateway.keys]' must be a table"
+   "legacy_diagnostic": "gateway-compat-vector: '[gateway.keys]' must be a table"
   }
  },
  {
@@ -827,7 +827,7 @@
   "toml": "[gateway.keys]\nteam = 5\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: '[gateway.keys.team]' must be a table"
+   "legacy_diagnostic": "gateway-compat-vector: '[gateway.keys.team]' must be a table"
   }
  },
  {
@@ -836,7 +836,7 @@
   "toml": "[gateway.keys.team]\ntags = [\"x\"]\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.keys.team.hash' must be a 64-char SHA-256 hex digest (mint a key with `wayfinder-router keys new`)"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.keys.team.hash' must be a 64-char SHA-256 hex digest (mint a key with `wayfinder-router keys new`)"
   }
  },
  {
@@ -845,7 +845,7 @@
   "toml": "[gateway.keys.team]\nhash = \"not-a-digest\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.keys.team.hash' must be a 64-char SHA-256 hex digest (mint a key with `wayfinder-router keys new`)"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.keys.team.hash' must be a 64-char SHA-256 hex digest (mint a key with `wayfinder-router keys new`)"
   }
  },
  {
@@ -854,7 +854,7 @@
   "toml": "[gateway.keys.team]\nhash = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\ntags = [\"ok\", \"\"]\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.keys.team.tags' must be a list of strings"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.keys.team.tags' must be a list of strings"
   }
  },
  {
@@ -863,7 +863,7 @@
   "toml": "[gateway.keys.team]\nhash = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\nmodels = \"local\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.keys.team.models' must be a list of model names"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.keys.team.models' must be a list of model names"
   }
  },
  {
@@ -872,7 +872,7 @@
   "toml": "[gateway]\nmodels = true\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: '[gateway.models]' must be a table"
+   "legacy_diagnostic": "gateway-compat-vector: '[gateway.models]' must be a table"
   }
  },
  {
@@ -881,7 +881,7 @@
   "toml": "[gateway]\nmodels = 1\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: '[gateway.models]' must be a table"
+   "legacy_diagnostic": "gateway-compat-vector: '[gateway.models]' must be a table"
   }
  },
  {
@@ -890,7 +890,7 @@
   "toml": "[gateway]\nmodels = \"configured\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: '[gateway.models]' must be a table"
+   "legacy_diagnostic": "gateway-compat-vector: '[gateway.models]' must be a table"
   }
  },
  {
@@ -899,7 +899,7 @@
   "toml": "[gateway]\nmodels = [0]\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: '[gateway.models]' must be a table"
+   "legacy_diagnostic": "gateway-compat-vector: '[gateway.models]' must be a table"
   }
  },
  {
@@ -908,7 +908,7 @@
   "toml": "[gateway.models]\nlocal = 1\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: '[gateway.models.local]' must be a table"
+   "legacy_diagnostic": "gateway-compat-vector: '[gateway.models.local]' must be a table"
   }
  },
  {
@@ -917,7 +917,7 @@
   "toml": "[gateway.models.local]\nmodel = \"m\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.models.local.base_url' must be a string"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.models.local.base_url' must be a string"
   }
  },
  {
@@ -926,7 +926,7 @@
   "toml": "[gateway.models.local]\nbase_url = \"http://127.0.0.1:11434/v1\"\nmodel = \"local-model\"\nprovider = \"future-provider\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.models.local.provider' must be one of openai-compatible, apple-foundation-models"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.models.local.provider' must be one of openai-compatible, apple-foundation-models"
   }
  },
  {
@@ -935,7 +935,7 @@
   "toml": "[gateway.models.apple-local]\nprovider = \"apple-foundation-models\"\nmodel = \"internal-version\"\ntier = \"local\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.models.apple-local.model' must be system-default for apple-foundation-models"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.models.apple-local.model' must be system-default for apple-foundation-models"
   }
  },
  {
@@ -944,7 +944,7 @@
   "toml": "[gateway.models.apple-local]\nprovider = \"apple-foundation-models\"\nmodel = \"system-default\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.models.apple-local.tier' must be local for apple-foundation-models"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.models.apple-local.tier' must be local for apple-foundation-models"
   }
  },
  {
@@ -953,7 +953,7 @@
   "toml": "[gateway.models.apple-local]\nprovider = \"apple-foundation-models\"\nbase_url = \"http://localhost/v1\"\nmodel = \"system-default\"\ntier = \"local\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.models.apple-local.base_url' is not valid for apple-foundation-models"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.models.apple-local.base_url' is not valid for apple-foundation-models"
   }
  },
  {
@@ -962,7 +962,7 @@
   "toml": "[gateway.models.apple-local]\nprovider = \"apple-foundation-models\"\nmodel = \"system-default\"\ntier = \"local\"\napi_key_env = \"APPLE_KEY\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.models.apple-local' cannot configure credentials for apple-foundation-models"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.models.apple-local' cannot configure credentials for apple-foundation-models"
   }
  },
  {
@@ -971,7 +971,7 @@
   "toml": "[gateway.models.local]\nbase_url = \"\"\nmodel = \"m\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.models.local.base_url' must be a string"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.models.local.base_url' must be a string"
   }
  },
  {
@@ -980,7 +980,7 @@
   "toml": "[gateway.models.local]\nbase_url = \"http://x/v1\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.models.local.model' must be a string"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.models.local.model' must be a string"
   }
  },
  {
@@ -989,7 +989,7 @@
   "toml": "[gateway.models.local]\nbase_url = \"http://127.0.0.1:11434/v1\"\nmodel = \"local-model\"\napi_key_env = \"\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.models.local.api_key_env' must be a non-empty string"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.models.local.api_key_env' must be a non-empty string"
   }
  },
  {
@@ -998,7 +998,7 @@
   "toml": "[gateway.models.local]\nbase_url = \"http://127.0.0.1:11434/v1\"\nmodel = \"local-model\"\napi_key_cmd = \"security lookup\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.models.local.api_key_cmd' needs 'api_key_env' to name the variable it fills"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.models.local.api_key_cmd' needs 'api_key_env' to name the variable it fills"
   }
  },
  {
@@ -1007,7 +1007,7 @@
   "toml": "[gateway.models.local]\nbase_url = \"http://127.0.0.1:11434/v1\"\nmodel = \"local-model\"\ncost_per_1k = -0.01\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.models.local.cost_per_1k' must be a non-negative number"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.models.local.cost_per_1k' must be a non-negative number"
   }
  },
  {
@@ -1016,7 +1016,7 @@
   "toml": "[gateway.models.local]\nbase_url = \"http://127.0.0.1:11434/v1\"\nmodel = \"local-model\"\nfallbacks = \"backup\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.models.local.fallbacks' must be a list of model names"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.models.local.fallbacks' must be a list of model names"
   }
  },
  {
@@ -1025,7 +1025,7 @@
   "toml": "[gateway.models.local]\nbase_url = \"http://127.0.0.1:11434/v1\"\nmodel = \"local-model\"\nfallbacks = [\"\"]\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.models.local.fallbacks' must be a list of model names"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.models.local.fallbacks' must be a list of model names"
   }
  },
  {
@@ -1034,7 +1034,7 @@
   "toml": "[gateway.models.local]\nbase_url = \"http://127.0.0.1:11434/v1\"\nmodel = \"local-model\"\ncontext_window = 0\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.models.local.context_window' must be a positive integer"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.models.local.context_window' must be a positive integer"
   }
  },
  {
@@ -1043,7 +1043,7 @@
   "toml": "[gateway.models.local]\nbase_url = \"http://127.0.0.1:11434/v1\"\nmodel = \"local-model\"\nfallbacks = [\"missing\"]\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.models.local.fallbacks' names unknown model 'missing'"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.models.local.fallbacks' names unknown model 'missing'"
   }
  },
  {
@@ -1052,7 +1052,7 @@
   "toml": "[gateway.models.local]\nbase_url = \"http://127.0.0.1:11434/v1\"\nmodel = \"local-model\"\nfallbacks = [\"local\"]\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.models.local.fallbacks' cannot include itself"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.models.local.fallbacks' cannot include itself"
   }
  },
  {
@@ -1061,7 +1061,7 @@
   "toml": "[gateway.keys.team]\nhash = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\nmodels = [\"missing\"]\n\n[gateway.models.local]\nbase_url = \"http://127.0.0.1:11434/v1\"\nmodel = \"local-model\"\n",
   "outcome": {
    "status": "invalid",
-   "python_error": "gateway-compat-vector: 'gateway.keys.team.models' names unknown model 'missing'"
+   "legacy_diagnostic": "gateway-compat-vector: 'gateway.keys.team.models' names unknown model 'missing'"
   }
  },
  {
