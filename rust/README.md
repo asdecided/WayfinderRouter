@@ -59,6 +59,11 @@ Apple-framework work.
 Provider execution choice, the iOS shell, auth, Apple model, and pairing remain
 separate pull requests under WF-ROADMAP-0016.
 
+Managed deployments keep virtual keys on the data plane and may put the local
+operator routes behind OIDC using the `[gateway.auth]` contract in
+WF-ADR-0057. The gateway validates RS256 JWKS keys in a bounded in-memory
+cache; it does not broker IdP sessions or provider credentials.
+
 ## Governing documents
 
 - `decisions/WF-ADR-0046-rust-only-runtime.md`

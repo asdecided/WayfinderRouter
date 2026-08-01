@@ -150,9 +150,10 @@ model ingress.
   and ledger are process-local. Redis shares only the global/workspace/key
   request/token windows in this first slice; budgets, cache, ledger, and
   distributed admission remain separate migrations.
-- A separately authenticated operator listener, OIDC, audit log, shared state,
-  and Helm packaging remain follow-on work; this first boundary does not claim
-  those capabilities.
+- The local operator surface can now require OIDC with `[gateway.auth]` while
+  virtual keys remain the data-plane credential. Audit logging and Helm
+  packaging remain follow-on migrations; OIDC does not turn the managed
+  listener into a general account-control surface.
 
 See [WF-ADR-0050](../decisions/WF-ADR-0050-managed-gateway-surfaces.md) for the
 authority separation and threat model, and
@@ -164,5 +165,9 @@ workspace, alias, and multi-turn boundaries, and
 shared-state contract and degradation behavior, and
 [WF-ADR-0054](../decisions/WF-ADR-0054-model-deployment-pools.md) for stable
 aliases and weighted deployment pools, and
+[WF-ADR-0055](../decisions/WF-ADR-0055-named-routing-presets.md) for bounded
+named delivery policy, and
 [WF-ADR-0056](../decisions/WF-ADR-0056-hard-destination-eligibility.md) for
-hard privacy and capability filtering.
+hard privacy and capability filtering, and
+[WF-ADR-0057](../decisions/WF-ADR-0057-operator-oidc-auth.md) for the OIDC
+operator boundary.

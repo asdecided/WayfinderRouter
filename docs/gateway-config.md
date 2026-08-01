@@ -18,6 +18,31 @@ itself stays deterministic and offline — none of these touch the scored path.
 | `serve --dry-run` | return routing decisions without calling any upstream |
 | `serve --surface local\|data-plane` | `local` is the default loopback Desktop/operator surface; `data-plane` is the fail-closed network surface and requires virtual keys plus a configured model |
 
+## Operator authentication
+
+Operator metadata and policy endpoints can use the organisation's OIDC issuer
+without changing the virtual-key contract used by inference. The default keeps
+the existing loopback behavior:
+
+```toml
+[gateway.auth]
+mode = "oidc" # vkeys (default), oidc, or both
+issuer = "https://login.example.com/"
+audience = "wayfinder-operators"
+jwks_url = "https://login.example.com/.well-known/jwks.json"
+admin_claim = "wayfinder_admin"
+```
+
+`oidc` requires a signed RS256 bearer JWT for `/router/*`, `/metrics`,
+`/v1/savings`, `/savings`, and configuration mutation. The token must have the
+configured issuer and audience, a live `exp`, a non-empty subject, and a truthy
+configured admin claim (`true`, `admin`, or `operator`, including in a list).
+`both` also accepts a configured virtual key during migration; `vkeys` leaves
+the legacy local operator surface unchanged. JWKS keys are cached in memory for
+five minutes and refreshed by `kid`; no token, session, or IdP secret is stored.
+Unknown algorithms, key IDs, malformed claims, and unavailable JWKS endpoints
+fail closed. See [WF-ADR-0057](../decisions/WF-ADR-0057-operator-oidc-auth.md).
+
 ## ChatGPT account provider (opt-in)
 
 `codex-app-server` is a distinct hosted provider for models made available through an eligible
