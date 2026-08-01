@@ -6,7 +6,10 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Instant;
 
 use thiserror::Error;
@@ -14,6 +17,7 @@ use wayfinder_config::gateway::{GatewayConfig, RateLimit as ConfigRateLimit};
 
 use crate::auth;
 use crate::rate_limit::{RateLimitError, RateLimiter, RateResult, RateSnapshot};
+use crate::state::{StateBackend, StateBackendError, StateLimitConfig};
 
 /// Bound compare work and dynamic key-attribution cardinality.
 pub const MAX_VIRTUAL_KEYS: usize = 256;
@@ -61,6 +65,9 @@ pub enum AccessPolicyError {
     /// A configured limiter could not be constructed or synchronized.
     #[error(transparent)]
     RateLimit(#[from] RateLimitError),
+    /// A shared-state backend operation failed while constructing policy state.
+    #[error(transparent)]
+    StateBackend(#[from] StateBackendError),
 }
 
 /// Shared authentication and rate-limit state.
@@ -69,6 +76,7 @@ pub struct AccessPolicy {
     global_limiter: Option<Arc<RateLimiter>>,
     keys: Arc<[VirtualKeyPolicy]>,
     clock: Clock,
+    shared: Option<Arc<SharedAccessPolicy>>,
 }
 
 impl AccessPolicy {
@@ -141,7 +149,19 @@ impl AccessPolicy {
             global_limiter,
             keys: Arc::from(keys),
             clock: Arc::new(clock),
+            shared: None,
         })
+    }
+
+    /// Build policy state with an optional fleet-wide backend.
+    pub fn from_gateway_config_with_backend(
+        config: &GatewayConfig,
+        clock: impl Fn() -> f64 + Send + Sync + 'static,
+        backend: Arc<dyn StateBackend>,
+    ) -> Result<Self, AccessPolicyError> {
+        let mut policy = Self::from_gateway_config_with_clock(config, clock)?;
+        policy.shared = Some(Arc::new(SharedAccessPolicy::new(config, backend)?));
+        Ok(policy)
     }
 
     /// Whether this policy changes the otherwise-open gateway behavior.
@@ -276,6 +296,97 @@ impl AccessPolicy {
         Ok(())
     }
 
+    /// Reserve shared global state, degrading to local counters on outage.
+    pub(crate) async fn admit_shared_global(
+        &self,
+    ) -> Result<Option<RateResult>, AccessPolicyError> {
+        let Some(shared) = &self.shared else {
+            return self.admit_global();
+        };
+        match shared.admit_global((self.clock)()).await {
+            Ok(result) => Ok(result),
+            Err(_) => {
+                shared.degraded.store(true, Ordering::Relaxed);
+                self.admit_global()
+            }
+        }
+    }
+
+    /// Reserve shared workspace/key state, degrading to local counters on outage.
+    pub(crate) async fn admit_shared_key(
+        &self,
+        grant: AccessGrant,
+    ) -> Result<Option<RateResult>, AccessPolicyError> {
+        let Some(shared) = &self.shared else {
+            return self.admit_key(grant);
+        };
+        match shared.admit_key(grant, (self.clock)()).await {
+            Ok(result) => Ok(result),
+            Err(_) => {
+                shared.degraded.store(true, Ordering::Relaxed);
+                self.admit_key(grant)
+            }
+        }
+    }
+
+    /// Read shared rate headers, falling back to local counters on outage.
+    pub(crate) async fn tightest_snapshot_shared(
+        &self,
+        grant: AccessGrant,
+    ) -> Result<Option<RateSnapshot>, AccessPolicyError> {
+        let Some(shared) = &self.shared else {
+            return self.tightest_snapshot(grant);
+        };
+        match shared.snapshot(grant, (self.clock)()).await {
+            Ok(snapshot) => Ok(snapshot),
+            Err(_) => {
+                shared.degraded.store(true, Ordering::Relaxed);
+                self.tightest_snapshot(grant)
+            }
+        }
+    }
+
+    /// Record shared token usage asynchronously without changing local callers.
+    pub(crate) async fn add_shared_tokens(
+        &self,
+        grant: AccessGrant,
+        tokens: u64,
+    ) -> Result<(), AccessPolicyError> {
+        let Some(shared) = &self.shared else {
+            return Ok(());
+        };
+        if shared
+            .add_tokens(grant, tokens, (self.clock)())
+            .await
+            .is_err()
+        {
+            shared.degraded.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Whether a shared backend has recently failed and local fallback is active.
+    #[must_use]
+    pub fn state_degraded(&self) -> bool {
+        self.shared
+            .as_ref()
+            .is_some_and(|shared| shared.degraded.load(Ordering::Relaxed))
+    }
+
+    /// Selected backend name for prompt-free diagnostics.
+    #[must_use]
+    pub fn state_backend_name(&self) -> &'static str {
+        self.shared
+            .as_ref()
+            .map_or("memory", |shared| shared.backend.backend_name())
+    }
+
+    /// Whether this policy uses the shared-state contract.
+    #[must_use]
+    pub(crate) fn uses_shared_state(&self) -> bool {
+        self.shared.is_some()
+    }
+
     fn key(&self, grant: AccessGrant) -> Option<&VirtualKeyPolicy> {
         grant.key_index.and_then(|index| self.keys.get(index))
     }
@@ -290,6 +401,8 @@ impl fmt::Debug for AccessPolicy {
                 &self.global_limiter.is_some(),
             )
             .field("virtual_key_count", &self.keys.len())
+            .field("state_backend", &self.state_backend_name())
+            .field("state_degraded", &self.state_degraded())
             .finish_non_exhaustive()
     }
 }
@@ -297,6 +410,189 @@ impl fmt::Debug for AccessPolicy {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AccessGrant {
     key_index: Option<usize>,
+}
+
+#[derive(Clone)]
+struct SharedLimit {
+    key: Arc<str>,
+    config: StateLimitConfig,
+}
+
+struct SharedKeyPolicy {
+    workspace: Option<SharedLimit>,
+    limiter: Option<SharedLimit>,
+}
+
+struct SharedAccessPolicy {
+    backend: Arc<dyn StateBackend>,
+    global: Option<SharedLimit>,
+    keys: Arc<[SharedKeyPolicy]>,
+    degraded: AtomicBool,
+}
+
+impl SharedAccessPolicy {
+    fn new(
+        config: &GatewayConfig,
+        backend: Arc<dyn StateBackend>,
+    ) -> Result<Self, AccessPolicyError> {
+        let namespace = Arc::<str>::from(config.state.namespace.as_str());
+        let global = config.rate_limit.as_ref().map(|limit| SharedLimit {
+            key: format!("{namespace}:global").into(),
+            config: shared_limit_config(limit),
+        });
+        let workspaces = config
+            .workspaces
+            .iter()
+            .filter_map(|(id, workspace)| {
+                workspace.rate_limit.as_ref().map(|limit| {
+                    (
+                        id.clone(),
+                        SharedLimit {
+                            key: format!("{namespace}:workspace:{id}").into(),
+                            config: shared_limit_config(limit),
+                        },
+                    )
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
+        let keys = config
+            .keys
+            .iter()
+            .map(|(id, key)| SharedKeyPolicy {
+                workspace: key
+                    .workspace
+                    .as_ref()
+                    .and_then(|workspace| workspaces.get(workspace).cloned()),
+                limiter: key.rate_limit.as_ref().map(|limit| SharedLimit {
+                    key: format!("{namespace}:key:{id}").into(),
+                    config: shared_limit_config(limit),
+                }),
+            })
+            .collect::<Vec<_>>();
+        Ok(Self {
+            backend,
+            global,
+            keys: Arc::from(keys),
+            degraded: AtomicBool::new(false),
+        })
+    }
+
+    async fn admit_global(
+        &self,
+        now_seconds: f64,
+    ) -> Result<Option<RateResult>, StateBackendError> {
+        let Some(global) = self.global.as_ref() else {
+            return Ok(None);
+        };
+        let result = self
+            .backend
+            .admit(&global.key, global.config, now_seconds)
+            .await?;
+        Ok(Some(result))
+    }
+
+    async fn admit_key(
+        &self,
+        grant: AccessGrant,
+        now_seconds: f64,
+    ) -> Result<Option<RateResult>, StateBackendError> {
+        let Some(key) = grant.key_index.and_then(|index| self.keys.get(index)) else {
+            return Ok(None);
+        };
+        if let Some(workspace) = key.workspace.as_ref() {
+            let result = self
+                .backend
+                .admit(&workspace.key, workspace.config, now_seconds)
+                .await?;
+            if !result.allowed() {
+                return Ok(Some(result));
+            }
+        }
+        if let Some(limiter) = key.limiter.as_ref() {
+            let result = self
+                .backend
+                .admit(&limiter.key, limiter.config, now_seconds)
+                .await?;
+            if !result.allowed() {
+                return Ok(Some(result));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn snapshot(
+        &self,
+        grant: AccessGrant,
+        now_seconds: f64,
+    ) -> Result<Option<RateSnapshot>, StateBackendError> {
+        let mut snapshots = Vec::new();
+        if let Some(global) = self.global.as_ref() {
+            if let Some(snapshot) = self
+                .backend
+                .snapshot(&global.key, global.config, now_seconds)
+                .await?
+            {
+                snapshots.push(snapshot);
+            }
+        }
+        if let Some(key) = grant.key_index.and_then(|index| self.keys.get(index)) {
+            if let Some(workspace) = key.workspace.as_ref() {
+                if let Some(snapshot) = self
+                    .backend
+                    .snapshot(&workspace.key, workspace.config, now_seconds)
+                    .await?
+                {
+                    snapshots.push(snapshot);
+                }
+            }
+            if let Some(limiter) = key.limiter.as_ref() {
+                if let Some(snapshot) = self
+                    .backend
+                    .snapshot(&limiter.key, limiter.config, now_seconds)
+                    .await?
+                {
+                    snapshots.push(snapshot);
+                }
+            }
+        }
+        Ok(snapshots
+            .into_iter()
+            .min_by_key(|snapshot| snapshot.remaining))
+    }
+
+    async fn add_tokens(
+        &self,
+        grant: AccessGrant,
+        tokens: u64,
+        now_seconds: f64,
+    ) -> Result<(), StateBackendError> {
+        if let Some(global) = self.global.as_ref() {
+            self.backend
+                .add_tokens(&global.key, global.config, tokens, now_seconds)
+                .await?;
+        }
+        if let Some(key) = grant.key_index.and_then(|index| self.keys.get(index)) {
+            if let Some(workspace) = key.workspace.as_ref() {
+                self.backend
+                    .add_tokens(&workspace.key, workspace.config, tokens, now_seconds)
+                    .await?;
+            }
+            if let Some(limiter) = key.limiter.as_ref() {
+                self.backend
+                    .add_tokens(&limiter.key, limiter.config, tokens, now_seconds)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn shared_limit_config(limit: &ConfigRateLimit) -> StateLimitConfig {
+    StateLimitConfig {
+        rpm: limit.rpm,
+        tpm: limit.tpm,
+        window_seconds: limit.window,
+    }
 }
 
 fn new_limiter(config: &ConfigRateLimit) -> Result<RateLimiter, RateLimitError> {
@@ -432,6 +728,49 @@ mod tests {
                 .admit_key(grant)?
                 .and_then(|result| result.limited_by),
             Some(crate::rate_limit::LimitKind::Tokens)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shared_backend_enforces_one_window_across_policy_handles()
+    -> Result<(), AccessPolicyError> {
+        let mut config = GatewayConfig {
+            rate_limit: Some(RateLimit {
+                rpm: Some(1),
+                tpm: None,
+                window: 60.0,
+            }),
+            ..GatewayConfig::default()
+        };
+        config.keys.insert("team-a".to_owned(), virtual_key("wf-a"));
+        let backend = Arc::new(crate::state::MemoryStateBackend::default());
+        let first_policy = AccessPolicy::from_gateway_config_with_backend(
+            &config,
+            || 1.0,
+            Arc::clone(&backend) as Arc<dyn StateBackend>,
+        )?;
+        let second_policy = AccessPolicy::from_gateway_config_with_backend(
+            &config,
+            || 1.0,
+            Arc::clone(&backend) as Arc<dyn StateBackend>,
+        )?;
+        let first = first_policy
+            .authenticate(Some("Bearer wf-a"))
+            .ok_or(AccessPolicyError::InvalidKeyId)?;
+        assert!(
+            first_policy
+                .admit_shared_global()
+                .await?
+                .is_some_and(RateResult::allowed)
+        );
+        assert!(first_policy.admit_shared_key(first).await?.is_none());
+        assert_eq!(
+            second_policy
+                .admit_shared_global()
+                .await?
+                .and_then(|result| result.limited_by),
+            Some(crate::rate_limit::LimitKind::Requests)
         );
         Ok(())
     }

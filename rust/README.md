@@ -68,4 +68,5 @@ separate pull requests under WF-ROADMAP-0016.
 - `decisions/WF-ADR-0050-managed-gateway-surfaces.md`
 - `decisions/WF-ADR-0051-bounded-delivery-concurrency.md`
 - `decisions/WF-ADR-0052-workspace-scoped-model-routing.md`
+- `decisions/WF-ADR-0053-shared-state-backend.md`
 - `docs/apple-platform-capability-matrix.md`

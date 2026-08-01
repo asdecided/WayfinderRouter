@@ -283,6 +283,12 @@ report needs them exact.
   `price_table_version` — with FOCUS-compatible column names, building on the per-vkey attribution
   the ledger already does (`gateway.py:1502`, WF-ADR-0035).
 
+The Rust implementation of the shared policy-state contract, Redis server-time
+fixed-window counters, and loud process-local degradation is tracked in
+WF-ADR-0053. Its first PR deliberately leaves the local savings ledger and
+response cache process-local; those migrations require their own compatibility
+and recovery evidence.
+
 **Acceptance:**
 
 - Two gateway replicas against one Redis enforce a **single** shared RPM limit and budget: N

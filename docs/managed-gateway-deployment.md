@@ -30,7 +30,19 @@ window = 60
 rpm = 120
 tpm = 200000
 window = 60
+
+[gateway.state]
+backend = "redis"
+url = "redis://redis.internal:6379"
+namespace = "production"
 ```
+
+`memory` is the default and keeps policy counters inside one process. Select
+`redis` when replicas must share the global/workspace/key RPM/TPM windows. The
+gateway pings Redis before serving and uses Redis server time for window
+boundaries. If Redis later becomes unavailable, requests continue through a
+bounded process-local fallback and `wayfinder_state_degraded 1` makes the
+consistency loss visible; treat that state as an operational incident.
 
 Then start the data plane on the address supplied by the deployment platform:
 
@@ -113,9 +125,10 @@ model ingress.
   updating the caller, then removing the old hashed entry.
 - Use `/livez` for liveness and `/readyz` for readiness. Do not scrape either for
   model inventory.
-- The current counters, budgets, cache, breakers, and ledger are process-local.
-  Run one replica until the shared-state backend and two-replica consistency
-  gate in WF-ROADMAP-0010 land.
+- With the default `memory` state backend, counters, budgets, cache, breakers,
+  and ledger are process-local. Redis shares only the global/workspace/key
+  request/token windows in this first slice; budgets, cache, ledger, and
+  distributed admission remain separate migrations.
 - A separately authenticated operator listener, OIDC, audit log, shared state,
   and Helm packaging remain follow-on work; this first boundary does not claim
   those capabilities.
@@ -125,4 +138,6 @@ authority separation and threat model, and
 [WF-ADR-0051](../decisions/WF-ADR-0051-bounded-delivery-concurrency.md) for the
 process-local throughput contract, and
 [WF-ADR-0052](../decisions/WF-ADR-0052-workspace-scoped-model-routing.md) for
-workspace, alias, and multi-turn boundaries.
+workspace, alias, and multi-turn boundaries, and
+[WF-ADR-0053](../decisions/WF-ADR-0053-shared-state-backend.md) for the
+shared-state contract and degradation behavior.

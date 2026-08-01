@@ -20,6 +20,7 @@ pub mod recent;
 pub mod reliability;
 pub mod reload;
 pub mod server;
+pub mod state;
 
 pub use crate::decision_policy::RouteOn;
 
@@ -528,6 +529,23 @@ impl AppState {
         Ok(self.with_access_policy(AccessPolicy::from_gateway_config(config)?))
     }
 
+    /// Build access policy with the configured memory or Redis state backend.
+    pub async fn with_gateway_shared_access(
+        self,
+        config: &wayfinder_config::gateway::GatewayConfig,
+    ) -> Result<Self, AccessPolicyError> {
+        let backend = state::from_config(&config.state)
+            .await
+            .map_err(AccessPolicyError::from)?;
+        let started = Instant::now();
+        let policy = AccessPolicy::from_gateway_config_with_backend(
+            config,
+            move || started.elapsed().as_secs_f64(),
+            backend,
+        )?;
+        Ok(self.with_access_policy(policy))
+    }
+
     /// Attach gateway-wide and per-key spend caps from validated configuration.
     #[must_use]
     pub fn with_gateway_budget(
@@ -728,6 +746,10 @@ impl AppState {
     #[must_use]
     pub fn access_policy(&self) -> Option<&AccessPolicy> {
         self.access_policy.as_deref()
+    }
+
+    pub(crate) fn access_policy_arc(&self) -> Option<Arc<AccessPolicy>> {
+        self.access_policy.as_ref().map(Arc::clone)
     }
 
     /// Configured spend-budget policy.
@@ -1391,7 +1413,7 @@ async fn chat_completions(
         Err(response) => return *response,
     };
     let request_id = new_request_id();
-    let access_grant = match preflight_access(&state, &headers, &request_id) {
+    let access_grant = match preflight_access(&state, &headers, &request_id).await {
         Ok(grant) => grant,
         Err(response) => return *response,
     };
@@ -1629,8 +1651,9 @@ async fn chat_completions(
             };
             routing_headers.insert(ROUTER_WORKSPACE_HEADER, value);
         }
-        match policy.tightest_snapshot(grant) {
+        match policy.tightest_snapshot_shared(grant).await {
             Ok(Some(snapshot)) => {
+                let _ = state.metrics().set_state_degraded(policy.state_degraded());
                 if let Err(message) = insert_rate_snapshot_headers(&mut routing_headers, snapshot) {
                     return error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -1640,8 +1663,11 @@ async fn chat_completions(
                     );
                 }
             }
-            Ok(None) => {}
+            Ok(None) => {
+                let _ = state.metrics().set_state_degraded(policy.state_degraded());
+            }
             Err(error) => {
+                let _ = state.metrics().set_state_degraded(policy.state_degraded());
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "wayfinder_router_state_error",
@@ -2833,7 +2859,7 @@ fn request_header<'a>(
         .transpose()
 }
 
-fn preflight_access(
+async fn preflight_access(
     state: &AppState,
     headers: &HeaderMap,
     request_id: &str,
@@ -2841,12 +2867,22 @@ fn preflight_access(
     let Some(policy) = state.access_policy() else {
         return Ok(None);
     };
-    match policy.admit_global() {
-        Ok(Some(result)) if !result.allowed() => {
-            return Err(Box::new(rate_limited_response(state, result, request_id)));
+    if !policy.uses_shared_state() {
+        match policy.admit_global() {
+            Ok(Some(result)) if !result.allowed() => {
+                return Err(Box::new(rate_limited_response(state, result, request_id)));
+            }
+            Ok(_) => {}
+            Err(error) => return Err(Box::new(access_state_error(request_id, &error))),
         }
-        Ok(_) => {}
-        Err(error) => return Err(Box::new(access_state_error(request_id, &error))),
+    } else {
+        match policy.admit_shared_global().await {
+            Ok(Some(result)) if !result.allowed() => {
+                return Err(Box::new(rate_limited_response(state, result, request_id)));
+            }
+            Ok(_) => {}
+            Err(error) => return Err(Box::new(access_state_error(request_id, &error))),
+        }
     }
 
     let authorization = headers
@@ -2865,7 +2901,13 @@ fn preflight_access(
     if let Some(key_id) = policy.key_id(grant) {
         let _ = state.metrics().observe_key_request(key_id);
     }
-    match policy.admit_key(grant) {
+    let result = if policy.uses_shared_state() {
+        policy.admit_shared_key(grant).await
+    } else {
+        policy.admit_key(grant)
+    };
+    let _ = state.metrics().set_state_degraded(policy.state_degraded());
+    match result {
         Ok(Some(result)) if !result.allowed() => {
             Err(Box::new(rate_limited_response(state, result, request_id)))
         }
@@ -3130,10 +3172,15 @@ fn record_accounted_usage(
     let _ = state.savings_ledger().record(&cost, today, key_id);
     let _ = state.persist_savings();
     if let (Some(policy), Some(grant)) = (state.access_policy(), access_grant) {
-        let _ = policy.add_tokens(
-            grant,
-            cost.prompt_tokens.saturating_add(cost.completion_tokens),
-        );
+        let tokens = cost.prompt_tokens.saturating_add(cost.completion_tokens);
+        let _ = policy.add_tokens(grant, tokens);
+        if policy.uses_shared_state() {
+            if let Some(policy) = state.access_policy_arc() {
+                tokio::spawn(async move {
+                    let _ = policy.add_shared_tokens(grant, tokens).await;
+                });
+            }
+        }
     }
     let _ = state.metrics().observe_cost(cost.realized, cost.baseline);
     let _ = state.recent().update_cost(

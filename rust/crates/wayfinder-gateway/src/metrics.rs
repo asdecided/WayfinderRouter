@@ -79,6 +79,7 @@ struct MetricsState {
     admission_peak_in_flight: u64,
     admission_queue_wait: Histogram<8>,
     admission_rejected: BTreeMap<String, u64>,
+    state_degraded: bool,
 }
 
 impl Default for MetricsState {
@@ -101,6 +102,7 @@ impl Default for MetricsState {
             admission_peak_in_flight: 0,
             admission_queue_wait: Histogram::new(QUEUE_WAIT_BUCKETS),
             admission_rejected: BTreeMap::new(),
+            state_degraded: false,
         }
     }
 }
@@ -247,6 +249,13 @@ impl GatewayMetrics {
     pub fn record_reload_failure(&self) -> Result<(), MetricsError> {
         let mut state = self.state.lock().map_err(|_| MetricsError::LockPoisoned)?;
         state.reload_failures = state.reload_failures.saturating_add(1);
+        Ok(())
+    }
+
+    /// Set the shared-state degradation gauge without retaining backend details.
+    pub fn set_state_degraded(&self, degraded: bool) -> Result<(), MetricsError> {
+        let mut state = self.state.lock().map_err(|_| MetricsError::LockPoisoned)?;
+        state.state_degraded = degraded;
         Ok(())
     }
 
@@ -506,6 +515,14 @@ fn render_state(version: &str, state: &MetricsState) -> String {
         output,
         "wayfinder_router_config_reload_failures_total {}",
         state.reload_failures
+    );
+
+    output.push_str("# HELP wayfinder_state_degraded Shared-state backend unavailable; process-local fallback is active.\n");
+    output.push_str("# TYPE wayfinder_state_degraded gauge\n");
+    let _ = writeln!(
+        output,
+        "wayfinder_state_degraded {}",
+        u8::from(state.state_degraded)
     );
 
     if !state.model_costs.is_empty() {

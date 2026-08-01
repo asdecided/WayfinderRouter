@@ -151,11 +151,12 @@ fn latency_metrics(text: &str) -> String {
 // The fixture is immutable migration evidence. Metrics added after the Rust cutover
 // have dedicated Rust tests and are intentionally outside that frozen snapshot.
 fn migration_metric_families(text: &str) -> String {
-    const RUST_ONLY_PREFIXES: [&str; 4] = [
+    const RUST_ONLY_PREFIXES: [&str; 5] = [
         "wayfinder_router_in_flight_deliveries",
         "wayfinder_router_peak_in_flight_deliveries",
         "wayfinder_router_admission_queue_wait_seconds",
         "wayfinder_router_admission_rejected_total",
+        "wayfinder_state_degraded",
     ];
     let mut normalized = String::new();
     for line in text.lines() {

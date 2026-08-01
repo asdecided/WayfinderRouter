@@ -34,6 +34,10 @@ pub const DEFAULT_MAX_IN_FLIGHT: u64 = 32;
 pub const DEFAULT_MAX_QUEUED: u64 = 64;
 /// Default maximum time a queued request waits for a delivery slot.
 pub const DEFAULT_QUEUE_TIMEOUT: f64 = 2.0;
+/// Supported shared-state backends.
+pub const STATE_BACKENDS: [&str; 2] = ["memory", "redis"];
+/// Default namespace used for shared gateway state keys.
+pub const DEFAULT_STATE_NAMESPACE: &str = "wayfinder";
 
 /// Stable delivery identity for a configured gateway model.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -161,6 +165,27 @@ pub struct ConcurrencyConfig {
     pub queue_timeout: f64,
 }
 
+/// Shared state configuration for replicated gateway policies.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StateConfig {
+    /// State backend implementation: `memory` or `redis`.
+    pub backend: String,
+    /// Redis connection URL when the backend is `redis`.
+    pub url: Option<String>,
+    /// Prefix used for all shared keys.
+    pub namespace: String,
+}
+
+impl Default for StateConfig {
+    fn default() -> Self {
+        Self {
+            backend: "memory".to_owned(),
+            url: None,
+            namespace: DEFAULT_STATE_NAMESPACE.to_owned(),
+        }
+    }
+}
+
 /// A bounded policy namespace shared by one or more virtual keys.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Workspace {
@@ -242,6 +267,8 @@ pub struct GatewayConfig {
     pub rate_limit: Option<RateLimit>,
     /// Process-local upstream delivery admission bounds.
     pub concurrency: ConcurrencyConfig,
+    /// Shared state backend for fleet-wide policy counters.
+    pub state: StateConfig,
     /// Workspace policy namespaces keyed by operator-selected identifier.
     pub workspaces: IndexMap<String, Workspace>,
     /// Virtual credentials keyed by operator-selected identifier.
@@ -265,6 +292,7 @@ impl Default for GatewayConfig {
             cache: None,
             rate_limit: None,
             concurrency: ConcurrencyConfig::default(),
+            state: StateConfig::default(),
             workspaces: IndexMap::new(),
             keys: IndexMap::new(),
         }
@@ -337,6 +365,7 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
     let cache = parse_cache(gateway.get("cache"), where_)?;
     let rate_limit = parse_rate_limit(gateway.get("rate_limit"), where_)?;
     let concurrency = parse_concurrency(gateway.get("concurrency"), where_)?;
+    let state = parse_state(gateway.get("state"), where_)?;
     let workspaces = parse_workspaces(gateway.get("workspaces"), where_)?;
     let keys = parse_keys(gateway.get("keys"), where_)?;
     let models = parse_models(gateway.get("models"), where_)?;
@@ -360,6 +389,7 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
         cache,
         rate_limit,
         concurrency,
+        state,
         workspaces,
         keys,
     })
@@ -470,6 +500,25 @@ fn render_gateway_toml(gateway: &GatewayConfig) -> String {
             lines.push(format!(
                 "queue_timeout = {}",
                 format_number(gateway.concurrency.queue_timeout)
+            ));
+        }
+        blocks.push(lines.join("\n"));
+    }
+    if gateway.state != StateConfig::default() {
+        let mut lines = vec!["[gateway.state]".to_owned()];
+        if gateway.state.backend != "memory" {
+            lines.push(format!(
+                "backend = {}",
+                quote_toml_string(&gateway.state.backend)
+            ));
+        }
+        if let Some(url) = &gateway.state.url {
+            lines.push(format!("url = {}", quote_toml_string(url)));
+        }
+        if gateway.state.namespace != DEFAULT_STATE_NAMESPACE {
+            lines.push(format!(
+                "namespace = {}",
+                quote_toml_string(&gateway.state.namespace)
             ));
         }
         blocks.push(lines.join("\n"));
@@ -735,6 +784,49 @@ fn parse_concurrency(
             where_,
             "gateway.concurrency.queue_timeout",
         )?,
+    })
+}
+
+fn parse_state(value: Option<&Value>, where_: &str) -> Result<StateConfig, ConfigError> {
+    let Some(value) = value else {
+        return Ok(StateConfig::default());
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| invalid(where_, "'[gateway.state]' must be a table"))?;
+    let backend = optional_allowed_string(
+        table.get("backend"),
+        "memory",
+        &STATE_BACKENDS,
+        where_,
+        "gateway.state.backend",
+    )?;
+    let url = optional_non_empty_string(table.get("url"), where_, "gateway.state.url")?;
+    let namespace =
+        optional_non_empty_string(table.get("namespace"), where_, "gateway.state.namespace")?
+            .unwrap_or_else(|| DEFAULT_STATE_NAMESPACE.to_owned());
+    if !valid_policy_id(&namespace) {
+        return Err(invalid(
+            where_,
+            "'gateway.state.namespace' must be 1-128 visible ASCII characters",
+        ));
+    }
+    if backend == "redis" && url.is_none() {
+        return Err(invalid(
+            where_,
+            "'gateway.state.url' is required when gateway.state.backend is 'redis'",
+        ));
+    }
+    if backend == "memory" && url.is_some() {
+        return Err(invalid(
+            where_,
+            "'gateway.state.url' is only valid when gateway.state.backend is 'redis'",
+        ));
+    }
+    Ok(StateConfig {
+        backend,
+        url,
+        namespace,
     })
 }
 
@@ -1520,6 +1612,33 @@ rpm = 5
             "[gateway.concurrency]\nmax_in_flight = 0",
             "[gateway.concurrency]\nmax_queued = -1",
             "[gateway.concurrency]\nqueue_timeout = 0",
+        ] {
+            assert!(parse(invalid_text).is_err(), "accepted: {invalid_text}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn shared_state_defaults_and_redis_config_round_trip() -> Result<(), ConfigError> {
+        assert_eq!(
+            parse("[gateway]\nroute_on = \"turn\"\n")?.state,
+            StateConfig::default()
+        );
+        let text = "[gateway.state]\nbackend = \"redis\"\nurl = \"redis://127.0.0.1:6379\"\nnamespace = \"prod\"";
+        let config = parse(text)?;
+        assert_eq!(
+            config.state,
+            StateConfig {
+                backend: "redis".to_owned(),
+                url: Some("redis://127.0.0.1:6379".to_owned()),
+                namespace: "prod".to_owned(),
+            }
+        );
+        assert_eq!(dump_gateway_toml(&config)?, text);
+        for invalid_text in [
+            "[gateway.state]\nbackend = \"redis\"",
+            "[gateway.state]\nbackend = \"memory\"\nurl = \"redis://127.0.0.1\"",
+            "[gateway.state]\nbackend = \"redis\"\nurl = \"redis://127.0.0.1\"\nnamespace = \"\"",
         ] {
             assert!(parse(invalid_text).is_err(), "accepted: {invalid_text}");
         }
