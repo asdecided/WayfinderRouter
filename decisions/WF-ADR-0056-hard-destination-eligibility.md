@@ -28,7 +28,9 @@ The gateway constructs a secret-free `RoutingRequest` for every chat turn and
 uses the shared `assess_destination` contract to gate delivery candidates.
 Hard eligibility runs independently of the deterministic complexity score and
 is applied to the primary, preset members, configured fallbacks, and outer
-failover ladder.
+failover ladder. For a deployment pool, it is also applied to every concrete
+member before weighted rotation; eligibility of the public alias is not a
+substitute for eligibility of the endpoint that will receive the request.
 
 The request privacy posture is selected with the bounded
 `x-wayfinder-privacy-posture` header:
@@ -41,6 +43,9 @@ The request privacy posture is selected with the bounded
 The existing gateway `offline` setting and `x-wayfinder-offline` override
 always imply `on-device-only`. Responses expose the effective posture through
 `x-wayfinder-router-privacy-posture`.
+
+Both OpenAI- and Anthropic-compatible request surfaces preserve this bounded
+control contract when entering the shared chat path.
 
 Request requirements are derived from the bounded OpenAI-compatible body:
 estimated prompt plus requested output context, image content, tool/function

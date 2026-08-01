@@ -287,15 +287,30 @@ impl Default for ResponseCache {
     }
 }
 
-/// SHA-256 of served upstream model plus canonical request fields.
-pub fn cache_key(served_model: &str, body: &Value) -> Result<String, CacheError> {
+/// SHA-256 of the authenticated cache partition, public route, served upstream
+/// model, and canonical request fields.
+///
+/// `partition` must identify the effective caller policy boundary. Managed
+/// surfaces use the virtual-key id so an exact request from one tenant can
+/// never replay content produced for another tenant.
+pub fn cache_key(
+    partition: &str,
+    route: &str,
+    served_model: &str,
+    body: &Value,
+) -> Result<String, CacheError> {
     let object = body.as_object().ok_or(CacheError::InvalidBody)?;
     let projected = object
         .iter()
         .filter(|(name, _)| !matches!(name.as_str(), "model" | "stream"))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect::<Map<_, _>>();
-    let envelope = canonical_json(serde_json::json!({"m": served_model, "b": projected}));
+    let envelope = canonical_json(serde_json::json!({
+        "partition": partition,
+        "route": route,
+        "model": served_model,
+        "body": projected,
+    }));
     let serialized =
         serde_json::to_vec(&envelope).map_err(|error| CacheError::Json(error.to_string()))?;
     let digest = Sha256::digest(serialized);
@@ -468,28 +483,25 @@ mod tests {
     }
 
     #[test]
-    fn key_matches_python_and_ignores_model_and_stream() -> Result<(), CacheError> {
+    fn key_is_deterministic_and_partitioned_by_caller_route_and_model() -> Result<(), CacheError> {
         let body = json!({
             "model": "auto",
             "stream": false,
             "messages": [{"role": "user", "content": "héllo 😀"}],
             "temperature": 0,
         });
-        assert_eq!(
-            cache_key("llama3.2", &body)?,
-            "e8d57374683b0a8ef0208b7c2735b1c23fe1cd6af6464866ffe06a3a6c43f958"
-        );
+        let key = cache_key("local", "cloud", "llama3.2", &body)?;
+        assert_eq!(key.len(), 64);
         let changed = json!({
             "model": "prefer-hosted",
             "stream": true,
             "messages": [{"content": "héllo 😀", "role": "user"}],
             "temperature": 0,
         });
-        assert_eq!(
-            cache_key("llama3.2", &body)?,
-            cache_key("llama3.2", &changed)?
-        );
-        assert_ne!(cache_key("other", &body)?, cache_key("llama3.2", &body)?);
+        assert_eq!(key, cache_key("local", "cloud", "llama3.2", &changed)?);
+        assert_ne!(key, cache_key("other-key", "cloud", "llama3.2", &body)?);
+        assert_ne!(key, cache_key("local", "other-route", "llama3.2", &body)?);
+        assert_ne!(key, cache_key("local", "cloud", "other-model", &body)?);
         Ok(())
     }
 
