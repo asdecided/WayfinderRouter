@@ -344,9 +344,10 @@ surface, currently a single env-var bearer token in the feedback style (`_FEEDBA
   toggle. The Rust implementation is documented in WF-ADR-0058. With the extra absent, the
   gateway imports nothing new and `/metrics` (`gateway.py:192`, WF-ADR-0018) is unchanged — OTel
   augments, never replaces.
-- **Helm chart.** `deploy/helm/wayfinder-router/`: replicas + Redis (Initiative 4) + ingress with
-  TLS terminated at the ingress — the gateway itself grows no TLS; the chart documents the
-  boundary, consistent with the SECURITY.md posture.
+- **Helm chart.** `deploy/helm/wayfinder-router/` now packages the Rust data plane with replicas,
+  optional shared Redis, ingress with TLS terminated at the ingress, probes, security context,
+  and operator-owned configuration/credential references. The gateway itself grows no TLS;
+  [WF-ADR-0059](../decisions/WF-ADR-0059-helm-deployment.md) documents the boundary.
 
 **Acceptance:**
 
