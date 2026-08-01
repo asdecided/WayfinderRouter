@@ -109,6 +109,26 @@ verification. See
 | `GET /v1/savings?period=today\|7d\|30d\|all` | realized vs always-frontier cost and the savings between them, per route (WF-DESIGN-0007) |
 | `WAYFINDER_ROUTER_SAVINGS_FILE` | where the savings ledger is persisted (default `<config-dir>/wayfinder-savings.json`) |
 
+### Optional OpenTelemetry
+
+The ordinary gateway build keeps the existing prompt-free Prometheus metrics
+and does not install a tracing subscriber. A managed image that opts into the
+Rust feature can enable request-to-decision-to-delivery spans with:
+
+```sh
+WAYFINDER_ROUTER_OTEL=1 \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 \
+wayfinder-router serve --surface data-plane
+```
+
+Use `WAYFINDER_ROUTER_JSON_LOGS=1` with the same feature when operators want
+newline-delimited JSON logs. The exporter and JSON logger are process-level
+settings; request bodies, responses, credentials, authorization values, and
+provider payloads are never span or log fields. W3C `traceparent` and
+`tracestate` are propagated only to the selected upstream provider. Build the
+binary with `--features otel` on `wayfinder-cli` (the default binary remains
+unchanged). See [WF-ADR-0058](../decisions/WF-ADR-0058-opentelemetry-observability.md).
+
 ## Reliability and failover
 
 | setting | effect |

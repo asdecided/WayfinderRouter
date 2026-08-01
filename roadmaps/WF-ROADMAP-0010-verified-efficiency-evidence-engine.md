@@ -341,8 +341,9 @@ surface, currently a single env-var bearer token in the feedback style (`_FEEDBA
   shared, local JSONL otherwise.
 - **OpenTelemetry as an extra, zero-dep posture preserved.** `wayfinder-router[otel]`: spans for
   request → decision → delivery, `traceparent` propagated to upstreams, and a JSON structured-log
-  toggle. With the extra absent, the gateway imports nothing new and `/metrics`
-  (`gateway.py:192`, WF-ADR-0018) is unchanged — OTel augments, never replaces.
+  toggle. The Rust implementation is documented in WF-ADR-0058. With the extra absent, the
+  gateway imports nothing new and `/metrics` (`gateway.py:192`, WF-ADR-0018) is unchanged — OTel
+  augments, never replaces.
 - **Helm chart.** `deploy/helm/wayfinder-router/`: replicas + Redis (Initiative 4) + ingress with
   TLS terminated at the ingress — the gateway itself grows no TLS; the chart documents the
   boundary, consistent with the SECURITY.md posture.
