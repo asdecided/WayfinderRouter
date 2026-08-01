@@ -65,4 +65,5 @@ separate pull requests under WF-ROADMAP-0016.
 - `decisions/WF-ADR-0048-shared-routing-core-apple-embedding.md`
 - `roadmaps/WF-ROADMAP-0014-rust-gateway-migration.md`
 - `roadmaps/WF-ROADMAP-0016-native-mobile-v0.2.md`
+- `decisions/WF-ADR-0050-managed-gateway-surfaces.md`
 - `docs/apple-platform-capability-matrix.md`

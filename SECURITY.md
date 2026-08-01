@@ -25,6 +25,10 @@ A few properties are load-bearing, and reports that undermine them are especiall
   or disk (WF-ADR-0004). Virtual gateway keys are stored only as SHA-256 hashes, never in plaintext.
 - Prompt text is never logged or persisted by the decision or metrics paths.
 
-Out of scope: problems that require a deployment you control to be misconfigured (for example, exposing
-the gateway to an untrusted network with no auth), and vulnerabilities in the upstream providers you point
-the gateway at.
+The default local surface refuses to bind beyond loopback. The explicit managed
+data plane requires virtual-key authentication and excludes operator/diagnostic
+routes (WF-ADR-0050). Reports that find a way around either boundary are in
+scope.
+
+Out of scope: vulnerabilities in the upstream providers you point the gateway
+at, or failures in a TLS ingress/service mesh outside the Wayfinder process.

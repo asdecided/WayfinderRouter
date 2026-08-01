@@ -63,6 +63,19 @@ rust/target/debug/wayfinder-router route "Summarise this request"
 rust/target/debug/wayfinder-router serve --host 127.0.0.1 --port 8088
 ```
 
+For a network-exposed deployment, do not publish the local surface. Mint a
+virtual key and select the fail-closed managed data plane:
+
+```sh
+rust/target/debug/wayfinder-router keys new --id team-a
+rust/target/debug/wayfinder-router serve \
+  --surface data-plane --host 0.0.0.0 --port 8088
+```
+
+The managed listener contains inference, authenticated model discovery, and
+minimal `/livez`/`/readyz` probes only. See
+[Managed gateway deployment](docs/managed-gateway-deployment.md).
+
 The gateway exposes:
 
 - OpenAI-compatible: `http://127.0.0.1:8088/v1`

@@ -16,6 +16,7 @@ itself stays deterministic and offline — none of these touch the scored path.
 | `WAYFINDER_ROUTER_TIMEOUT` / `serve --timeout` | upstream timeout in seconds (default 60) |
 | `WAYFINDER_ROUTER_FEEDBACK_TOKEN` | when set, `/v1/feedback` requires `Authorization: Bearer <token>` |
 | `serve --dry-run` | return routing decisions without calling any upstream |
+| `serve --surface local\|data-plane` | `local` is the default loopback Desktop/operator surface; `data-plane` is the fail-closed network surface and requires virtual keys plus a configured model |
 
 ## ChatGPT account provider (opt-in)
 
@@ -102,4 +103,8 @@ verification. See
 
 | setting | effect |
 | --- | --- |
-| `[gateway.keys.<id>] hash` / `tags` / `models` (+ nested `budget` / `rate_limit`) | virtual API keys: when any is set, `/v1/*` requires a valid `Authorization: Bearer` token (else `401`). Mint with `wayfinder-router keys new`; only the SHA-256 hash is stored. Spend & **savings** are attributed per key (`by_key` in `/v1/savings`, `wayfinder_router_key_requests_total`); a key can carry its own budget/rate-limit (strictest wins) and a `models` allowlist (clamps to the nearest allowed tier) (WF-ADR-0035) |
+| `[gateway.keys.<id>] hash` / `tags` / `models` (+ nested `budget` / `rate_limit`) | virtual API keys: when any is set, inference requires a valid `Authorization: Bearer` token (else `401`). Mint with `wayfinder-router keys new --id <id>`; the plaintext is printed once and only the SHA-256 hash belongs in config. Spend & **savings** are attributed per key (`by_key` in `/v1/savings`, `wayfinder_router_key_requests_total`); a key can carry its own budget/rate-limit (strictest wins) and a `models` allowlist (clamps to the nearest allowed tier) (WF-ADR-0035) |
+
+For a non-loopback listener, follow the [managed gateway deployment](managed-gateway-deployment.md)
+contract. The local surface refuses external binds; the managed surface omits
+operator metadata and authenticates its model inventory as well as inference.
