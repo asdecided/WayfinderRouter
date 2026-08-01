@@ -114,6 +114,16 @@ impl AccessPolicy {
         self.global_limiter.is_some() || !self.keys.is_empty()
     }
 
+    /// Whether callers must present one of the configured virtual keys.
+    ///
+    /// A gateway-wide rate limit changes admission behavior but does not
+    /// authenticate a network client. Managed data-plane listeners use this
+    /// distinction to fail closed before accepting traffic.
+    #[must_use]
+    pub fn requires_authentication(&self) -> bool {
+        !self.keys.is_empty()
+    }
+
     pub(crate) fn admit_global(&self) -> Result<Option<RateResult>, AccessPolicyError> {
         self.global_limiter
             .as_ref()
@@ -258,6 +268,7 @@ mod tests {
             .insert("team-a".to_owned(), virtual_key("wf-secret"));
         let digest = config.keys["team-a"].hash.clone();
         let policy = AccessPolicy::from_gateway_config(&config)?;
+        assert!(policy.requires_authentication());
         assert!(policy.authenticate(Some("Bearer wf-secret")).is_some());
         assert!(policy.authenticate(Some("Bearer wrong")).is_none());
         let rendered = format!("{policy:?}");

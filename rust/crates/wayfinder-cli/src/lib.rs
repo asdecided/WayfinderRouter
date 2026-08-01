@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
+use uuid::Uuid;
 use wayfinder_apple_foundation_xpc::FoundationModelsClient;
 use wayfinder_config::gateway::{GatewayConfig, ProviderKind, gateway_config_from_toml};
 use wayfinder_config::{
@@ -32,7 +33,10 @@ use wayfinder_gateway::delivery::{
 };
 use wayfinder_gateway::reload::{LastGood, ReloadOutcome};
 use wayfinder_gateway::server::{DEFAULT_DRAIN_TIMEOUT, serve_with_shutdown, shutdown_signal};
-use wayfinder_gateway::{AppState, ConfiguredModel, RouteOn, build_reloadable_router};
+use wayfinder_gateway::{
+    AppState, ConfiguredModel, RouteOn, build_reloadable_data_plane_router,
+    build_reloadable_router, validate_data_plane_state,
+};
 use wayfinder_providers::openai_compat::{
     DEFAULT_CONNECT_TIMEOUT, OpenAiProviderClient, ProviderClientConfig, SecretValue,
 };
@@ -94,6 +98,7 @@ pub fn run(
             EXIT_OK
         }
         "route" => run_route(&arguments[1..], stdin, stdout, stderr),
+        "keys" => run_keys(&arguments[1..], stdout, stderr),
         "app-setup-init" => app_setup_command::run_app_setup(&arguments[1..], stdout, stderr),
         "config" => config_command::run_config(&arguments[1..], stdin, stdout, stderr),
         "app-configure-chatgpt" => {
@@ -121,6 +126,91 @@ pub fn run(
     }
 }
 
+fn run_keys(arguments: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+    if arguments
+        .iter()
+        .any(|argument| matches!(argument.as_str(), "-h" | "--help"))
+    {
+        write_output(stdout, KEYS_HELP);
+        return EXIT_OK;
+    }
+    if arguments.first().map(String::as_str) != Some("new") {
+        write_error(stderr, "wayfinder-router: keys requires the 'new' action");
+        return EXIT_USAGE;
+    }
+    let mut id = "default".to_owned();
+    let mut json_output = false;
+    let mut index = 1_usize;
+    while let Some(argument) = arguments.get(index) {
+        match argument.as_str() {
+            "--json" => json_output = true,
+            "--id" => {
+                index = index.saturating_add(1);
+                let Some(value) = arguments.get(index) else {
+                    write_error(stderr, "wayfinder-router: --id needs a value");
+                    return EXIT_USAGE;
+                };
+                id.clone_from(value);
+            }
+            value if value.starts_with("--id=") => {
+                id = value.trim_start_matches("--id=").to_owned();
+            }
+            value => {
+                write_error(
+                    stderr,
+                    &format!("wayfinder-router: unrecognized keys argument: {value}"),
+                );
+                return EXIT_USAGE;
+            }
+        }
+        index = index.saturating_add(1);
+    }
+    if id.is_empty()
+        || id.len() > wayfinder_gateway::access::MAX_KEY_ID_BYTES
+        || id.chars().any(char::is_control)
+    {
+        write_error(
+            stderr,
+            "wayfinder-router: key id must be nonempty, bounded, and contain no control characters",
+        );
+        return EXIT_USAGE;
+    }
+
+    let key = format!("wf_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let hash = wayfinder_gateway::auth::hash_key(&key);
+    let id_literal = match serde_json::to_string(&id) {
+        Ok(value) => value,
+        Err(_) => {
+            write_error(stderr, "wayfinder-router: cannot render key id");
+            return EXIT_CONFIG;
+        }
+    };
+    let toml = format!("[gateway.keys.{id_literal}]\nhash = \"{hash}\"");
+    if json_output {
+        let payload = json!({
+            "schema_version": 1,
+            "id": id,
+            "key": key,
+            "hash": hash,
+            "toml": toml,
+        });
+        if serde_json::to_writer_pretty(&mut *stdout, &payload).is_err()
+            || writeln!(stdout).is_err()
+        {
+            write_error(stderr, "wayfinder-router: cannot write key output");
+            return EXIT_CONFIG;
+        }
+    } else {
+        write_output(
+            stdout,
+            &format!(
+                "Wayfinder virtual key (shown once):\n{key}\n\nAdd this hashed entry to wayfinder-router.toml:\n{toml}"
+            ),
+        );
+    }
+    EXIT_OK
+}
+
 fn run_capabilities(arguments: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     if arguments
         .iter()
@@ -145,8 +235,8 @@ fn run_capabilities(arguments: &[String], stdout: &mut dyn Write, stderr: &mut d
         "implementation": "rust",
         "version": product_version(),
         "target_architecture": target_architecture(),
-        "commands": ["route", "serve", "service", "capabilities", "app-setup-init", "app-configure-chatgpt", "config", "apple-foundation-live-smoke"],
-        "native_commands": ["route", "serve", "service", "capabilities", "app-setup-init", "app-configure-chatgpt", "config read-routing", "config apply-routing", "apple-foundation-live-smoke"],
+        "commands": ["route", "serve", "service", "keys", "capabilities", "app-setup-init", "app-configure-chatgpt", "config", "apple-foundation-live-smoke"],
+        "native_commands": ["route", "serve", "service", "keys new", "capabilities", "app-setup-init", "app-configure-chatgpt", "config read-routing", "config apply-routing", "apple-foundation-live-smoke"],
         "delegated_commands": [],
         "delegation": null,
         "decision_schema_versions": ["3"],
@@ -208,11 +298,9 @@ pub async fn run_serve_process(
         }
     };
     let _ = stderr.write_all(&startup_warnings);
-    if !host_is_loopback(&options.host) {
-        write_error(
-            stderr,
-            "wayfinder-router: warning: gateway is binding beyond loopback; configure virtual-key protection before exposing it",
-        );
+    if let Err(error) = validate_serve_security(&options, &state) {
+        write_error(stderr, &format!("wayfinder-router: {error}"));
+        return EXIT_CONFIG;
     }
     let listener = match tokio::net::TcpListener::bind((options.host.as_str(), options.port)).await
     {
@@ -244,10 +332,18 @@ pub async fn run_serve_process(
             }
             let mut errors = std::io::sink();
             let loaded = match build_serve_state(&reload_options, &mut errors).await {
-                Ok(next) => match reload_holder.current() {
-                    Ok(current) => Ok(next.with_runtime_state_from(&current)),
-                    Err(error) => Err(error.to_string()),
-                },
+                Ok(next) => {
+                    let validated = if reload_options.surface == ServeSurface::DataPlane {
+                        validate_data_plane_state(&next).map_err(|error| error.to_string())
+                    } else {
+                        Ok(())
+                    };
+                    match (validated, reload_holder.current()) {
+                        (Ok(()), Ok(current)) => Ok(next.with_runtime_state_from(&current)),
+                        (Err(error), _) => Err(error),
+                        (_, Err(error)) => Err(error.to_string()),
+                    }
+                }
                 Err(error) => Err(error),
             };
             let outcome = reload_holder.refresh(version, || loaded);
@@ -259,14 +355,11 @@ pub async fn run_serve_process(
     let shutdown = async {
         let _: Result<(), wayfinder_gateway::server::ServerError> = shutdown_signal().await;
     };
-    match serve_with_shutdown(
-        listener,
-        build_reloadable_router(holder),
-        shutdown,
-        DEFAULT_DRAIN_TIMEOUT,
-    )
-    .await
-    {
+    let application = match options.surface {
+        ServeSurface::Local => build_reloadable_router(holder),
+        ServeSurface::DataPlane => build_reloadable_data_plane_router(holder),
+    };
+    match serve_with_shutdown(listener, application, shutdown, DEFAULT_DRAIN_TIMEOUT).await {
         Ok(()) => EXIT_OK,
         Err(error) => {
             write_error(stderr, &format!("wayfinder-router: {error}"));
@@ -303,9 +396,27 @@ fn config_source_version(path: &Path) -> u128 {
 struct ServeOptions {
     host: String,
     port: u16,
+    surface: ServeSurface,
     dry_run: bool,
     timeout: Option<f64>,
     config: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ServeSurface {
+    #[default]
+    Local,
+    DataPlane,
+}
+
+impl ServeSurface {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "local" => Ok(Self::Local),
+            "data-plane" => Ok(Self::DataPlane),
+            _ => Err("--surface must be 'local' or 'data-plane'".to_owned()),
+        }
+    }
 }
 
 fn parse_serve_options(arguments: &[String]) -> Result<Option<ServeOptions>, String> {
@@ -318,6 +429,7 @@ fn parse_serve_options(arguments: &[String]) -> Result<Option<ServeOptions>, Str
     let mut options = ServeOptions {
         host: "127.0.0.1".to_owned(),
         port: 8_088,
+        surface: ServeSurface::Local,
         dry_run: false,
         timeout: None,
         config: None,
@@ -340,6 +452,13 @@ fn parse_serve_options(arguments: &[String]) -> Result<Option<ServeOptions>, Str
                     .ok_or_else(|| "--port needs a value".to_owned())?;
                 options.port = parse_port(raw)?;
             }
+            "--surface" => {
+                index = index.saturating_add(1);
+                let raw = arguments
+                    .get(index)
+                    .ok_or_else(|| "--surface needs a value".to_owned())?;
+                options.surface = ServeSurface::parse(raw)?;
+            }
             "--timeout" => {
                 index = index.saturating_add(1);
                 let raw = arguments
@@ -359,6 +478,9 @@ fn parse_serve_options(arguments: &[String]) -> Result<Option<ServeOptions>, Str
             }
             value if value.starts_with("--port=") => {
                 options.port = parse_port(value.trim_start_matches("--port="))?;
+            }
+            value if value.starts_with("--surface=") => {
+                options.surface = ServeSurface::parse(value.trim_start_matches("--surface="))?;
             }
             value if value.starts_with("--timeout=") => {
                 options.timeout = Some(parse_positive_timeout(
@@ -393,6 +515,19 @@ fn parse_positive_timeout(raw: &str) -> Result<f64, String> {
         return Err("--timeout must be a positive finite number".to_owned());
     }
     Ok(timeout)
+}
+
+fn validate_serve_security(options: &ServeOptions, state: &AppState) -> Result<(), String> {
+    if !host_is_loopback(&options.host) && options.surface == ServeSurface::Local {
+        return Err(
+            "refusing to expose the local operator surface beyond loopback; use --surface data-plane with configured virtual keys"
+                .to_owned(),
+        );
+    }
+    if options.surface == ServeSurface::DataPlane {
+        validate_data_plane_state(state).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 async fn build_serve_state<W: Write>(
@@ -1042,9 +1177,10 @@ fn write_error(stream: &mut dyn Write, message: &str) {
 }
 
 const TOP_LEVEL_USAGE: &str = "usage: wayfinder-router [-h] [--version] COMMAND ...";
-const TOP_LEVEL_HELP: &str = "usage: wayfinder-router [-h] [--version] COMMAND ...\n\nNative deterministic prompt-complexity router.\n\nCommands:\n  route          Score a prompt and recommend a model.\n  serve          Run the local HTTP gateway.\n  service        Manage the always-on launchd/systemd user service.\n  capabilities   Emit the versioned helper capability handshake.\n  app-setup-init Create a bounded desktop setup config.\n  app-configure-chatgpt\n                 Add a bounded ChatGPT account route for Desktop.\n  config read-routing | apply-routing\n                 Read or replace the desktop-owned routing fragment.\n  apple-foundation-live-smoke\n                 Exercise the bounded Apple Foundation Models delivery path.";
+const TOP_LEVEL_HELP: &str = "usage: wayfinder-router [-h] [--version] COMMAND ...\n\nNative deterministic prompt-complexity router.\n\nCommands:\n  route          Score a prompt and recommend a model.\n  serve          Run the bounded HTTP gateway.\n  service        Manage the always-on launchd/systemd user service.\n  keys new       Mint a virtual gateway key and its hashed config entry.\n  capabilities   Emit the versioned helper capability handshake.\n  app-setup-init Create a bounded desktop setup config.\n  app-configure-chatgpt\n                 Add a bounded ChatGPT account route for Desktop.\n  config read-routing | apply-routing\n                 Read or replace the desktop-owned routing fragment.\n  apple-foundation-live-smoke\n                 Exercise the bounded Apple Foundation Models delivery path.";
 const ROUTE_HELP: &str = "usage: wayfinder-router route [-h] [--threshold THRESHOLD] [--json] [--explain] prompt\n\nScore a prompt and recommend a model.";
-const SERVE_HELP: &str = "usage: wayfinder-router serve [-h] [--host HOST] [--port PORT] [--dry-run] [--timeout TIMEOUT] [--config CONFIG]\n\nRun the parity-gated local HTTP gateway.";
+const KEYS_HELP: &str = "usage: wayfinder-router keys new [--id ID] [--json]\n\nMint a virtual gateway key. The plaintext is printed once; only its SHA-256 hash belongs in config.";
+const SERVE_HELP: &str = "usage: wayfinder-router serve [-h] [--host HOST] [--port PORT] [--surface local|data-plane] [--dry-run] [--timeout TIMEOUT] [--config CONFIG]\n\nRun the bounded HTTP gateway. Non-loopback serving requires the authenticated data-plane surface.";
 
 #[cfg(test)]
 mod tests {
@@ -1140,6 +1276,7 @@ mod tests {
                 "route",
                 "serve",
                 "service",
+                "keys new",
                 "capabilities",
                 "app-setup-init",
                 "app-configure-chatgpt",
@@ -1188,7 +1325,6 @@ mod tests {
             "judge",
             "init",
             "doctor",
-            "keys",
         ] {
             let mut stdin = "".as_bytes();
             let mut stdout = Vec::new();
@@ -1209,11 +1345,44 @@ mod tests {
     }
 
     #[test]
+    fn keys_new_prints_one_valid_secret_and_only_its_hash_in_toml()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut stdin = "".as_bytes();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(
+            vec![
+                "keys".into(),
+                "new".into(),
+                "--id".into(),
+                "team a".into(),
+                "--json".into(),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, EXIT_OK, "{}", String::from_utf8_lossy(&stderr));
+        let payload: serde_json::Value = serde_json::from_slice(&stdout)?;
+        let key = payload["key"].as_str().ok_or("missing key")?;
+        let hash = payload["hash"].as_str().ok_or("missing hash")?;
+        let toml = payload["toml"].as_str().ok_or("missing TOML")?;
+        assert!(key.starts_with("wf_"));
+        assert_eq!(key.len(), 67);
+        assert_eq!(hash, wayfinder_gateway::auth::hash_key(key));
+        assert!(toml.contains("[gateway.keys.\"team a\"]"));
+        assert!(toml.contains(hash));
+        assert!(!toml.contains(key));
+        Ok(())
+    }
+
+    #[test]
     fn serve_parser_covers_python_options_and_process_detection() -> Result<(), String> {
         let options = parse_serve_options(&[
             "--host=localhost".to_owned(),
             "--port".to_owned(),
             "0".to_owned(),
+            "--surface=data-plane".to_owned(),
             "--dry-run".to_owned(),
             "--timeout=1.5".to_owned(),
             "--config".to_owned(),
@@ -1225,6 +1394,7 @@ mod tests {
             ServeOptions {
                 host: "localhost".to_owned(),
                 port: 0,
+                surface: ServeSurface::DataPlane,
                 dry_run: true,
                 timeout: Some(1.5),
                 config: Some(PathBuf::from("fixture.toml")),
@@ -1250,9 +1420,57 @@ mod tests {
             vec!["--timeout=nan".to_owned()],
             vec!["--timeout=0".to_owned()],
             vec!["--host=".to_owned()],
+            vec!["--surface=public".to_owned()],
         ] {
             assert!(parse_serve_options(&arguments).is_err());
         }
+    }
+
+    #[test]
+    fn serve_security_requires_explicit_authenticated_data_plane_for_network_exposure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = AppState::new(
+            RoutingConfig::binary(0.5),
+            vec![ConfiguredModel::new(
+                "local",
+                "http://127.0.0.1:11434/v1",
+                "provider-local",
+                None,
+                true,
+            )],
+            false,
+            "test",
+        );
+        let local_external = ServeOptions {
+            host: "0.0.0.0".to_owned(),
+            surface: ServeSurface::Local,
+            port: 8_088,
+            dry_run: false,
+            timeout: None,
+            config: None,
+        };
+        assert!(validate_serve_security(&local_external, &state).is_err());
+
+        let managed_external = ServeOptions {
+            surface: ServeSurface::DataPlane,
+            ..local_external
+        };
+        assert!(validate_serve_security(&managed_external, &state).is_err());
+
+        let mut config = GatewayConfig::default();
+        config.keys.insert(
+            "team-a".to_owned(),
+            wayfinder_config::gateway::VirtualKey {
+                hash: wayfinder_gateway::auth::hash_key("wf-secret"),
+                tags: Vec::new(),
+                budget: None,
+                rate_limit: None,
+                models: Vec::new(),
+            },
+        );
+        let state = state.with_gateway_access(&config)?;
+        assert!(validate_serve_security(&managed_external, &state).is_ok());
+        Ok(())
     }
 
     #[cfg(unix)]

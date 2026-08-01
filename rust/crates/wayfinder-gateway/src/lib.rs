@@ -40,6 +40,7 @@ use futures_util::{StreamExt, stream};
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::{Value, json};
+use thiserror::Error;
 use tower::ServiceExt;
 use uuid::Uuid;
 use wayfinder_config::dump_routing_toml;
@@ -86,6 +87,17 @@ use crate::reload::LastGood;
 
 /// Default maximum request body accepted by body-buffering extractors (1 MiB).
 pub const DEFAULT_REQUEST_BODY_LIMIT: usize = 1024 * 1024;
+
+/// Invalid state for a network-exposed, data-plane-only listener.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum DataPlaneError {
+    /// External traffic must never reach an unauthenticated gateway.
+    #[error("managed data-plane serving requires at least one configured virtual key")]
+    AuthenticationRequired,
+    /// A delivery listener without a configured destination cannot serve work.
+    #[error("managed data-plane serving requires at least one configured model")]
+    ModelRequired,
+}
 
 const OFFLINE_HEADER: &str = "x-wayfinder-offline";
 const ROUTER_MODEL_HEADER: &str = "x-wayfinder-router-model";
@@ -792,6 +804,48 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Validate the fail-closed contract for a network-exposed data plane.
+///
+/// Local Desktop and developer serving continue to use [`build_router`]. The
+/// managed surface is deliberately narrower and is invalid without virtual-key
+/// authentication and at least one configured destination.
+pub fn validate_data_plane_state(state: &AppState) -> Result<(), DataPlaneError> {
+    if !state
+        .access_policy()
+        .is_some_and(AccessPolicy::requires_authentication)
+    {
+        return Err(DataPlaneError::AuthenticationRequired);
+    }
+    if state.models().is_empty() {
+        return Err(DataPlaneError::ModelRequired);
+    }
+    Ok(())
+}
+
+/// Build the authenticated model data plane without local operator surfaces.
+///
+/// This surface intentionally excludes `/metrics`, `/router/*`, savings, and
+/// local account-control routes. It exposes only minimal unauthenticated probe
+/// endpoints plus authenticated model discovery and inference compatibility
+/// routes.
+pub fn build_data_plane_router(state: AppState) -> Result<Router, DataPlaneError> {
+    validate_data_plane_state(&state)?;
+    let request_body_limit = state.request_body_limit();
+    Ok(Router::new()
+        .route("/livez", get(livez))
+        .route("/readyz", get(readyz))
+        .route("/v1/models", get(authenticated_openai_models))
+        .route("/models", get(authenticated_openai_models))
+        .route("/v1/chat/completions", post(chat_completions))
+        .route("/chat/completions", post(chat_completions))
+        .route("/v1/messages", post(anthropic_messages))
+        .route("/messages", post(anthropic_messages))
+        .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
+        .layer(DefaultBodyLimit::max(request_body_limit))
+        .with_state(state))
+}
+
 /// Build a router that selects one immutable last-good state per request.
 ///
 /// Reload installation is deliberately owned by the process boundary. A
@@ -800,6 +854,13 @@ pub fn build_router(state: AppState) -> Router {
 pub fn build_reloadable_router(holder: Arc<LastGood<AppState, u128>>) -> Router {
     Router::new()
         .fallback(reloadable_dispatch)
+        .with_state(holder)
+}
+
+/// Build a managed data plane over immutable last-good configuration snapshots.
+pub fn build_reloadable_data_plane_router(holder: Arc<LastGood<AppState, u128>>) -> Router {
+    Router::new()
+        .fallback(reloadable_data_plane_dispatch)
         .with_state(holder)
 }
 
@@ -817,6 +878,24 @@ async fn reloadable_dispatch(
     }
 }
 
+async fn reloadable_data_plane_dispatch(
+    State(holder): State<Arc<LastGood<AppState, u128>>>,
+    request: Request<Body>,
+) -> Response {
+    let state = match holder.current() {
+        Ok(state) => state,
+        Err(_) => return internal_error_response(),
+    };
+    let application = match build_data_plane_router((*state).clone()) {
+        Ok(application) => application,
+        Err(_) => return data_plane_unavailable_response(),
+    };
+    match application.oneshot(request).await {
+        Ok(response) => response,
+        Err(error) => match error {},
+    }
+}
+
 fn internal_error_response() -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -826,6 +905,44 @@ fn internal_error_response() -> Response {
                 "message": "gateway state is unavailable"
             }
         })),
+    )
+        .into_response()
+}
+
+fn data_plane_unavailable_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": {
+                "code": "wayfinder_router_not_ready",
+                "message": "gateway data plane is not ready"
+            }
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Serialize)]
+struct ProbeResponse {
+    status: &'static str,
+}
+
+async fn livez() -> Json<ProbeResponse> {
+    Json(ProbeResponse { status: "ok" })
+}
+
+async fn readyz(State(state): State<AppState>) -> Response {
+    let ready = state.models().iter().any(ConfiguredModel::key_ready);
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        Json(ProbeResponse {
+            status: if ready { "ready" } else { "not_ready" },
+        }),
     )
         .into_response()
 }
@@ -899,13 +1016,55 @@ struct OpenAiModel {
 }
 
 async fn openai_models(State(state): State<AppState>) -> Json<OpenAiModelList> {
+    Json(openai_model_list(&state, None))
+}
+
+async fn authenticated_openai_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let request_id = new_request_id();
+    let Some(policy) = state.access_policy() else {
+        return data_plane_unavailable_response();
+    };
+    let authorization = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    let Some(grant) = policy.authenticate(authorization) else {
+        let mut response_headers = request_id_headers(&request_id);
+        response_headers.insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "wayfinder_router_unauthorized",
+            "missing or invalid API key".to_owned(),
+            response_headers,
+        );
+    };
+    Json(openai_model_list(
+        &state,
+        Some(policy.allowed_models(grant)),
+    ))
+    .into_response()
+}
+
+fn openai_model_list(state: &AppState, allowed_models: Option<&[String]>) -> OpenAiModelList {
     let mut ids = vec![AUTO_MODEL.to_owned()];
     if state.supports_tier_directives() {
         ids.push(PREFER_LOW.to_owned());
         ids.push(PREFER_HIGH.to_owned());
     }
-    ids.extend(state.models().iter().map(|model| model.name().to_owned()));
-    Json(OpenAiModelList {
+    ids.extend(
+        state
+            .models()
+            .iter()
+            .filter(|model| {
+                allowed_models.is_none_or(|allowed| {
+                    allowed.is_empty() || allowed.iter().any(|name| name == model.name())
+                })
+            })
+            .map(|model| model.name().to_owned()),
+    );
+    OpenAiModelList {
         object: "list",
         data: ids
             .into_iter()
@@ -916,7 +1075,7 @@ async fn openai_models(State(state): State<AppState>) -> Json<OpenAiModelList> {
                 owned_by: "wayfinder",
             })
             .collect(),
-    })
+    }
 }
 
 #[derive(Serialize)]
@@ -3126,7 +3285,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use axum::body::{Body, to_bytes};
-    use axum::http::{Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use axum::response::Response;
     use bytes::Bytes;
     use serde_json::{Value, json};
@@ -3138,8 +3297,9 @@ mod tests {
     use wayfinder_service::pricing::{SavingsLedger, UtcDate, turn_cost};
 
     use super::{
-        AppState, ConfiguredModel, RouteOn, build_reloadable_router, build_router,
-        model_is_proven_local, utc_date_from_unix_days, utc_today,
+        AppState, ConfiguredModel, DataPlaneError, RouteOn, build_data_plane_router,
+        build_reloadable_router, build_router, model_is_proven_local, utc_date_from_unix_days,
+        utc_today, validate_data_plane_state,
     };
     use crate::delivery::{
         BufferedDelivery, BufferedDeliveryResponse, DeliveryError, DeliveryFuture,
@@ -3392,6 +3552,46 @@ mod tests {
         .with_request_body_limit(4096)
     }
 
+    fn managed_data_plane_state(model_ready: bool) -> Result<AppState, DataPlaneError> {
+        let mut config = GatewayConfig::default();
+        config.keys.insert(
+            "team-a".to_owned(),
+            VirtualKey {
+                hash: auth::hash_key("wf-secret"),
+                tags: vec!["engineering".to_owned()],
+                budget: None,
+                rate_limit: None,
+                models: vec!["local".to_owned()],
+            },
+        );
+        let state = AppState::new(
+            RoutingConfig::binary(0.5),
+            vec![
+                ConfiguredModel::new(
+                    "local",
+                    "http://127.0.0.1:11434/v1",
+                    "provider-local",
+                    Some("LOCAL_API_KEY".to_owned()),
+                    model_ready,
+                ),
+                ConfiguredModel::new(
+                    "cloud",
+                    "https://cloud.example/v1",
+                    "provider-cloud",
+                    Some("CLOUD_API_KEY".to_owned()),
+                    false,
+                ),
+            ],
+            false,
+            "test",
+        )
+        .with_dry_run(true)
+        .with_gateway_access(&config)
+        .map_err(|_| DataPlaneError::AuthenticationRequired)?;
+        validate_data_plane_state(&state)?;
+        Ok(state)
+    }
+
     fn cached_live_state(calls: Arc<AtomicUsize>) -> Result<AppState, crate::cache::CacheError> {
         AppState::new(
             RoutingConfig::binary(0.5),
@@ -3625,6 +3825,88 @@ mod tests {
             json_body(response).await?,
             json!({"status": "ok", "models": [], "offline": false})
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn managed_data_plane_fails_closed_and_exposes_only_delivery_routes() -> TestResult {
+        let unauthenticated = AppState::new(
+            RoutingConfig::binary(0.5),
+            vec![ConfiguredModel::new(
+                "local",
+                "http://127.0.0.1:11434/v1",
+                "provider-local",
+                None,
+                true,
+            )],
+            false,
+            "test",
+        );
+        assert_eq!(
+            validate_data_plane_state(&unauthenticated),
+            Err(DataPlaneError::AuthenticationRequired)
+        );
+
+        let state = managed_data_plane_state(true)?;
+        let app = build_data_plane_router(state)?;
+        for hidden in [
+            "/healthz",
+            "/metrics",
+            "/router/models",
+            "/router/recent",
+            "/router/config",
+            "/v1/savings",
+        ] {
+            let request = Request::builder().uri(hidden).body(Body::empty())?;
+            assert_eq!(
+                app.clone().oneshot(request).await?.status(),
+                StatusCode::NOT_FOUND,
+                "{hidden} must not be exposed on the managed data plane"
+            );
+        }
+
+        let live = Request::builder().uri("/livez").body(Body::empty())?;
+        assert_eq!(app.clone().oneshot(live).await?.status(), StatusCode::OK);
+        let ready = Request::builder().uri("/readyz").body(Body::empty())?;
+        assert_eq!(app.clone().oneshot(ready).await?.status(), StatusCode::OK);
+
+        let models = Request::builder().uri("/v1/models").body(Body::empty())?;
+        let unauthorized = app.clone().oneshot(models).await?;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            unauthorized
+                .headers()
+                .get(header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer")
+        );
+
+        let models = Request::builder()
+            .uri("/v1/models")
+            .header(header::AUTHORIZATION, "Bearer wf-secret")
+            .body(Body::empty())?;
+        let authorized = app.oneshot(models).await?;
+        assert_eq!(authorized.status(), StatusCode::OK);
+        let body = json_body(authorized).await?;
+        let ids = body["data"]
+            .as_array()
+            .ok_or("model data must be an array")?
+            .iter()
+            .filter_map(|model| model["id"].as_str())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"local"));
+        assert!(!ids.contains(&"cloud"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn managed_readiness_is_minimal_and_requires_one_ready_destination() -> TestResult {
+        let state = managed_data_plane_state(false)?;
+        let app = build_data_plane_router(state)?;
+        let request = Request::builder().uri("/readyz").body(Body::empty())?;
+        let response = app.oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json_body(response).await?, json!({"status": "not_ready"}));
         Ok(())
     }
 
