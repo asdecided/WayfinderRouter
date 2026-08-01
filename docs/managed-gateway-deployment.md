@@ -152,8 +152,24 @@ model ingress.
   distributed admission remain separate migrations.
 - The local operator surface can now require OIDC with `[gateway.auth]` while
   virtual keys remain the data-plane credential. Audit logging and Helm
-  packaging remain follow-on migrations; OIDC does not turn the managed
+  packaging are separate deployment concerns; OIDC does not turn the managed
   listener into a general account-control surface.
+
+## Helm packaging
+
+The Rust gateway is packaged for Kubernetes at
+[`deploy/helm/wayfinder-router`](../deploy/helm/wayfinder-router/). The chart
+starts the explicit authenticated data plane, mounts operator-owned TOML and
+credential Secrets, and can provision a shared Redis service for a small
+evaluation cluster. It does not create virtual keys or model destinations, so
+the data-plane fail-closed contract still applies after `helm install`.
+
+For production, point `redis.url` at a managed Redis service, keep
+`config.existingSecret` and `credentials.existingSecret` outside source control,
+and terminate TLS at the Ingress/controller or another trusted boundary. The
+bundled Redis StatefulSet is ephemeral unless persistence is explicitly
+enabled. See the chart [README](../deploy/helm/wayfinder-router/README.md) and
+[WF-ADR-0059](../decisions/WF-ADR-0059-helm-deployment.md).
 
 See [WF-ADR-0050](../decisions/WF-ADR-0050-managed-gateway-surfaces.md) for the
 authority separation and threat model, and
@@ -170,4 +186,6 @@ named delivery policy, and
 [WF-ADR-0056](../decisions/WF-ADR-0056-hard-destination-eligibility.md) for
 hard privacy and capability filtering, and
 [WF-ADR-0057](../decisions/WF-ADR-0057-operator-oidc-auth.md) for the OIDC
-operator boundary.
+operator boundary, and
+[WF-ADR-0059](../decisions/WF-ADR-0059-helm-deployment.md) for the Helm
+deployment boundary.
