@@ -54,6 +54,9 @@ the gateway does not add in-process TLS.
   token.
 - OIDC claim and issuer configuration is operator-owned TOML, not remote code or
   a downloaded provider plugin.
+- The adjacent audit slice uses the same operator boundary and records
+  authentication failures, configuration reloads, and exports without prompt
+  or provider payloads.
 
 ## Verification
 

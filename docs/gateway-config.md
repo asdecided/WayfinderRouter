@@ -43,6 +43,15 @@ five minutes and refreshed by `kid`; no token, session, or IdP secret is stored.
 Unknown algorithms, key IDs, malformed claims, and unavailable JWKS endpoints
 fail closed. See [WF-ADR-0057](../decisions/WF-ADR-0057-operator-oidc-auth.md).
 
+When the native CLI serves the gateway, operator events are appended to
+`wayfinder-audit.jsonl` beside the selected configuration. Override the path
+with `WAYFINDER_ROUTER_AUDIT_FILE`. Records cover configuration reloads,
+operator-auth failures, and routing/savings exports; they contain only a
+bounded actor, action, timestamp, and sanitized metadata. Prompt and provider
+payloads are never written. The file is opened in append mode and serialized
+under one process-wide lock so concurrent writers cannot interleave JSONL
+records. Shared Redis audit storage remains a separate migration.
+
 ## ChatGPT account provider (opt-in)
 
 `codex-app-server` is a distinct hosted provider for models made available through an eligible
