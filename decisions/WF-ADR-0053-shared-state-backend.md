@@ -33,8 +33,12 @@ namespace = "production"
 
 Redis operations use Lua and Redis server time so replicas do not depend on
 their process start times. Each global, workspace, and virtual-key dimension
-has a bounded namespace key. A request rejected by one dimension is not sent
-upstream. The first implementation keeps the existing local accounting ledger
+has a bounded namespace key. Redis keys use a versioned
+`wayfinder:v1:<base64url(namespace)>` root and separately encoded workspace,
+virtual-key, and audit-stream components. User-selected values therefore cannot
+create delimiter collisions, and limit and audit domains cannot alias the
+legacy raw-key layout. A request rejected by one dimension is not sent upstream.
+The first implementation keeps the existing local accounting ledger
 and response cache unchanged; those are separate state migrations and must not
 be implied by selecting Redis.
 
@@ -54,6 +58,10 @@ enforcement.
 - The default desktop and embedded paths retain the current process-local
   behavior and dependency posture.
 - Redis URLs and backend errors are never echoed through responses or metrics.
+- A deployment upgrading from the pre-v1 raw Redis key experiment must roll all
+  gateway replicas as one coordinated policy cutover. Old fixed-window keys
+  expire naturally; legacy audit keys remain separate evidence until the
+  operator's retention policy removes them.
 - Cross-replica budgets, savings ledgers, response caches, and distributed
   in-flight semaphores remain explicit follow-on work; this ADR does not claim
   them.

@@ -17,7 +17,10 @@ use wayfinder_config::gateway::{GatewayConfig, RateLimit as ConfigRateLimit};
 
 use crate::auth;
 use crate::rate_limit::{RateLimitError, RateLimiter, RateReservation, RateResult, RateSnapshot};
-use crate::state::{StateBackend, StateBackendError, StateLimitConfig};
+use crate::state::{
+    StateBackend, StateBackendError, StateLimitConfig, global_limit_key, virtual_key_limit_key,
+    workspace_limit_key,
+};
 
 /// Bound compare work and dynamic key-attribution cardinality.
 pub const MAX_VIRTUAL_KEYS: usize = 256;
@@ -407,7 +410,10 @@ impl AccessPolicy {
             return self.admit_global();
         };
         match shared.admit_global((self.clock)()).await {
-            Ok(result) => Ok(result),
+            Ok(result) => {
+                shared.degraded.store(false, Ordering::Relaxed);
+                Ok(result)
+            }
             Err(_) => {
                 shared.degraded.store(true, Ordering::Relaxed);
                 self.admit_global()
@@ -424,7 +430,10 @@ impl AccessPolicy {
             return self.admit_key(grant);
         };
         match shared.admit_key(grant, (self.clock)()).await {
-            Ok(result) => Ok(result),
+            Ok(result) => {
+                shared.degraded.store(false, Ordering::Relaxed);
+                Ok(result)
+            }
             Err(_) => {
                 shared.degraded.store(true, Ordering::Relaxed);
                 self.admit_key(grant)
@@ -441,7 +450,10 @@ impl AccessPolicy {
             return self.tightest_snapshot(grant);
         };
         match shared.snapshot(grant, (self.clock)()).await {
-            Ok(snapshot) => Ok(snapshot),
+            Ok(snapshot) => {
+                shared.degraded.store(false, Ordering::Relaxed);
+                Ok(snapshot)
+            }
             Err(_) => {
                 shared.degraded.store(true, Ordering::Relaxed);
                 self.tightest_snapshot(grant)
@@ -458,12 +470,9 @@ impl AccessPolicy {
         let Some(shared) = &self.shared else {
             return Ok(());
         };
-        if shared
-            .add_tokens(grant, tokens, (self.clock)())
-            .await
-            .is_err()
-        {
-            shared.degraded.store(true, Ordering::Relaxed);
+        match shared.add_tokens(grant, tokens, (self.clock)()).await {
+            Ok(()) => shared.degraded.store(false, Ordering::Relaxed),
+            Err(_) => shared.degraded.store(true, Ordering::Relaxed),
         }
         Ok(())
     }
@@ -600,9 +609,8 @@ impl SharedAccessPolicy {
         config: &GatewayConfig,
         backend: Arc<dyn StateBackend>,
     ) -> Result<Self, AccessPolicyError> {
-        let namespace = Arc::<str>::from(config.state.namespace.as_str());
         let global = config.rate_limit.as_ref().map(|limit| SharedLimit {
-            key: format!("{namespace}:global").into(),
+            key: global_limit_key(),
             config: shared_limit_config(limit),
         });
         let workspaces = config
@@ -613,7 +621,7 @@ impl SharedAccessPolicy {
                     (
                         id.clone(),
                         SharedLimit {
-                            key: format!("{namespace}:workspace:{id}").into(),
+                            key: workspace_limit_key(id),
                             config: shared_limit_config(limit),
                         },
                     )
@@ -629,7 +637,7 @@ impl SharedAccessPolicy {
                     .as_ref()
                     .and_then(|workspace| workspaces.get(workspace).cloned()),
                 limiter: key.rate_limit.as_ref().map(|limit| SharedLimit {
-                    key: format!("{namespace}:key:{id}").into(),
+                    key: virtual_key_limit_key(id),
                     config: shared_limit_config(limit),
                 }),
             })
@@ -1015,12 +1023,18 @@ mod tests {
         let first = first_policy
             .authenticate(Some("Bearer wf-a"))
             .ok_or(AccessPolicyError::InvalidKeyId)?;
+        let shared = first_policy
+            .shared
+            .as_ref()
+            .ok_or(AccessPolicyError::InvalidKeyId)?;
+        shared.degraded.store(true, Ordering::Relaxed);
         assert!(
             first_policy
                 .admit_shared_global()
                 .await?
                 .is_some_and(RateResult::allowed)
         );
+        assert!(!first_policy.state_degraded());
         assert!(first_policy.admit_shared_key(first).await?.is_none());
         assert_eq!(
             second_policy

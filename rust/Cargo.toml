@@ -36,7 +36,7 @@ opentelemetry = { version = "=0.32.0", default-features = false, features = ["tr
 opentelemetry-otlp = { version = "=0.32.0", default-features = false, features = ["trace", "http-proto", "reqwest-client", "reqwest-rustls"] }
 opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["trace"] }
 regex = "1.12.4"
-redis = { version = "=0.32.7", default-features = false, features = ["tokio-comp", "connection-manager", "script"] }
+redis = { version = "=0.32.7", default-features = false, features = ["tokio-comp", "tokio-rustls-comp", "connection-manager", "script"] }
 reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
 ring = "0.17.14"
 serde = { version = "1.0.228", features = ["derive"] }

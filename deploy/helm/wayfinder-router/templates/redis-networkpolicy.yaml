@@ -13,6 +13,7 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   policyTypes:
     - Ingress
+    - Egress
   ingress:
     - from:
         - podSelector:
@@ -21,4 +22,5 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.redis.port }}
+  egress: []
 {{- end }}

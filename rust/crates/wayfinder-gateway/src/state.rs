@@ -12,11 +12,33 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use redis::Script;
 use redis::aio::ConnectionManager;
 use thiserror::Error;
 
 use crate::rate_limit::{LimitKind, RateReservation, RateResult, RateSnapshot, ReservationResult};
+
+const REDIS_KEY_ROOT: &str = "wayfinder:v1";
+
+fn encode_redis_component(value: &str) -> String {
+    URL_SAFE_NO_PAD.encode(value.as_bytes())
+}
+
+/// Logical key for the gateway-wide shared limit.
+pub(crate) fn global_limit_key() -> Arc<str> {
+    Arc::from("global")
+}
+
+/// Logical key for one workspace's shared limit.
+pub(crate) fn workspace_limit_key(id: &str) -> Arc<str> {
+    format!("workspace:{}", encode_redis_component(id)).into()
+}
+
+/// Logical key for one virtual key's shared limit.
+pub(crate) fn virtual_key_limit_key(id: &str) -> Arc<str> {
+    format!("virtual-key:{}", encode_redis_component(id)).into()
+}
 
 /// One fixed-window policy copied into a backend operation.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -124,7 +146,12 @@ pub trait StateBackend: Send + Sync {
     /// Append one prompt-free operator audit event when the backend supports
     /// shared event storage. The memory backend deliberately returns an
     /// unavailable result so callers can retain their local JSONL sink.
-    fn append_audit<'a>(&'a self, _key: &'a str, _event: &'a str) -> StateFuture<'a, ()> {
+    fn append_audit<'a>(
+        &'a self,
+        _key: &'a str,
+        _event: &'a str,
+        _max_events: usize,
+    ) -> StateFuture<'a, ()> {
         Box::pin(async { Err(StateBackendError::Unavailable) })
     }
 
@@ -409,12 +436,51 @@ local retry = math.max(0, math.ceil((((window_id + 1) * window_ms) - now_ms) / 1
 return {requests, retry}
 "#;
 
+const APPEND_AUDIT_SCRIPT: &str = r#"
+local max_events = tonumber(ARGV[2])
+if max_events == nil or max_events < 1 then
+  return redis.error_reply('audit retention bound must be positive')
+end
+redis.call('RPUSH', KEYS[1], ARGV[1])
+redis.call('LTRIM', KEYS[1], -max_events, -1)
+return 1
+"#;
+
 /// Redis-backed fixed-window counters using server time and Lua atomicity.
 #[derive(Clone)]
 pub struct RedisStateBackend {
     connection: ConnectionManager,
-    namespace: Arc<str>,
+    keys: RedisKeyNamespace,
     degraded: Arc<AtomicBool>,
+}
+
+/// Versioned Redis key construction with one base64url component per
+/// operator-controlled value. The `limits` and `audit-log` domains are also
+/// deliberately distinct from the legacy `ratelimit` and `audit` markers, so
+/// a v1 key cannot alias a legacy key during a rolling cutover.
+#[derive(Clone)]
+struct RedisKeyNamespace {
+    encoded_namespace: Arc<str>,
+}
+
+impl RedisKeyNamespace {
+    fn new(namespace: &str) -> Self {
+        Self {
+            encoded_namespace: encode_redis_component(namespace).into(),
+        }
+    }
+
+    fn limit(&self, key: &str) -> String {
+        format!("{REDIS_KEY_ROOT}:{}:limits:{key}", self.encoded_namespace)
+    }
+
+    fn audit(&self, key: &str) -> String {
+        format!(
+            "{REDIS_KEY_ROOT}:{}:audit-log:{}",
+            self.encoded_namespace,
+            encode_redis_component(key)
+        )
+    }
 }
 
 impl RedisStateBackend {
@@ -432,19 +498,20 @@ impl RedisStateBackend {
             .query_async::<String>(&mut connection)
             .await
             .map_err(|_| StateBackendError::Unavailable)?;
+        let namespace = namespace.into();
         Ok(Self {
             connection,
-            namespace: namespace.into(),
+            keys: RedisKeyNamespace::new(&namespace),
             degraded: Arc::new(AtomicBool::new(false)),
         })
     }
 
     fn key(&self, key: &str) -> String {
-        format!("{}:ratelimit:{key}", self.namespace)
+        self.keys.limit(key)
     }
 
     fn audit_key(&self, key: &str) -> String {
-        format!("{}:audit:{key}", self.namespace)
+        self.keys.audit(key)
     }
 
     fn mark<T>(&self, result: Result<T, StateBackendError>) -> Result<T, StateBackendError> {
@@ -476,15 +543,18 @@ impl StateBackend for RedisStateBackend {
             let config = config.validate()?;
             let window_ms = (config.window_seconds * 1_000.0).ceil().max(1.0) as u64;
             let mut connection = self.connection.clone();
-            let value: (i64, i64, i64) = Script::new(ADMIT_SCRIPT)
+            let value: Result<(i64, i64, i64), _> = Script::new(ADMIT_SCRIPT)
                 .key(self.key(key))
                 .arg(window_ms)
                 .arg(config.rpm.unwrap_or(0))
                 .arg(config.tpm.unwrap_or(0))
                 .invoke_async(&mut connection)
-                .await
-                .map_err(|_| StateBackendError::Unavailable)?;
-            self.mark(redis_result(value))
+                .await;
+            self.mark(
+                value
+                    .map_err(|_| StateBackendError::Unavailable)
+                    .and_then(redis_result),
+            )
         })
     }
 
@@ -499,7 +569,7 @@ impl StateBackend for RedisStateBackend {
             let config = config.validate()?;
             let window_ms = (config.window_seconds * 1_000.0).ceil().max(1.0) as u64;
             let mut connection = self.connection.clone();
-            let value: (i64, i64, i64, i64) = Script::new(RESERVE_SCRIPT)
+            let value: Result<(i64, i64, i64, i64), _> = Script::new(RESERVE_SCRIPT)
                 .key(self.key(key))
                 .arg(window_ms)
                 .arg(config.rpm.unwrap_or(0))
@@ -507,9 +577,12 @@ impl StateBackend for RedisStateBackend {
                 .arg(tokens)
                 .arg(1)
                 .invoke_async(&mut connection)
-                .await
-                .map_err(|_| StateBackendError::Unavailable)?;
-            self.mark(redis_reservation_result(value, tokens, true))
+                .await;
+            self.mark(
+                value
+                    .map_err(|_| StateBackendError::Unavailable)
+                    .and_then(|value| redis_reservation_result(value, tokens, true)),
+            )
         })
     }
 
@@ -533,7 +606,7 @@ impl StateBackend for RedisStateBackend {
             }
             let window_ms = (config.window_seconds * 1_000.0).ceil().max(1.0) as u64;
             let mut connection = self.connection.clone();
-            let value: (i64, i64, i64, i64) = Script::new(RESERVE_SCRIPT)
+            let value: Result<(i64, i64, i64, i64), _> = Script::new(RESERVE_SCRIPT)
                 .key(self.key(key))
                 .arg(window_ms)
                 .arg(config.rpm.unwrap_or(0))
@@ -541,9 +614,12 @@ impl StateBackend for RedisStateBackend {
                 .arg(tokens)
                 .arg(0)
                 .invoke_async(&mut connection)
-                .await
-                .map_err(|_| StateBackendError::Unavailable)?;
-            self.mark(redis_reservation_result(value, tokens, false))
+                .await;
+            self.mark(
+                value
+                    .map_err(|_| StateBackendError::Unavailable)
+                    .and_then(|value| redis_reservation_result(value, tokens, false)),
+            )
         })
     }
 
@@ -636,35 +712,47 @@ impl StateBackend for RedisStateBackend {
             };
             let window_ms = (config.window_seconds * 1_000.0).ceil().max(1.0) as u64;
             let mut connection = self.connection.clone();
-            let value: (i64, i64) = Script::new(SNAPSHOT_SCRIPT)
+            let value: Result<(i64, i64), _> = Script::new(SNAPSHOT_SCRIPT)
                 .key(self.key(key))
                 .arg(window_ms)
                 .invoke_async(&mut connection)
-                .await
-                .map_err(|_| StateBackendError::Unavailable)?;
+                .await;
             self.mark(
-                u64::try_from(value.0)
-                    .ok()
-                    .zip(u64::try_from(value.1).ok())
-                    .map(|(requests, reset_seconds)| {
-                        Some(RateSnapshot {
-                            limit,
-                            remaining: limit.saturating_sub(requests),
-                            reset_seconds,
-                        })
-                    })
-                    .ok_or(StateBackendError::Unavailable),
+                value
+                    .map_err(|_| StateBackendError::Unavailable)
+                    .and_then(|value| {
+                        u64::try_from(value.0)
+                            .ok()
+                            .zip(u64::try_from(value.1).ok())
+                            .map(|(requests, reset_seconds)| {
+                                Some(RateSnapshot {
+                                    limit,
+                                    remaining: limit.saturating_sub(requests),
+                                    reset_seconds,
+                                })
+                            })
+                            .ok_or(StateBackendError::Unavailable)
+                    }),
             )
         })
     }
 
-    fn append_audit<'a>(&'a self, key: &'a str, event: &'a str) -> StateFuture<'a, ()> {
+    fn append_audit<'a>(
+        &'a self,
+        key: &'a str,
+        event: &'a str,
+        max_events: usize,
+    ) -> StateFuture<'a, ()> {
         Box::pin(async move {
+            if max_events == 0 {
+                return Err(StateBackendError::Unavailable);
+            }
             let mut connection = self.connection.clone();
-            let result: Result<i64, _> = redis::cmd("RPUSH")
-                .arg(self.audit_key(key))
+            let result: Result<i64, _> = Script::new(APPEND_AUDIT_SCRIPT)
+                .key(self.audit_key(key))
                 .arg(event)
-                .query_async(&mut connection)
+                .arg(max_events)
+                .invoke_async(&mut connection)
                 .await;
             self.mark(
                 result
@@ -832,5 +920,97 @@ mod tests {
                 .map(RateReservation::window_id),
             Some(7)
         );
+    }
+
+    #[test]
+    fn redis_v1_keys_encode_every_operator_controlled_component() {
+        let keys = RedisKeyNamespace::new("prod:europe");
+
+        assert_eq!(
+            keys.limit(&virtual_key_limit_key("team:a")),
+            "wayfinder:v1:cHJvZDpldXJvcGU:limits:virtual-key:dGVhbTph"
+        );
+        assert_eq!(
+            keys.limit(&workspace_limit_key("research/west")),
+            "wayfinder:v1:cHJvZDpldXJvcGU:limits:workspace:cmVzZWFyY2gvd2VzdA"
+        );
+        assert_eq!(
+            keys.limit(&global_limit_key()),
+            "wayfinder:v1:cHJvZDpldXJvcGU:limits:global"
+        );
+        assert_eq!(
+            keys.audit("prod:europe"),
+            "wayfinder:v1:cHJvZDpldXJvcGU:audit-log:cHJvZDpldXJvcGU"
+        );
+        assert_eq!(
+            RedisKeyNamespace::new("???").limit(&workspace_limit_key(">>>")),
+            "wayfinder:v1:Pz8_:limits:workspace:Pj4-"
+        );
+        assert_eq!(virtual_key_limit_key("?").as_ref(), "virtual-key:Pw");
+    }
+
+    #[test]
+    fn redis_v1_limit_keys_do_not_repeat_legacy_delimiter_collisions() {
+        fn legacy_virtual_limit_key(namespace: &str, id: &str) -> String {
+            format!("{namespace}:ratelimit:{namespace}:key:{id}")
+        }
+
+        let first_namespace = "a";
+        let first_id = "x:ratelimit:a:ratelimit:a:key:x:key:y";
+        let second_namespace = "a:ratelimit:a:key:x";
+        let second_id = "y";
+
+        assert_eq!(
+            legacy_virtual_limit_key(first_namespace, first_id),
+            legacy_virtual_limit_key(second_namespace, second_id),
+            "the regression pair must collide under the legacy concatenation"
+        );
+
+        let first = RedisKeyNamespace::new(first_namespace).limit(&virtual_key_limit_key(first_id));
+        let second =
+            RedisKeyNamespace::new(second_namespace).limit(&virtual_key_limit_key(second_id));
+
+        assert_ne!(first, second);
+        assert!(first.starts_with("wayfinder:v1:"));
+        assert!(second.starts_with("wayfinder:v1:"));
+        assert!(!first.contains(":ratelimit:"));
+        assert!(!second.contains(":ratelimit:"));
+    }
+
+    #[test]
+    fn redis_v1_audit_keys_do_not_repeat_legacy_delimiter_collisions() {
+        fn legacy_audit_key(namespace: &str, stream: &str) -> String {
+            format!("{namespace}:audit:{stream}")
+        }
+
+        let first_namespace = "tenant";
+        let first_stream = "west:audit:events";
+        let second_namespace = "tenant:audit:west";
+        let second_stream = "events";
+
+        assert_eq!(
+            legacy_audit_key(first_namespace, first_stream),
+            legacy_audit_key(second_namespace, second_stream),
+            "the regression pair must collide under the legacy concatenation"
+        );
+
+        let first = RedisKeyNamespace::new(first_namespace).audit(first_stream);
+        let second = RedisKeyNamespace::new(second_namespace).audit(second_stream);
+
+        assert_ne!(first, second);
+        assert!(!first.contains(":audit:"));
+        assert!(!second.contains(":audit:"));
+    }
+
+    #[test]
+    fn shared_audit_script_appends_then_trims_atomically() {
+        assert!(matches!(
+            (
+                APPEND_AUDIT_SCRIPT.find("RPUSH"),
+                APPEND_AUDIT_SCRIPT.find("LTRIM")
+            ),
+            (Some(append), Some(trim)) if append < trim
+        ));
+        assert!(APPEND_AUDIT_SCRIPT.contains("-max_events, -1"));
     }
 }

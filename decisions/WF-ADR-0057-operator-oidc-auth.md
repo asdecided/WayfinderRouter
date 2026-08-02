@@ -22,11 +22,17 @@ must have matching `iss` and `aud`, a future `exp`, an optional not-yet-valid
 `nbf` within the bounded clock skew, a non-empty `sub`, and the configured admin
 claim. `both` also permits an already configured virtual key for migration.
 
-The JWKS document is fetched over the configured URL, retained only as a
+The JWKS document is fetched over HTTPS, except that literal-loopback HTTP is
+permitted for bounded development and tests. Userinfo, fragments, and redirects
+are rejected. The document is retained only as a
 short-lived in-memory public-key cache, and never written to the gateway
 configuration, ledger, logs, or audit data. No sessions, browser callbacks, IdP
-client secrets, or user store are introduced. Token validation fails closed;
-unknown keys or an unavailable JWKS endpoint do not grant access.
+client secrets, or user store are introduced. Declared and streamed JWKS bodies
+are capped at 256 KiB before JSON parsing, with at most 64 keys accepted. Token
+validation fails closed;
+unknown keys or an unavailable JWKS endpoint do not grant access. Unknown-key
+refreshes are single-flight and rate-limited so attacker-chosen key identifiers
+cannot create an unbounded IdP fetch loop.
 
 ## Boundary
 
@@ -56,14 +62,20 @@ the gateway does not add in-process TLS.
   a downloaded provider plugin.
 - The adjacent audit slice uses the same operator boundary and records
   authentication failures, configuration reloads, and exports without prompt
-  or provider payloads. Redis-backed deployments enqueue the same event into a
-  namespace-scoped shared list; memory mode uses the append-locked JSONL file.
+  or provider payloads. One bounded ordered worker acknowledges each configured
+  destination, drains on shutdown, and gives each event a UUID plus a content
+  digest. Redis append and retention are one atomic operation; the local JSONL
+  file is durably synchronized during flush and shutdown.
 
 ## Verification
 
 - config parsing rejects incomplete OIDC configuration and round-trips the
   auth table;
 - RS256/JWK parsing rejects non-RSA, non-signing, and non-RS256 keys;
+- declared and fragmented JWKS responses cannot exceed the pre-parse byte cap;
+- remote plaintext URLs, redirects, userinfo, and fragments are rejected;
+- concurrent or repeated unknown key identifiers cannot bypass the bounded
+  refresh interval;
 - operator routes return 401 without an OIDC token while health remains public;
 - the gateway has no path from an operator JWT to a provider credential or
   prompt body.

@@ -1,11 +1,36 @@
 {{- if .Values.ingress.enabled }}
+{{- if not .Values.ingress.allowInsecureDevelopment }}
+{{- if empty .Values.ingress.tls }}
+{{- fail "ingress.tls is required unless ingress.allowInsecureDevelopment=true" }}
+{{- end }}
+{{- if empty .Values.ingress.httpsOnlyAnnotations }}
+{{- fail "ingress.httpsOnlyAnnotations must enforce controller-specific HTTPS-only behavior" }}
+{{- end }}
+{{- range $tls := .Values.ingress.tls }}
+{{- if or (empty $tls.secretName) (empty $tls.hosts) }}
+{{- fail "every ingress.tls entry requires secretName and at least one host" }}
+{{- end }}
+{{- end }}
+{{- range $rule := .Values.ingress.hosts }}
+{{- $covered := false }}
+{{- range $tls := $.Values.ingress.tls }}
+{{- if has $rule.host $tls.hosts }}
+{{- $covered = true }}
+{{- end }}
+{{- end }}
+{{- if not $covered }}
+{{- fail (printf "ingress host %s is not covered by ingress.tls" $rule.host) }}
+{{- end }}
+{{- end }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ include "wayfinder-router.fullname" . }}
   labels:
     {{- include "wayfinder-router.labels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
+  {{- $annotations := mergeOverwrite (deepCopy .Values.ingress.annotations) .Values.ingress.httpsOnlyAnnotations }}
+  {{- with $annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}

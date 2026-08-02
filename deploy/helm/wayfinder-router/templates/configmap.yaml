@@ -1,6 +1,9 @@
 {{- if and .Values.config.existingSecret .Values.config.existingConfigMap }}
 {{- fail "config.existingSecret and config.existingConfigMap are mutually exclusive" }}
 {{- end }}
+{{- if and (not .Values.redis.enabled) (not .Values.config.existingSecret) }}
+{{- fail "redis.enabled=false requires config.existingSecret with the external Redis URL" }}
+{{- end }}
 {{- if and (not .Values.config.existingSecret) (not .Values.config.existingConfigMap) }}
 apiVersion: v1
 kind: ConfigMap

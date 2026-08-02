@@ -7,16 +7,16 @@ with at least one virtual key and one model destination.
 
 {{- if .Values.redis.enabled }}
 This release includes a single-replica Redis instance for shared policy state.
-It is ephemeral unless redis.persistence.enabled=true; use redis.url for a managed
-production Redis service.
+It uses a persistent AOF claim by default. Disable persistence only for a
+disposable evaluation.
 {{- else }}
-Redis is disabled. Ensure config.inline or your existing configuration points at
-an external shared state backend when replicas are enabled.
+Redis is disabled. The required config.existingSecret must contain the external
+shared-state URL; use certificate-validated rediss:// outside a trusted network.
 {{- end }}
 
 {{- if .Values.ingress.enabled }}
-Ingress is enabled. Terminate TLS at the ingress controller and keep the gateway
-service private unless the ingress policy explicitly requires external access.
+Ingress is enabled. TLS and controller-specific HTTPS-only annotations are
+required outside the explicit local-development escape hatch.
 {{- else }}
 Ingress is disabled. Use port-forwarding for a local smoke test:
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "wayfinder-router.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}

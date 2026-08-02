@@ -68,7 +68,6 @@ redis:
     tag: 7.4-alpine
     pullPolicy: IfNotPresent
   port: 6379
-  url: ""
   persistence:
     enabled: true
     size: 8Gi
@@ -84,8 +83,14 @@ otel:
 
 ingress:
   enabled: false
+  # Escape hatch for a local development ingress only. Production ingress must
+  # supply ingress.tls and terminate HTTPS before traffic reaches the Service.
+  allowInsecureDevelopment: false
   className: ""
   annotations: {}
+  # Controller-specific settings that redirect or disable plaintext HTTP.
+  # Required whenever ingress is enabled outside the development escape hatch.
+  httpsOnlyAnnotations: {}
   hosts:
     - host: wayfinder.example.com
       paths:
@@ -95,9 +100,18 @@ ingress:
 
 networkPolicy:
   enabled: true
-  # These defaults permit ingress from any namespace to the service and DNS,
-  # HTTPS, and Redis egress. Tighten them for a specific cluster.
+  # Empty ingress means deny all. Supply explicit namespace/pod selectors for
+  # the ingress controller or trusted callers.
   ingress: []
+  dns:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns
+  # Empty egress permits only selected cluster DNS and bundled Redis. Supply a
+  # complete explicit peer/IPBlock list for providers, OTLP, or external Redis.
   egress: []
 
 podDisruptionBudget:

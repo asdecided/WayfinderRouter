@@ -47,12 +47,13 @@ When the native CLI serves the gateway, operator events are appended to
 `wayfinder-audit.jsonl` beside the selected configuration. Override the path
 with `WAYFINDER_ROUTER_AUDIT_FILE`. Records cover configuration reloads,
 operator-auth failures, and routing/savings exports; they contain only a
-bounded actor, action, timestamp, and sanitized metadata. Prompt and provider
-payloads are never written. The file is opened in append mode and serialized
-under one process-wide lock so concurrent writers cannot interleave JSONL
-records. With `[gateway.state] backend = "redis"`, the same bounded event is
-queued to the namespace's shared Redis audit list so replicas retain one
-operator history; the local JSONL sink remains the fallback for memory mode.
+bounded actor, action, timestamp, UUID, content digest, and sanitized metadata.
+Prompt and provider payloads are never written. One bounded ordered worker
+acknowledges every configured destination; flush and shutdown durably synchronize
+the local file. With `[gateway.state] backend = "redis"`, one Lua operation
+appends the same event and trims the namespace's shared list to 10,000 records;
+the per-replica JSONL sink remains enabled as local evidence. A failed audit
+acknowledgement makes the affected operator action fail with a bounded 503.
 
 ## ChatGPT account provider (opt-in)
 
@@ -160,7 +161,7 @@ unchanged). See [WF-ADR-0058](../decisions/WF-ADR-0058-opentelemetry-observabili
 | setting | effect |
 | --- | --- |
 | `[gateway.rate_limit] rpm` / `tpm` / `window` | cap requests and/or upstream tokens over a fixed `window` (default 60s). RPM is admitted before scoring. Immediately before provider delivery, TPM reserves the complete sanitized request's encoded byte length plus explicit `max_tokens` or `max_completion_tokens` multiplied by `n`; requests without a positive output bound return `422 wayfinder_router_token_bound_required`. Exact provider usage reconciles the same window; missing/estimated usage, cancellation, or disconnect retains the conservative charge. A breach returns `429` with `Retry-After`; successful responses carry `X-RateLimit-Limit`/`-Remaining`/`-Reset` (WF-ADR-0034) |
-| `[gateway.state] backend = memory\|redis` / `url` / `namespace` | choose the shared policy-counter backend. `memory` is the zero-configuration default; `redis` uses atomic server-time fixed windows for global, workspace, and virtual-key RPM/TPM across replicas and requires a Redis URL. A Redis outage falls back to bounded process-local counters and sets `wayfinder_state_degraded 1`; it does not drop requests. The savings ledger and response cache remain process-local until their own migrations (WF-ADR-0053) |
+| `[gateway.state] backend = memory\|redis` / `url` / `namespace` | choose the shared policy-counter backend. `memory` is the zero-configuration default; `redis` uses atomic server-time fixed windows for global, workspace, and virtual-key RPM/TPM across replicas and requires a Redis URL. Use certificate-validated `rediss://` outside a trusted local network. Backend, URL, and namespace changes are restart-only so reload cannot strand counters or audit events in a previous destination. A Redis outage falls back to bounded process-local counters and sets `wayfinder_state_degraded 1`; it does not drop requests. The savings ledger and response cache remain process-local until their own migrations (WF-ADR-0053) |
 
 ## Virtual API keys
 

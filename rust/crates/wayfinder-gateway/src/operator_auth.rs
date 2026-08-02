@@ -16,21 +16,24 @@ use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use futures_util::StreamExt;
 use reqwest::Client;
 use ring::signature;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex as AsyncMutex, RwLock};
 use wayfinder_config::gateway::GatewayAuthConfig;
 
 use crate::AppState;
 use crate::audit::AuditActor;
 
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
+const JWKS_REFRESH_COOLDOWN: Duration = Duration::from_secs(5);
 const JWKS_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_TOKEN_BYTES: usize = 16 * 1024;
 const MAX_JWKS_KEYS: usize = 64;
+const MAX_JWKS_BYTES: usize = 256 * 1024;
 const MAX_JWK_COMPONENT_BYTES: usize = 1024;
 const CLOCK_SKEW_SECONDS: f64 = 60.0;
 
@@ -50,6 +53,10 @@ pub enum OperatorAuthConfigError {
     /// The JWKS client could not be created.
     #[error("cannot create OIDC JWKS client: {0}")]
     Client(#[from] reqwest::Error),
+    /// The JWKS endpoint is not an authenticated HTTPS URL or literal loopback
+    /// HTTP development endpoint.
+    #[error("OIDC jwks_url must use HTTPS (or HTTP on a literal loopback address)")]
+    InvalidJwksUrl,
 }
 
 /// An immutable, clone-cheap validator with a short-lived public-key cache.
@@ -62,6 +69,7 @@ pub struct OperatorAuthenticator {
     admin_claim: Arc<str>,
     client: Client,
     keys: Arc<RwLock<Option<CachedKeys>>>,
+    refresh_attempted: Arc<AsyncMutex<Option<Instant>>>,
 }
 
 impl OperatorAuthenticator {
@@ -90,10 +98,25 @@ impl OperatorAuthenticator {
             .as_deref()
             .filter(|value| !value.is_empty())
             .ok_or(OperatorAuthConfigError::MissingConfiguration)?;
+        let parsed_jwks_url =
+            reqwest::Url::parse(jwks_url).map_err(|_| OperatorAuthConfigError::InvalidJwksUrl)?;
+        let loopback_http = parsed_jwks_url.scheme() == "http"
+            && parsed_jwks_url
+                .host_str()
+                .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+                .is_some_and(|address| address.is_loopback());
+        if (parsed_jwks_url.scheme() != "https" && !loopback_http)
+            || !parsed_jwks_url.username().is_empty()
+            || parsed_jwks_url.password().is_some()
+            || parsed_jwks_url.fragment().is_some()
+        {
+            return Err(OperatorAuthConfigError::InvalidJwksUrl);
+        }
         let client = Client::builder()
             .connect_timeout(JWKS_TIMEOUT)
             .timeout(JWKS_TIMEOUT)
             .user_agent("wayfinder-router-operator-auth")
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         Ok(Some(Self {
             mode,
@@ -103,6 +126,7 @@ impl OperatorAuthenticator {
             admin_claim: Arc::from(config.admin_claim.clone()),
             client,
             keys: Arc::new(RwLock::new(None)),
+            refresh_attempted: Arc::new(AsyncMutex::new(None)),
         }))
     }
 
@@ -207,24 +231,26 @@ impl OperatorAuthenticator {
     }
 
     async fn keys_for(&self, kid: &str) -> Result<Vec<RsaJwk>, OperatorAuthFailure> {
-        {
-            let cache = self.keys.read().await;
-            if let Some(cached) = cache
-                .as_ref()
-                .filter(|cache| cache.fetched.elapsed() < JWKS_CACHE_TTL)
-            {
-                let matching = cached
-                    .keys
-                    .iter()
-                    .filter(|key| key.kid == kid)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if !matching.is_empty() {
-                    return Ok(matching);
-                }
-            }
+        if let Some(matching) = self.cached_keys_for(kid).await {
+            return Ok(matching);
         }
+        let mut refresh_attempted = self.refresh_attempted.lock().await;
+        if let Some(matching) = self.cached_keys_for(kid).await {
+            return Ok(matching);
+        }
+        if refresh_attempted
+            .as_ref()
+            .is_some_and(|attempted| attempted.elapsed() < JWKS_REFRESH_COOLDOWN)
+        {
+            return if self.keys.read().await.is_some() {
+                Err(OperatorAuthFailure::Unauthorized)
+            } else {
+                Err(OperatorAuthFailure::Unavailable)
+            };
+        }
+        *refresh_attempted = Some(Instant::now());
         self.refresh_keys().await?;
+        drop(refresh_attempted);
         let cache = self.keys.read().await;
         cache
             .as_ref()
@@ -240,6 +266,20 @@ impl OperatorAuthenticator {
             .ok_or(OperatorAuthFailure::Unauthorized)
     }
 
+    async fn cached_keys_for(&self, kid: &str) -> Option<Vec<RsaJwk>> {
+        let cache = self.keys.read().await;
+        let cached = cache
+            .as_ref()
+            .filter(|cache| cache.fetched.elapsed() < JWKS_CACHE_TTL)?;
+        let matching = cached
+            .keys
+            .iter()
+            .filter(|key| key.kid == kid)
+            .cloned()
+            .collect::<Vec<_>>();
+        (!matching.is_empty()).then_some(matching)
+    }
+
     async fn refresh_keys(&self) -> Result<(), OperatorAuthFailure> {
         let response = self
             .client
@@ -250,9 +290,19 @@ impl OperatorAuthenticator {
         if !response.status().is_success() {
             return Err(OperatorAuthFailure::Unavailable);
         }
-        let document = response
-            .json::<JwksDocument>()
-            .await
+        validate_jwks_content_length(response.content_length())?;
+        let mut encoded = Vec::with_capacity(
+            response
+                .content_length()
+                .and_then(|length| usize::try_from(length).ok())
+                .unwrap_or(0),
+        );
+        let mut body = response.bytes_stream();
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.map_err(|_| OperatorAuthFailure::Unavailable)?;
+            append_jwks_chunk(&mut encoded, &chunk)?;
+        }
+        let document = serde_json::from_slice::<JwksDocument>(&encoded)
             .map_err(|_| OperatorAuthFailure::Unavailable)?;
         if document.keys.len() > MAX_JWKS_KEYS {
             return Err(OperatorAuthFailure::Unavailable);
@@ -272,6 +322,21 @@ impl OperatorAuthenticator {
         });
         Ok(())
     }
+}
+
+fn validate_jwks_content_length(length: Option<u64>) -> Result<(), OperatorAuthFailure> {
+    if length.is_some_and(|length| length > MAX_JWKS_BYTES as u64) {
+        return Err(OperatorAuthFailure::Unavailable);
+    }
+    Ok(())
+}
+
+fn append_jwks_chunk(buffer: &mut Vec<u8>, chunk: &[u8]) -> Result<(), OperatorAuthFailure> {
+    if buffer.len().saturating_add(chunk.len()) > MAX_JWKS_BYTES {
+        return Err(OperatorAuthFailure::Unavailable);
+    }
+    buffer.extend_from_slice(chunk);
+    Ok(())
 }
 
 /// Protect the operator router while leaving the data-plane router unchanged.
@@ -328,12 +393,24 @@ pub async fn middleware(
                     "unavailable",
                 ),
             };
-            let _ = state.audit_log().record(
-                "anonymous",
-                "auth.failure",
-                None,
-                Some(json!({"path": request_path, "reason": reason})),
-            );
+            if let Err(error) = state
+                .audit_log()
+                .record(
+                    "anonymous",
+                    "auth.failure",
+                    None,
+                    Some(json!({"path": request_path, "reason": reason})),
+                )
+                .await
+            {
+                tracing::error!(error = %error, "operator authentication audit was not persisted");
+                return operator_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "wayfinder_router_audit_unavailable",
+                    "operator audit persistence is unavailable",
+                    false,
+                );
+            }
             operator_error(status, error_type, message, challenge)
         }
     }
@@ -525,6 +602,25 @@ mod tests {
     }
 
     #[test]
+    fn jwks_declared_and_streamed_bodies_are_bounded_before_parsing()
+    -> Result<(), OperatorAuthFailure> {
+        assert!(validate_jwks_content_length(Some(MAX_JWKS_BYTES as u64)).is_ok());
+        assert!(matches!(
+            validate_jwks_content_length(Some(MAX_JWKS_BYTES as u64 + 1)),
+            Err(OperatorAuthFailure::Unavailable)
+        ));
+
+        let mut body = Vec::new();
+        append_jwks_chunk(&mut body, &vec![b'a'; MAX_JWKS_BYTES - 1])?;
+        append_jwks_chunk(&mut body, b"b")?;
+        assert!(matches!(
+            append_jwks_chunk(&mut body, b"c"),
+            Err(OperatorAuthFailure::Unavailable)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn auth_config_only_builds_oidc_validator_for_oidc_modes() {
         let config = GatewayAuthConfig::default();
         assert!(matches!(
@@ -541,6 +637,42 @@ mod tests {
         assert!(matches!(
             OperatorAuthenticator::from_config(&config),
             Ok(Some(_))
+        ));
+
+        let insecure_remote = GatewayAuthConfig {
+            jwks_url: Some("http://issuer.example/jwks".to_owned()),
+            ..config.clone()
+        };
+        assert!(matches!(
+            OperatorAuthenticator::from_config(&insecure_remote),
+            Err(OperatorAuthConfigError::InvalidJwksUrl)
+        ));
+        let loopback_development = GatewayAuthConfig {
+            jwks_url: Some("http://127.0.0.1:9876/jwks".to_owned()),
+            ..config
+        };
+        assert!(matches!(
+            OperatorAuthenticator::from_config(&loopback_development),
+            Ok(Some(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn unknown_key_refreshes_are_single_flight_and_cooled_down() {
+        let config = GatewayAuthConfig {
+            mode: "oidc".to_owned(),
+            issuer: Some("https://issuer.example".to_owned()),
+            audience: Some("wayfinder".to_owned()),
+            jwks_url: Some("https://issuer.example/jwks".to_owned()),
+            admin_claim: "admin".to_owned(),
+        };
+        let Some(authenticator) = OperatorAuthenticator::from_config(&config).ok().flatten() else {
+            return;
+        };
+        *authenticator.refresh_attempted.lock().await = Some(Instant::now());
+        assert!(matches!(
+            authenticator.keys_for("attacker-selected-kid").await,
+            Err(OperatorAuthFailure::Unavailable)
         ));
     }
 
