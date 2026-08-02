@@ -190,7 +190,7 @@ async fn configure_gateway_user(
         .arg(format!(">{password}"))
         .arg("resetkeys")
         .arg("~*")
-        .arg("resetcommands")
+        .arg("-@all")
         .arg("+@all")
         .query_async::<String>(admin)
         .await
@@ -204,7 +204,7 @@ async fn remove_gateway_commands(
     redis::cmd("ACL")
         .arg("SETUSER")
         .arg(username)
-        .arg("resetcommands")
+        .arg("-@all")
         .query_async::<String>(admin)
         .await
         .map(|_| ())
