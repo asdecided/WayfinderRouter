@@ -55,6 +55,44 @@ appends the same event and trims the namespace's shared list to 10,000 records;
 the per-replica JSONL sink remains enabled as local evidence. A failed audit
 acknowledgement makes the affected operator action fail with a bounded 503.
 
+## Evidence reports (opt-in)
+
+The shadow evaluator is disabled unless `[gateway.shadow]` is explicitly
+enabled. When it is enabled, the gateway retains only bounded, prompt-free
+counterfactual records:
+
+```toml
+[gateway.shadow]
+enabled = true
+sample_rate = 0.05
+candidate_routes = ["on-device-first"]
+max_in_flight = 2
+max_records = 2048
+provider_comparisons = false
+```
+
+Candidate names must refer to existing `[gateway.routes.<name>]` presets. The
+production request is never delayed or changed. Provider comparisons require
+both `provider_comparisons = true` and
+`x-wayfinder-shadow-provider-consent: true`, and are considered only for the
+`hosted-allowed` privacy posture. All sampling, retention, comparison budgets,
+and labels are bounded; setting `enabled = false` and allowing the normal
+configuration reload to complete stops queued/in-flight shadow work
+cooperatively. See [WF-ADR-0063](../decisions/WF-ADR-0063-bounded-deterministic-shadow-routing.md).
+
+The operator-only evidence surfaces are:
+
+| endpoint | effect |
+| --- | --- |
+| `GET /v1/evidence` (or `/router/evidence`) | deterministic `wf-evidence-v1` JSON report with sample counts, missingness, provider outcomes, cost class, quality labels, confidence intervals, evaluator agreement, and a tri-state outcome |
+| `GET /v1/evidence.txt` (or `/router/evidence.txt`) | self-contained human-readable report; it makes no external requests |
+| `POST /v1/evidence/labels` (or `/router/evidence/labels`) | add bounded `human` or versioned `automated` labels keyed by retained request ID and candidate route |
+
+The label endpoint rejects unknown fields, including `prompt` and `response`,
+and is covered by the same operator authentication and audit boundary as
+other `/router/*` surfaces. Content retention is not implemented by this
+release.
+
 ## ChatGPT account provider (opt-in)
 
 `codex-app-server` is a distinct hosted provider for models made available through an eligible
@@ -108,6 +146,7 @@ verification. See
 | `GET /healthz` | reports `degraded` and lists `missing_keys` when a configured `api_key_env` is unset |
 | `GET /router` | read-only dashboard of recent decisions, with `X-Wayfinder-Debug: true` surfacing one in the body |
 | `GET /v1/savings?period=today\|7d\|30d\|all` | realized vs always-frontier cost and the savings between them, per route (WF-DESIGN-0007) |
+| `GET /v1/evidence` / `GET /v1/evidence.txt` | quality/efficiency report over bounded shadow records; below the minimum decisive sample or with conflicting provenance it returns `keep-shadowing` rather than claiming significance (WF-ADR-0064) |
 | `WAYFINDER_ROUTER_SAVINGS_FILE` | where the savings ledger is persisted (default `<config-dir>/wayfinder-savings.json`) |
 
 ### Optional OpenTelemetry

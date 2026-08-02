@@ -16,6 +16,7 @@ pub mod codex_control;
 pub mod decision_policy;
 pub mod delivery;
 pub mod deployment_selection;
+pub mod evidence;
 pub mod metrics;
 pub mod operator_auth;
 pub mod otel;
@@ -45,7 +46,7 @@ use axum::{Json, Router, middleware};
 use bytes::Bytes;
 use futures_util::{StreamExt, stream};
 use indexmap::IndexMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -99,6 +100,7 @@ use crate::delivery::{
 use crate::deployment_selection::{
     DeploymentObservation, DeploymentObservationStore, DeploymentSelection,
 };
+use crate::evidence::{EvidenceError, EvidenceLabel, EvidenceReport, EvidenceStore};
 use crate::metrics::{DEFAULT_MAX_LABEL_SERIES, GatewayMetrics};
 use crate::rate_limit::{RateResult, RateSnapshot};
 use crate::recent::{RecentCost, RecentEntry, RecentRoutes};
@@ -504,6 +506,7 @@ pub struct AppState {
     shadow_config: Arc<ShadowConfig>,
     shadow_store: Arc<ShadowStore>,
     shadow_slots: Arc<tokio::sync::Semaphore>,
+    evidence_labels: Arc<EvidenceStore>,
     offline: bool,
     dry_run: bool,
     route_on: RouteOn,
@@ -583,6 +586,7 @@ impl AppState {
                 usize::try_from(wayfinder_config::gateway::DEFAULT_SHADOW_MAX_IN_FLIGHT)
                     .unwrap_or(1),
             )),
+            evidence_labels: Arc::new(EvidenceStore::default()),
             offline,
             dry_run: false,
             route_on: RouteOn::Turn,
@@ -1002,6 +1006,7 @@ impl AppState {
         self.shadow_store = Arc::clone(&previous.shadow_store);
         self.shadow_slots = Arc::clone(&previous.shadow_slots);
         self.shadow_store.set_active(self.shadow_config.enabled);
+        self.evidence_labels = Arc::clone(&previous.evidence_labels);
         self.savings_ledger = Arc::clone(&previous.savings_ledger);
         self.savings_path = previous.savings_path.clone();
         self.audit_log = Arc::clone(&previous.audit_log);
@@ -1274,6 +1279,23 @@ impl AppState {
         self.shadow_store.snapshot(limit)
     }
 
+    /// Add bounded prompt-free human or versioned automated evidence labels.
+    pub fn add_evidence_labels<I>(&self, labels: I) -> Result<usize, EvidenceError>
+    where
+        I: IntoIterator<Item = EvidenceLabel>,
+    {
+        self.evidence_labels.insert(labels)
+    }
+
+    /// Build a deterministic evidence report from the current bounded stores.
+    #[must_use]
+    pub fn evidence_report(&self) -> EvidenceReport {
+        EvidenceReport::from_snapshot(
+            &self.shadow_snapshot(usize::MAX),
+            &self.evidence_labels.snapshot(),
+        )
+    }
+
     /// Configured opt-in gateway access policy, if any.
     #[must_use]
     pub fn access_policy(&self) -> Option<&AccessPolicy> {
@@ -1463,8 +1485,17 @@ pub fn build_router(state: AppState) -> Router {
         .route("/router/routes", get(router_routes))
         .route("/router/profiles", get(router_profiles))
         .route("/router/recent", get(router_recent))
+        .route("/router/evidence", get(evidence_report_json))
+        .route("/router/evidence.txt", get(evidence_report_text))
+        .route("/router/evidence/labels", post(evidence_labels))
         .route("/v1/savings", get(savings_report))
         .route("/savings", get(savings_report))
+        .route("/v1/evidence", get(evidence_report_json))
+        .route("/evidence", get(evidence_report_json))
+        .route("/v1/evidence.txt", get(evidence_report_text))
+        .route("/evidence.txt", get(evidence_report_text))
+        .route("/v1/evidence/labels", post(evidence_labels))
+        .route("/evidence/labels", post(evidence_labels))
         .route("/router/config", post(router_config))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1864,6 +1895,88 @@ async fn router_recent(State(state): State<AppState>, uri: Uri) -> Response {
             HeaderMap::new(),
         ),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvidenceLabelBatch {
+    labels: Vec<EvidenceLabel>,
+}
+
+async fn evidence_report_json(
+    State(state): State<AppState>,
+    actor: Option<Extension<audit::AuditActor>>,
+) -> Response {
+    let report = state.evidence_report();
+    if let Err(error) = record_evidence_audit(&state, actor, "evidence.export.json").await {
+        return error;
+    }
+    Json(report).into_response()
+}
+
+async fn evidence_report_text(
+    State(state): State<AppState>,
+    actor: Option<Extension<audit::AuditActor>>,
+) -> Response {
+    let report = state.evidence_report();
+    if let Err(error) = record_evidence_audit(&state, actor, "evidence.export.text").await {
+        return error;
+    }
+    (
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        report.render_text(),
+    )
+        .into_response()
+}
+
+async fn evidence_labels(
+    State(state): State<AppState>,
+    actor: Option<Extension<audit::AuditActor>>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => return body_rejection_response(&state, rejection),
+    };
+    let batch = match serde_json::from_slice::<EvidenceLabelBatch>(&body) {
+        Ok(batch) => batch,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "wayfinder_router_bad_evidence",
+                "evidence labels must be a bounded JSON object with a labels array".to_owned(),
+                HeaderMap::new(),
+            );
+        }
+    };
+    let accepted = match state.add_evidence_labels(batch.labels) {
+        Ok(accepted) => accepted,
+        Err(error) => {
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "wayfinder_router_bad_evidence",
+                error.to_string(),
+                HeaderMap::new(),
+            );
+        }
+    };
+    if let Err(error) = record_evidence_audit(&state, actor, "evidence.labels").await {
+        return error;
+    }
+    Json(json!({"accepted": accepted})).into_response()
+}
+
+async fn record_evidence_audit(
+    state: &AppState,
+    actor: Option<Extension<audit::AuditActor>>,
+    action: &str,
+) -> Result<(), Response> {
+    let actor = actor.as_ref().map_or("local", |actor| actor.0.0.as_str());
+    state
+        .audit_log()
+        .record(actor, action, None, None)
+        .await
+        .map_err(audit_unavailable_response)
 }
 
 #[derive(Serialize)]
@@ -6950,6 +7063,55 @@ mod tests {
             "wayfinder_router_audit_unavailable"
         );
         state.audit_log().shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn evidence_endpoints_are_bounded_and_reject_content_fields() -> TestResult {
+        let state = AppState::new(RoutingConfig::binary(0.5), Vec::new(), false, "test");
+        let empty = get(&state, "/v1/evidence").await?;
+        assert_eq!(empty.status(), StatusCode::OK);
+        assert_eq!(json_body(empty).await?["schema_version"], "wf-evidence-v1");
+
+        let invalid = post_json(
+            &state,
+            "/v1/evidence/labels",
+            &json!({
+                "labels": [{
+                    "request_id": "r",
+                    "candidate_route": "c",
+                    "label": "win",
+                    "evaluator": {"kind": "human"},
+                    "prompt": "must not be retained"
+                }]
+            }),
+            &[],
+        )
+        .await?;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let accepted = post_json(
+            &state,
+            "/v1/evidence/labels",
+            &json!({
+                "labels": [{
+                    "request_id": "r",
+                    "candidate_route": "c",
+                    "label": "win",
+                    "evaluator": {"kind": "automated", "version": "heuristic-1"}
+                }]
+            }),
+            &[],
+        )
+        .await?;
+        assert_eq!(accepted.status(), StatusCode::OK);
+        assert_eq!(json_body(accepted).await?["accepted"], 1);
+
+        let text = get(&state, "/router/evidence.txt").await?;
+        assert_eq!(text.status(), StatusCode::OK);
+        let text = String::from_utf8(to_bytes(text.into_body(), usize::MAX).await?.to_vec())?;
+        assert!(text.contains("Wayfinder evidence report wf-evidence-v1"));
+        assert!(!text.contains("must not be retained"));
         Ok(())
     }
 

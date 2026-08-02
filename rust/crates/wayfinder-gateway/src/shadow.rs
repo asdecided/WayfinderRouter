@@ -56,6 +56,12 @@ pub struct ShadowRecord {
     /// Provider comparison latency, in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_latency_ms: Option<u64>,
+    /// Estimated provider cost when the configured price table can measure it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_cost: Option<f64>,
+    /// `currency`, `relative`, or absent when usage/cost was unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_cost_class: Option<String>,
     /// Version of the authoritative routing contract.
     pub scorer_version: u32,
     /// Fingerprint of the active routing configuration.
@@ -267,6 +273,8 @@ pub(crate) async fn evaluate(
         let mut provider_compared = false;
         let mut provider_status = None;
         let mut provider_latency_ms = None;
+        let mut provider_cost = None;
+        let mut provider_cost_class = None;
         let mut provider_reason = None;
         if config.provider_comparisons
             && config.provider_sample_rate > 0.0
@@ -297,9 +305,14 @@ pub(crate) async fn evaluate(
                             state
                                 .metrics()
                                 .observe_shadow_event("provider-success", candidate_route);
-                            let cost = shadow_cost(&state, model_name, &job, &response);
-                            if cost > 0.0 {
-                                state.metrics().observe_shadow_cost(cost);
+                            if let Some((cost, cost_class)) =
+                                shadow_cost(&state, model_name, &job, &response)
+                            {
+                                provider_cost = Some(cost);
+                                provider_cost_class = Some(cost_class.to_owned());
+                                if cost > 0.0 {
+                                    state.metrics().observe_shadow_cost(cost);
+                                }
                             }
                         } else {
                             store.provider_error();
@@ -353,6 +366,8 @@ pub(crate) async fn evaluate(
             provider_compared,
             provider_status,
             provider_latency_ms,
+            provider_cost,
+            provider_cost_class,
             scorer_version: RUNTIME_CONTRACT_VERSION,
             config_fingerprint: config_fingerprint.clone(),
             candidate_fingerprint: candidate_fingerprint.clone(),
@@ -398,12 +413,12 @@ fn shadow_cost(
     model: &str,
     job: &ShadowJob,
     response: &BufferedDeliveryResponse,
-) -> f64 {
+) -> Option<(f64, &'static str)> {
     if !response.content_type().contains("json") {
-        return 0.0;
+        return None;
     }
     let Ok(value) = serde_json::from_slice::<Value>(response.body()) else {
-        return 0.0;
+        return None;
     };
     let prompt = crate::extract_prompt(
         job.request_body.get("messages").unwrap_or(&Value::Null),
@@ -411,7 +426,7 @@ fn shadow_cost(
     );
     let usage =
         wayfinder_service::pricing::usage_tokens(&value, &prompt, crate::first_choice_text(&value));
-    wayfinder_service::pricing::turn_cost(
+    let cost = wayfinder_service::pricing::turn_cost(
         model,
         usage.prompt,
         usage.completion,
@@ -419,7 +434,15 @@ fn shadow_cost(
         usage.estimated,
         None,
     )
-    .map_or(0.0, |cost| cost.realized)
+    .ok()?;
+    Some((
+        cost.realized,
+        if state.price_table().priced {
+            "currency"
+        } else {
+            "relative"
+        },
+    ))
 }
 
 pub(crate) fn deterministic_sample(request_id: &str, salt: &str, rate: f64) -> bool {

@@ -54,6 +54,13 @@ process-local and off-path. Report generation, fleet aggregation, and canary
 enforcement remain follow-on slices (#151–#153); the historical Python names in
 the original design are not runtime dependencies.
 
+Issue #151 adds the first Rust evidence artifact: operator-authenticated JSON
+and text reports over the bounded snapshot, plus prompt-free human or
+versioned-automated labels. It is intentionally conservative relative to the
+historical Python plan: no prompt/response retention, no HTML renderer, and no
+fleet aggregation yet. Sparse, missing, conflicting, or statistically
+inconclusive inputs return `keep-shadowing` rather than a quality claim.
+
 WF-ADR-0052 adds bounded workspace policy above virtual keys: shared
 process-local RPM/TPM, inherited model allowlists, stable public model aliases,
 and explicit workspace response attribution. It also fixes the enterprise
