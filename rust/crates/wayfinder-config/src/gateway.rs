@@ -262,6 +262,8 @@ impl Default for StateConfig {
 pub struct Workspace {
     /// Configured-model allowlist; empty means unrestricted.
     pub models: Vec<String>,
+    /// Optional workspace-wide spend cap.
+    pub budget: Option<Budget>,
     /// Optional workspace-wide request/token limit.
     pub rate_limit: Option<RateLimit>,
 }
@@ -639,6 +641,12 @@ fn render_gateway_toml(gateway: &GatewayConfig) -> String {
             ));
         }
         blocks.push(lines.join("\n"));
+        if let Some(budget) = &workspace.budget {
+            blocks.push(render_budget(
+                &format!("[gateway.workspaces.{segment}.budget]"),
+                budget,
+            ));
+        }
         if let Some(rate_limit) = &workspace.rate_limit {
             blocks.push(render_rate_limit(
                 &format!("[gateway.workspaces.{segment}.rate_limit]"),
@@ -1122,8 +1130,16 @@ fn parse_workspaces(
             "a list of model names",
         )?;
         let nested_where = format!("{where_} [gateway.workspaces.{workspace_id}]");
+        let budget = parse_budget(entry.get("budget"), &nested_where)?;
         let rate_limit = parse_rate_limit(entry.get("rate_limit"), &nested_where)?;
-        workspaces.insert(workspace_id.clone(), Workspace { models, rate_limit });
+        workspaces.insert(
+            workspace_id.clone(),
+            Workspace {
+                models,
+                budget,
+                rate_limit,
+            },
+        );
     }
     Ok(workspaces)
 }
@@ -2201,6 +2217,11 @@ model = "deep-upstream"
 [gateway.workspaces.production]
 models = ["fast", "deep"]
 
+[gateway.workspaces.production.budget]
+limit = 12.5
+window = "month"
+on_breach = "block"
+
 [gateway.workspaces.production.rate_limit]
 rpm = 120
 tpm = 200000
@@ -2217,6 +2238,14 @@ models = ["fast"]
             Some("production")
         );
         assert_eq!(config.workspaces["production"].models, ["fast", "deep"]);
+        assert_eq!(
+            config.workspaces["production"].budget,
+            Some(Budget {
+                limit: 12.5,
+                window: "month".to_owned(),
+                on_breach: "block".to_owned(),
+            })
+        );
         let dumped = dump_gateway_toml(&config)?;
         assert!(dumped.contains("[gateway.workspaces.production]"));
         assert!(dumped.contains("workspace = \"production\""));

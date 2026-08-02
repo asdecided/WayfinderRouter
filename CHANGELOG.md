@@ -50,6 +50,15 @@ details, release history over commit history.
 
 ### Changed
 
+- **Fleet-wide accounting, admission, and provider health** (WF-ADR-0060, issue #147).
+  Redis-backed deployments now coordinate idempotent realized-cost and token accounting,
+  conservative global/workspace/virtual-key budget reservations, in-flight delivery leases,
+  and provider circuit state across replicas. Requests keep their reservation through streaming
+  or buffered completion, retries and cancellation settle exactly once, and Redis outages fall
+  back to the bounded local primitives while exposing a degraded-state signal. The memory backend
+  remains the zero-configuration compatibility mode; prompt and credential content never enters
+  shared state.
+
 - **Bounded gateway delivery concurrency** (WF-ADR-0051). The Rust gateway now admits up to 32
   simultaneous provider deliveries by default, allows a bounded queue of 64 requests for up to two
   seconds, and returns a retryable `503` when saturated. Streaming requests retain their slot until

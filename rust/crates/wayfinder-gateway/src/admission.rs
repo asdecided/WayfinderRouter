@@ -34,6 +34,9 @@ pub enum AdmissionError {
     /// The internal admission primitive was unexpectedly closed.
     #[error("gateway delivery admission is unavailable")]
     Unavailable,
+    /// The fleet-wide delivery lease limit is exhausted.
+    #[error("gateway fleet delivery limit is exhausted")]
+    SharedLimit,
 }
 
 /// One admitted upstream delivery. Dropping it releases capacity.

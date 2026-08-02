@@ -142,13 +142,13 @@ unchanged). See [WF-ADR-0058](../decisions/WF-ADR-0058-opentelemetry-observabili
 
 | setting | effect |
 | --- | --- |
-| `[gateway.concurrency] max_in_flight` / `max_queued` / `queue_timeout` | bound simultaneous provider deliveries (default 32), waiting requests (default 64), and queue wait in seconds (default 2). Saturation returns `503 wayfinder_router_overloaded` with `Retry-After` and `x-wayfinder-router-overload`; streams hold capacity for their body lifetime. Cache hits and decision-only requests bypass delivery admission (WF-ADR-0051) |
+| `[gateway.concurrency] max_in_flight` / `max_queued` / `queue_timeout` | bound simultaneous provider deliveries (default 32), waiting requests (default 64), and queue wait in seconds (default 2). Saturation returns `503 wayfinder_router_overloaded` with `Retry-After` and `x-wayfinder-router-overload`; streams hold capacity for their body lifetime. With `[gateway.state] backend = "redis"`, `max_in_flight` is also a fleet-wide lease limit and exhaustion reports `fleet-limit`; a Redis outage falls back to the bounded local semaphore and marks state degraded. Cache hits and decision-only requests bypass delivery admission (WF-ADR-0051, WF-ADR-0060) |
 
 ## Budget
 
 | setting | effect |
 | --- | --- |
-| `[gateway.budget] limit` / `window = day\|month\|all` / `on_breach = degrade\|block` | spend cap: once `limit` realized cost is reached, degrade to the cheapest tier (default, never raises cost) or block with HTTP 402. Surfaced via `x-wayfinder-router-budget`; needs real `cost_per_1k` prices (WF-ADR-0032) |
+| `[gateway.budget] limit` / `window = day\|month\|all` / `on_breach = degrade\|block` | spend cap: once `limit` realized cost is reached, degrade to the cheapest tier (default, never raises cost) or block with HTTP 402. With Redis state, realized spend is read from the idempotent fleet ledger and a conservative request reservation is held until success, cancellation, or a six-hour lease expiry; concurrent hard-cap requests therefore cannot all pass the same remaining balance. Memory mode keeps the existing local ledger. Surfaced via `x-wayfinder-router-budget`; needs real `cost_per_1k` prices (WF-ADR-0032, WF-ADR-0060) |
 
 ## Cache
 
@@ -161,14 +161,14 @@ unchanged). See [WF-ADR-0058](../decisions/WF-ADR-0058-opentelemetry-observabili
 | setting | effect |
 | --- | --- |
 | `[gateway.rate_limit] rpm` / `tpm` / `window` | cap requests and/or upstream tokens over a fixed `window` (default 60s). RPM is admitted before scoring. Immediately before provider delivery, TPM reserves the complete sanitized request's encoded byte length plus explicit `max_tokens` or `max_completion_tokens` multiplied by `n`; requests without a positive output bound return `422 wayfinder_router_token_bound_required`. Exact provider usage reconciles the same window; missing/estimated usage, cancellation, or disconnect retains the conservative charge. A breach returns `429` with `Retry-After`; successful responses carry `X-RateLimit-Limit`/`-Remaining`/`-Reset` (WF-ADR-0034) |
-| `[gateway.state] backend = memory\|redis` / `url` / `namespace` | choose the shared policy-counter backend. `memory` is the zero-configuration default; `redis` uses atomic server-time fixed windows for global, workspace, and virtual-key RPM/TPM across replicas and requires a Redis URL. Use certificate-validated `rediss://` outside a trusted local network. Backend, URL, and namespace changes are restart-only so reload cannot strand counters or audit events in a previous destination. A Redis outage falls back to bounded process-local counters and sets `wayfinder_state_degraded 1`; it does not drop requests. The savings ledger and response cache remain process-local until their own migrations (WF-ADR-0053) |
+| `[gateway.state] backend = memory\|redis` / `url` / `namespace` | choose the shared policy-state backend. `memory` is the zero-configuration default; `redis` uses atomic server-time fixed windows for global, workspace, and virtual-key RPM/TPM across replicas and also coordinates realized accounting, workspace/key/global budgets, fleet admission, and provider circuit health. Use certificate-validated `rediss://` outside a trusted local network. Backend, URL, and namespace changes are restart-only so reload cannot strand counters or audit events in a previous destination. A Redis outage falls back to bounded process-local primitives and sets `wayfinder_state_degraded 1`; it does not fail open or drop requests. The response cache and local evidence sink remain process-local by design (WF-ADR-0053, WF-ADR-0060) |
 
 ## Virtual API keys
 
 | setting | effect |
 | --- | --- |
 | `[gateway.keys.<id>] hash` / `tags` / `models` (+ nested `budget` / `rate_limit`) | virtual API keys: when any is set, inference requires a valid `Authorization: Bearer` token (else `401`). Mint with `wayfinder-router keys new --id <id>`; the plaintext is printed once and only the SHA-256 hash belongs in config. Spend & **savings** are attributed per key (`by_key` in `/v1/savings`, `wayfinder_router_key_requests_total`); a key can carry its own budget/rate-limit (strictest wins) and a `models` allowlist (clamps to the nearest allowed tier) (WF-ADR-0035) |
-| `[gateway.workspaces.<id>] models` (+ nested `rate_limit`) / `[gateway.keys.<id>] workspace` | group multiple keys under one model policy and shared RPM/TPM envelope. With `[gateway.state] backend = "redis"`, the envelope is fleet-wide; otherwise it is process-local. A key inherits the workspace model list and may only narrow it. Successful inference returns `x-wayfinder-router-workspace`; discovery uses the same effective list (WF-ADR-0052) |
+| `[gateway.workspaces.<id>] models` (+ nested `budget` / `rate_limit`) / `[gateway.keys.<id>] workspace` | group multiple keys under one model policy, spend cap, and shared RPM/TPM envelope. With `[gateway.state] backend = "redis"`, accounting and the envelope are fleet-wide; otherwise they are process-local. A key inherits the workspace model list and may only narrow it. Successful inference returns `x-wayfinder-router-workspace`; discovery uses the same effective list (WF-ADR-0052, WF-ADR-0060) |
 
 ## Privacy and capability eligibility
 
