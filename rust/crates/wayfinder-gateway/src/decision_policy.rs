@@ -765,6 +765,7 @@ model = "large"
             fallbacks: Vec::new(),
             context_window: None,
             deployments: Vec::new(),
+            deployment_selection: Default::default(),
         };
         assert_eq!(model.model, "m");
     }

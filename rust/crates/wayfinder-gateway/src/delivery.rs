@@ -101,6 +101,12 @@ impl BufferedDeliveryResponse {
         &self.content_type
     }
 
+    /// Borrow the bounded body for prompt-free completion measurement.
+    #[must_use]
+    pub fn body(&self) -> &Bytes {
+        &self.body
+    }
+
     /// Consume the result and return its bounded raw body.
     #[must_use]
     pub fn into_body(self) -> Bytes {

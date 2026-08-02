@@ -56,9 +56,10 @@ boundary. Rotation and failover can select only from that eligible subset.
 - A failed member is isolated from its siblings' circuit state and can be
   bypassed while cooling down.
 - The pool is process-local; Redis shared policy state does not attempt to
-  coordinate round-robin cursors or circuit state across replicas. Stable
-  alias routing remains correct, while each replica makes its own bounded
-  selection.
+  coordinate round-robin cursors or local runtime-signal windows across
+  replicas. Stable alias routing remains correct, while each replica makes
+  its own bounded selection. Optional signal-based ordering is defined by
+  WF-ADR-0062 and never overrides shared circuit or admission health.
 - The default model shape, native Apple/Codex providers, fallback semantics,
   and public model inventory remain unchanged.
 
@@ -72,8 +73,9 @@ boundary. Rotation and failover can select only from that eligible subset.
 - **Random selection.** Unseeded randomness makes tests, receipts, and incident
   reproduction harder; weighted deterministic rotation is sufficient here.
 - **Shared pool cursor in Redis.** That would add coordination and ordering
-  latency without making upstream circuit state globally correct; a later
-  distributed deployment-health decision can address both together.
+  latency without making upstream circuit state globally correct. Shared
+  reliability and fleet admission remain authoritative, while local signal
+  selection is bounded and conservative (WF-ADR-0062).
 
 ## Related
 

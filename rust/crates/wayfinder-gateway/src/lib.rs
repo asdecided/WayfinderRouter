@@ -15,6 +15,7 @@ pub mod cache;
 pub mod codex_control;
 pub mod decision_policy;
 pub mod delivery;
+pub mod deployment_selection;
 pub mod metrics;
 pub mod operator_auth;
 pub mod otel;
@@ -50,7 +51,9 @@ use thiserror::Error;
 use tower::ServiceExt;
 use uuid::Uuid;
 use wayfinder_config::dump_routing_toml;
-use wayfinder_config::gateway::{GatewayModel, ProviderKind, ProviderTier, RoutePreset};
+use wayfinder_config::gateway::{
+    DeploymentSelectionPolicy, GatewayModel, ProviderKind, ProviderTier, RoutePreset,
+};
 use wayfinder_providers::anthropic::{
     MessagesStreamTranslator, anthropic_error, anthropic_to_openai_request,
     openai_to_anthropic_response,
@@ -91,6 +94,9 @@ use crate::decision_policy::{
 use crate::delivery::{
     BufferedDelivery, BufferedDeliveryResponse, DeliveryError, StreamingDelivery,
     endpoint_is_literal_local_network, endpoint_is_literal_loopback,
+};
+use crate::deployment_selection::{
+    DeploymentObservation, DeploymentObservationStore, DeploymentSelection,
 };
 use crate::metrics::{DEFAULT_MAX_LABEL_SERIES, GatewayMetrics};
 use crate::rate_limit::{RateResult, RateSnapshot};
@@ -167,6 +173,8 @@ const RATE_LIMIT_RESET_HEADER: &str = "x-ratelimit-reset";
 const ROUTER_CACHE_HEADER: &str = "x-wayfinder-router-cache";
 const ROUTER_OVERLOAD_HEADER: &str = "x-wayfinder-router-overload";
 const ROUTER_ROUTE_HEADER: &str = "x-wayfinder-router-route";
+const ROUTER_DEPLOYMENT_HEADER: &str = "x-wayfinder-router-deployment";
+const ROUTER_DEPLOYMENT_SELECTION_HEADER: &str = "x-wayfinder-router-deployment-selection";
 const PRIVACY_POSTURE_HEADER: &str = "x-wayfinder-privacy-posture";
 const ROUTER_PRIVACY_POSTURE_HEADER: &str = "x-wayfinder-router-privacy-posture";
 const DEBUG_HEADER: &str = "x-wayfinder-debug";
@@ -203,6 +211,7 @@ pub struct ConfiguredModel {
     fallbacks: Arc<[String]>,
     context_window: Option<u64>,
     deployments: Arc<[ConfiguredDeployment]>,
+    deployment_selection: DeploymentSelectionPolicy,
     deployment_id: Option<String>,
 }
 
@@ -215,6 +224,7 @@ pub struct ConfiguredDeployment {
     api_key_env: Option<String>,
     key_ready: bool,
     weight: u64,
+    cost_per_1k: Option<f64>,
 }
 
 impl ConfiguredDeployment {
@@ -236,7 +246,15 @@ impl ConfiguredDeployment {
             api_key_env,
             key_ready,
             weight: weight.max(1),
+            cost_per_1k: None,
         }
+    }
+
+    /// Attach an optional per-1k-token cost override for this deployment.
+    #[must_use]
+    pub fn with_cost_per_1k(mut self, cost_per_1k: Option<f64>) -> Self {
+        self.cost_per_1k = cost_per_1k.filter(|cost| cost.is_finite() && *cost >= 0.0);
+        self
     }
 }
 
@@ -264,6 +282,7 @@ impl ConfiguredModel {
             fallbacks: Arc::from([]),
             context_window: None,
             deployments: Arc::from([]),
+            deployment_selection: DeploymentSelectionPolicy::default(),
             deployment_id: None,
         }
     }
@@ -322,6 +341,7 @@ impl ConfiguredModel {
         .with_fallbacks(model.fallbacks.clone())
         .with_context_window(model.context_window)
         .with_provider(model.provider, model.tier)
+        .with_deployment_selection(model.deployment_selection.clone())
     }
 
     /// Attach additional weighted deployments behind this public alias.
@@ -333,12 +353,20 @@ impl ConfiguredModel {
         self
     }
 
+    /// Attach the bounded policy used for interchangeable pool members.
+    #[must_use]
+    pub fn with_deployment_selection(mut self, policy: DeploymentSelectionPolicy) -> Self {
+        self.deployment_selection = policy;
+        self
+    }
+
     fn for_deployment(&self, deployment: &ConfiguredDeployment) -> Self {
         let mut selected = self.clone();
         selected.endpoint = deployment.endpoint.clone();
         selected.provider_model = deployment.provider_model.clone();
         selected.api_key_env = deployment.api_key_env.clone();
         selected.key_ready = deployment.key_ready;
+        selected.cost_per_1k = deployment.cost_per_1k.or(self.cost_per_1k);
         selected.deployments = Arc::from([]);
         selected.deployment_id = Some(deployment.id.clone());
         selected
@@ -415,6 +443,12 @@ impl ConfiguredModel {
         self.cost_per_1k
     }
 
+    /// Bounded policy used to order interchangeable pool members.
+    #[must_use]
+    pub const fn deployment_selection(&self) -> &DeploymentSelectionPolicy {
+        &self.deployment_selection
+    }
+
     /// Ordered same-tier configured fallback names.
     #[must_use]
     pub fn fallbacks(&self) -> &[String] {
@@ -464,6 +498,7 @@ pub struct AppState {
     models: Arc<[ConfiguredModel]>,
     route_presets: Arc<IndexMap<String, RoutePreset>>,
     deployment_cursors: Arc<Mutex<BTreeMap<String, u64>>>,
+    deployment_signals: Arc<DeploymentObservationStore>,
     offline: bool,
     dry_run: bool,
     route_on: RouteOn,
@@ -511,6 +546,7 @@ impl AppState {
         let savings_ledger = Arc::new(SavingsLedger::default());
         let build_version = Arc::<str>::from(build_version.into());
         let cache_started = Instant::now();
+        let deployment_started = Instant::now();
         let metrics = Arc::new(GatewayMetrics::new(
             build_version.to_string(),
             DEFAULT_MAX_LABEL_SERIES,
@@ -529,6 +565,9 @@ impl AppState {
             models: Arc::from(models),
             route_presets: Arc::new(IndexMap::new()),
             deployment_cursors: Arc::new(Mutex::new(BTreeMap::new())),
+            deployment_signals: Arc::new(DeploymentObservationStore::new(move || {
+                deployment_started.elapsed().as_secs_f64()
+            })),
             offline,
             dry_run: false,
             route_on: RouteOn::Turn,
@@ -910,6 +949,7 @@ impl AppState {
         self.recent = Arc::clone(&previous.recent);
         self.metrics = Arc::clone(&previous.metrics);
         self.deployment_cursors = Arc::clone(&previous.deployment_cursors);
+        self.deployment_signals = Arc::clone(&previous.deployment_signals);
         self.savings_ledger = Arc::clone(&previous.savings_ledger);
         self.savings_path = previous.savings_path.clone();
         self.audit_log = Arc::clone(&previous.audit_log);
@@ -982,6 +1022,50 @@ impl AppState {
             .map(|offset| (start + offset) % targets.len())
             .map(|index| model.for_deployment(&targets[index]))
             .collect()
+    }
+
+    pub(crate) fn select_deployments(
+        &self,
+        alias: &str,
+        candidates: Vec<ConfiguredModel>,
+    ) -> DeploymentSelection {
+        let policy = self
+            .models
+            .iter()
+            .find(|model| model.name() == alias)
+            .map_or_else(DeploymentSelectionPolicy::default, |model| {
+                model.deployment_selection().clone()
+            });
+        let selection = self.deployment_signals.select(&policy, candidates);
+        if let Some(target) = selection.targets.first() {
+            let _ = self.metrics.observe_deployment_selection(
+                alias,
+                &target.delivery_id(),
+                selection.reason,
+            );
+        }
+        selection
+    }
+
+    pub(crate) fn observe_deployment(
+        &self,
+        deployment_id: &str,
+        observation: DeploymentObservation,
+    ) {
+        if let Some(ttft) = observation.ttft_seconds {
+            let _ = self.metrics.observe_deployment_ttft(deployment_id, ttft);
+        }
+        if let Some(throughput) = observation.throughput_chars_per_second {
+            let _ = self
+                .metrics
+                .observe_deployment_throughput(deployment_id, throughput);
+        }
+        if let Some(capacity) = observation.capacity_pressure {
+            let _ = self
+                .metrics
+                .observe_deployment_capacity(deployment_id, capacity);
+        }
+        self.deployment_signals.observe(deployment_id, observation);
     }
 
     fn configured_deployment_targets(&self, alias: &str) -> Vec<ConfiguredModel> {
@@ -2739,7 +2823,7 @@ async fn chat_completions(
             routing_headers,
         );
     };
-    let (served_by, response) = match deliver_with_reliability(
+    let delivery_outcome = match deliver_with_reliability(
         &state,
         delivery,
         &plan,
@@ -2780,6 +2864,10 @@ async fn chat_completions(
             return error_response(status, kind, error.to_string(), routing_headers);
         }
     };
+    let served_by = delivery_outcome.served_by;
+    let served_by_id = delivery_outcome.served_by_id;
+    let selection_reason = delivery_outcome.selection_reason;
+    let response = delivery_outcome.response;
     let status = response.status();
     let response_content_type = response.content_type().to_owned();
     let content_type = HeaderValue::from_str(&response_content_type)
@@ -2861,6 +2949,30 @@ async fn chat_completions(
         &mut response_headers,
         "x-wayfinder-router-served-by",
         &served_by,
+    ) {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "wayfinder_router_misconfigured",
+            message,
+            request_id_headers(&request_id),
+        );
+    }
+    if let Err(message) = insert_header(
+        &mut response_headers,
+        ROUTER_DEPLOYMENT_HEADER,
+        &served_by_id,
+    ) {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "wayfinder_router_misconfigured",
+            message,
+            request_id_headers(&request_id),
+        );
+    }
+    if let Err(message) = insert_header(
+        &mut response_headers,
+        ROUTER_DEPLOYMENT_SELECTION_HEADER,
+        selection_reason,
     ) {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3261,7 +3373,9 @@ struct StreamRelayContext {
     access_grant: Option<AccessGrant>,
     decoder: SseDecoder,
     completion_chars: u64,
+    ttft_seconds: Option<f64>,
     started: Option<Instant>,
+    signal_recorded: bool,
     initial_event: Option<Bytes>,
     token_reservation: Option<TokenReservation>,
     reliability_attempt: Option<CombinedReliabilityAttempt>,
@@ -3320,7 +3434,6 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
             headers,
         );
     }
-    let started = Instant::now();
     let mut last_error = "upstream stream could not be established".to_owned();
     let mut last_failure = (StatusCode::BAD_GATEWAY, "wayfinder_router_upstream_error");
     let mut established = None;
@@ -3330,15 +3443,23 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
             last_error = format!("configured delivery target '{target_name}' is missing");
             continue;
         }
-        let targets = eligible_deployment_targets(
+        let eligible_targets = eligible_deployment_targets(
             configured_targets,
             &routing_request,
             offline,
             prompt_estimate,
         );
-        if targets.is_empty() {
+        if eligible_targets.is_empty() {
             last_error = format!(
                 "configured delivery target '{target_name}' has no eligible deployment for this request"
+            );
+            continue;
+        }
+        let selection = state.select_deployments(target_name, eligible_targets);
+        let targets = selection.targets;
+        if targets.is_empty() {
+            last_error = format!(
+                "configured delivery target '{target_name}' is excluded by its deployment price ceiling"
             );
             continue;
         }
@@ -3368,6 +3489,7 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
             let mut reliability_attempt = Some(reliability_attempt);
             let delays = state.reliability_policy().retry_delays();
             for attempt_index in 0..=state.reliability_policy().retries() {
+                let attempt_started = Instant::now();
                 match delivery.send_stream(&target, request_body.clone()).await {
                     Ok(response) if response.status().is_success() => {
                         let attempt = match reliability_attempt.take() {
@@ -3381,16 +3503,36 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                                 );
                             }
                         };
-                        established =
-                            Some((target_name.clone(), target_id.clone(), response, attempt));
+                        established = Some((
+                            target_name.clone(),
+                            target_id.clone(),
+                            selection.reason,
+                            response,
+                            attempt,
+                            attempt_started,
+                        ));
                         break;
                     }
                     Ok(response) if is_retryable(Some(response.status().as_u16())) => {
                         last_error = format!("upstream returned {}", response.status().as_u16());
+                        state.observe_deployment(
+                            &target_id,
+                            DeploymentObservation::failure(
+                                Some(attempt_started.elapsed().as_secs_f64()),
+                                Some(response.status().as_u16()),
+                            ),
+                        );
                         let _ = state.metrics().observe_upstream_error(&target_id);
                     }
                     Ok(response) => {
                         let status = response.status();
+                        state.observe_deployment(
+                            &target_id,
+                            DeploymentObservation::failure(
+                                Some(attempt_started.elapsed().as_secs_f64()),
+                                Some(status.as_u16()),
+                            ),
+                        );
                         let succeeded = !is_auth_failure(Some(status.as_u16()));
                         if let Some(attempt) = reliability_attempt.take() {
                             if let Err(error) = attempt.complete(succeeded).await {
@@ -3423,6 +3565,13 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                     Err(error) => {
                         last_error = error.to_string();
                         last_failure = fatal_delivery_status(&error);
+                        state.observe_deployment(
+                            &target_id,
+                            DeploymentObservation::failure(
+                                Some(attempt_started.elapsed().as_secs_f64()),
+                                None,
+                            ),
+                        );
                         let _ = state.metrics().observe_upstream_error(&target_id);
                         if !matches!(error, DeliveryError::Provider(ProviderError::Transport)) {
                             if stream_failure_affects_reliability(&error) {
@@ -3468,10 +3617,38 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
             break;
         }
     }
-    let Some((served_by, served_by_id, response, reliability_attempt)) = established else {
+    let Some((
+        served_by,
+        served_by_id,
+        selection_reason,
+        response,
+        reliability_attempt,
+        attempt_started,
+    )) = established
+    else {
         return error_response(last_failure.0, last_failure.1, last_error, headers);
     };
     if let Err(message) = insert_header(&mut headers, "x-wayfinder-router-served-by", &served_by) {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "wayfinder_router_misconfigured",
+            message,
+            request_id_headers(&request_id),
+        );
+    }
+    if let Err(message) = insert_header(&mut headers, ROUTER_DEPLOYMENT_HEADER, &served_by_id) {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "wayfinder_router_misconfigured",
+            message,
+            request_id_headers(&request_id),
+        );
+    }
+    if let Err(message) = insert_header(
+        &mut headers,
+        ROUTER_DEPLOYMENT_SELECTION_HEADER,
+        selection_reason,
+    ) {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "wayfinder_router_misconfigured",
@@ -3495,7 +3672,9 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
         access_grant,
         decoder: SseDecoder::default(),
         completion_chars: 0,
-        started: Some(started),
+        ttft_seconds: None,
+        started: Some(attempt_started),
+        signal_recorded: false,
         initial_event,
         token_reservation,
         reliability_attempt: Some(reliability_attempt),
@@ -3512,7 +3691,12 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
             match upstream.next().await {
                 Some(Ok(chunk)) => match context.decoder.push(&chunk) {
                     Ok(events) => {
-                        observe_stream_events(&events, &mut context.completion_chars);
+                        observe_stream_events(
+                            &events,
+                            &mut context.completion_chars,
+                            &mut context.ttft_seconds,
+                            context.started,
+                        );
                         Some((Ok::<Bytes, Infallible>(chunk), Some((context, upstream))))
                     }
                     Err(error) => {
@@ -3536,7 +3720,12 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                 }
                 None => match context.decoder.finish() {
                     Ok(events) => {
-                        observe_stream_events(&events, &mut context.completion_chars);
+                        observe_stream_events(
+                            &events,
+                            &mut context.completion_chars,
+                            &mut context.ttft_seconds,
+                            context.started,
+                        );
                         finish_stream_success(&mut context).await;
                         None
                     }
@@ -3556,7 +3745,12 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
     (StatusCode::OK, headers, Body::from_stream(body_stream)).into_response()
 }
 
-fn observe_stream_events(events: &[SseEvent], completion_chars: &mut u64) {
+fn observe_stream_events(
+    events: &[SseEvent],
+    completion_chars: &mut u64,
+    ttft_seconds: &mut Option<f64>,
+    started: Option<Instant>,
+) {
     for event in events {
         if event.data.trim() == "[DONE]" {
             continue;
@@ -3574,6 +3768,9 @@ fn observe_stream_events(events: &[SseEvent], completion_chars: &mut u64) {
                 .and_then(|delta| delta.get("content"))
                 .and_then(Value::as_str)
         }) {
+            if !content.is_empty() && ttft_seconds.is_none() {
+                *ttft_seconds = started.map(|started| started.elapsed().as_secs_f64());
+            }
             *completion_chars = completion_chars
                 .saturating_add(u64::try_from(content.chars().count()).unwrap_or(u64::MAX));
         }
@@ -3588,6 +3785,13 @@ async fn finish_stream_success(context: &mut StreamRelayContext) {
         .state
         .metrics()
         .observe_upstream(&context.target_id, elapsed);
+    let throughput = (context.completion_chars > 0 && elapsed > 0.0)
+        .then(|| context.completion_chars as f64 / elapsed);
+    context.state.observe_deployment(
+        &context.target_id,
+        DeploymentObservation::success(elapsed, context.ttft_seconds, throughput),
+    );
+    context.signal_recorded = true;
     if let Some(attempt) = context.reliability_attempt.take() {
         let _ = attempt.complete(true).await;
     }
@@ -3650,6 +3854,16 @@ fn stream_failure_chunk(
     error_type: &str,
     affects_reliability: bool,
 ) -> Bytes {
+    if !context.signal_recorded {
+        let elapsed = context
+            .started
+            .map(|started| started.elapsed().as_secs_f64());
+        context.state.observe_deployment(
+            &context.target_id,
+            DeploymentObservation::failure(elapsed, None),
+        );
+        context.signal_recorded = true;
+    }
     let _ = context
         .state
         .metrics()
@@ -3879,6 +4093,37 @@ enum ReliableDeliveryFailure {
     State(ReliabilityError),
 }
 
+struct BufferedDeliveryOutcome {
+    served_by: String,
+    served_by_id: String,
+    selection_reason: &'static str,
+    response: BufferedDeliveryResponse,
+}
+
+fn buffered_observation(
+    response: &BufferedDeliveryResponse,
+    elapsed_seconds: f64,
+) -> DeploymentObservation {
+    let completion_chars = if response.content_type().contains("json") {
+        serde_json::from_slice::<Value>(response.body())
+            .ok()
+            .map(|value| {
+                u64::try_from(first_choice_text(&value).chars().count()).unwrap_or(u64::MAX)
+            })
+            .filter(|chars| *chars > 0)
+    } else {
+        None
+    };
+    let throughput = completion_chars
+        .filter(|_| elapsed_seconds > 0.0)
+        .map(|chars| chars as f64 / elapsed_seconds);
+    if response.status().is_success() {
+        DeploymentObservation::success(elapsed_seconds, None, throughput)
+    } else {
+        DeploymentObservation::failure(Some(elapsed_seconds), Some(response.status().as_u16()))
+    }
+}
+
 #[cfg_attr(
     feature = "otel",
     tracing::instrument(skip_all, name = "wayfinder.delivery")
@@ -3891,7 +4136,7 @@ async fn deliver_with_reliability(
     offline: bool,
     prompt_estimate: u64,
     request_body: &Value,
-) -> Result<(String, BufferedDeliveryResponse), ReliableDeliveryFailure> {
+) -> Result<BufferedDeliveryOutcome, ReliableDeliveryFailure> {
     let mut last_error = "no upstream available".to_owned();
     for target_name in plan {
         let configured_targets = state.deployment_candidates(target_name);
@@ -3900,15 +4145,23 @@ async fn deliver_with_reliability(
                 "no gateway endpoint configured for model '{target_name}'"
             )));
         }
-        let targets = eligible_deployment_targets(
+        let eligible_targets = eligible_deployment_targets(
             configured_targets,
             routing_request,
             offline,
             prompt_estimate,
         );
-        if targets.is_empty() {
+        if eligible_targets.is_empty() {
             last_error = format!(
                 "configured delivery target '{target_name}' has no eligible deployment for this request"
+            );
+            continue;
+        }
+        let selection = state.select_deployments(target_name, eligible_targets);
+        let targets = selection.targets;
+        if targets.is_empty() {
+            last_error = format!(
+                "configured delivery target '{target_name}' is excluded by its deployment price ceiling"
             );
             continue;
         }
@@ -3932,6 +4185,13 @@ async fn deliver_with_reliability(
                         let status = response.status().as_u16();
                         if !is_retryable(Some(status)) {
                             if is_auth_failure(Some(status)) {
+                                state.observe_deployment(
+                                    &target_id,
+                                    DeploymentObservation::failure(
+                                        Some(started.elapsed().as_secs_f64()),
+                                        Some(status),
+                                    ),
+                                );
                                 let _ = state.metrics().observe_upstream_error(&target_id);
                                 reliability_attempt
                                     .take()
@@ -3942,6 +4202,11 @@ async fn deliver_with_reliability(
                                     .await
                                     .map_err(ReliableDeliveryFailure::State)?;
                             } else {
+                                let observation = buffered_observation(
+                                    &response,
+                                    started.elapsed().as_secs_f64(),
+                                );
+                                state.observe_deployment(&target_id, observation);
                                 let _ = state
                                     .metrics()
                                     .observe_upstream(&target_id, started.elapsed().as_secs_f64());
@@ -3954,12 +4219,31 @@ async fn deliver_with_reliability(
                                     .await
                                     .map_err(ReliableDeliveryFailure::State)?;
                             }
-                            return Ok((target_name.clone(), response));
+                            return Ok(BufferedDeliveryOutcome {
+                                served_by: target_name.clone(),
+                                served_by_id: target_id,
+                                selection_reason: selection.reason,
+                                response,
+                            });
                         }
                         last_error = format!("upstream returned {status}");
+                        state.observe_deployment(
+                            &target_id,
+                            DeploymentObservation::failure(
+                                Some(started.elapsed().as_secs_f64()),
+                                Some(status),
+                            ),
+                        );
                         let _ = state.metrics().observe_upstream_error(&target_id);
                     }
                     Err(error) => {
+                        state.observe_deployment(
+                            &target_id,
+                            DeploymentObservation::failure(
+                                Some(started.elapsed().as_secs_f64()),
+                                None,
+                            ),
+                        );
                         let _ = state.metrics().observe_upstream_error(&target_id);
                         if !matches!(error, DeliveryError::Provider(ProviderError::Transport)) {
                             if let Some(attempt) = reliability_attempt.take() {
@@ -5132,8 +5416,8 @@ mod tests {
     use tokio::sync::{Barrier, Semaphore, oneshot};
     use tower::ServiceExt;
     use wayfinder_config::gateway::{
-        Budget as GatewayBudget, GatewayConfig, ProviderKind, ProviderTier, RateLimit, RoutePreset,
-        VirtualKey, Workspace,
+        Budget as GatewayBudget, DeploymentSelectionPolicy, DeploymentSelectionStrategy,
+        GatewayConfig, ProviderKind, ProviderTier, RateLimit, RoutePreset, VirtualKey, Workspace,
     };
     use wayfinder_routing_core::{
         ClassifierModel, PrivacyPosture, RoutingConfig, RoutingRequest, RoutingRequirements,
@@ -5195,6 +5479,49 @@ mod tests {
         assert_eq!(fourth[0].delivery_id(), "cloud#backup");
         assert_eq!(second[1].delivery_id(), "cloud#backup");
         assert_eq!(second[2].delivery_id(), "cloud#default");
+    }
+
+    #[test]
+    fn runtime_signals_reorder_only_members_of_the_public_alias() {
+        let model = ConfiguredModel::new(
+            "cloud",
+            "https://primary.example/v1",
+            "gpt-primary",
+            None,
+            true,
+        )
+        .with_deployments(vec![
+            ConfiguredDeployment::new("slow", "https://slow.example/v1", "gpt-slow", None, true, 1),
+            ConfiguredDeployment::new("fast", "https://fast.example/v1", "gpt-fast", None, true, 1),
+        ])
+        .with_deployment_selection(DeploymentSelectionPolicy {
+            strategy: DeploymentSelectionStrategy::Latency,
+            ..DeploymentSelectionPolicy::default()
+        });
+        let state = AppState::new(RoutingConfig::binary(0.5), vec![model], false, "test");
+        for (deployment, latency) in [
+            ("cloud#default", 0.3),
+            ("cloud#slow", 0.8),
+            ("cloud#fast", 0.1),
+        ] {
+            state.observe_deployment(
+                deployment,
+                crate::deployment_selection::DeploymentObservation::success(
+                    latency,
+                    Some(latency / 2.0),
+                    Some(100.0),
+                ),
+            );
+        }
+        let selection = state.select_deployments("cloud", state.deployment_candidates("cloud"));
+        assert_eq!(selection.reason, "latency");
+        assert_eq!(selection.targets[0].delivery_id(), "cloud#fast");
+        assert!(
+            selection
+                .targets
+                .iter()
+                .all(|target| target.name() == "cloud")
+        );
     }
 
     struct FakeDelivery {
@@ -5314,7 +5641,7 @@ mod tests {
             seen: Arc::clone(&seen),
             fail: false,
         };
-        let (served_by, _) = deliver_with_reliability(
+        let outcome = deliver_with_reliability(
             &state,
             &delivery,
             &["cloud".to_owned()],
@@ -5331,7 +5658,9 @@ mod tests {
         )
         .await
         .map_err(|_| std::io::Error::other("delivery failed"))?;
-        assert_eq!(served_by, "cloud");
+        assert_eq!(outcome.served_by, "cloud");
+        assert_eq!(outcome.served_by_id, "cloud#default");
+        assert_eq!(outcome.selection_reason, "weighted");
         assert_eq!(
             seen.lock()
                 .map_err(|_| std::io::Error::other("seen lock poisoned"))?[0]

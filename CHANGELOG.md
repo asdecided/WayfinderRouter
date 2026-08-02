@@ -50,6 +50,13 @@ details, release history over commit history.
 
 ### Changed
 
+- **Bounded deployment-signal selection** (WF-ADR-0062, issue #148). Interchangeable
+  OpenAI-compatible deployments can opt into deterministic latency, throughput, availability,
+  cost, or capacity ordering after hard eligibility checks. Runtime observations are prompt-free
+  and bounded; sparse or stale data falls back to weighted rotation, price ceilings fail closed,
+  and shared Redis circuits/admission remain authoritative. Responses expose the concrete
+  deployment and selection reason without changing the public model alias or scored route.
+
 - **Fleet-wide accounting, admission, and provider health** (WF-ADR-0060, issue #147).
   Redis-backed deployments now coordinate idempotent realized-cost and token accounting,
   conservative global/workspace/virtual-key budget reservations, in-flight delivery leases,
