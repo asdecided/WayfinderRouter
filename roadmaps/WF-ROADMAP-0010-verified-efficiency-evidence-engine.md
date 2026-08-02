@@ -302,9 +302,11 @@ the local evidence sink remains process-local. Issues #147 and #149 carry the
 two-replica policy and cache failure/recovery evidence.
 
 Stable public aliases may now carry bounded weighted OpenAI-compatible
-deployments under WF-ADR-0054. Rotation and deployment-health state remain
-process-local by design; Redis coordinates policy windows, not a hidden global
-round-robin cursor.
+deployments under WF-ADR-0054. WF-ADR-0062 adds opt-in, bounded local signal
+ordering (latency, throughput, availability, cost, or capacity) within an
+already eligible alias. Sparse or stale observations fall back to weighted
+rotation; Redis-backed circuits and fleet admission remain authoritative rather
+than being replaced by replica-local telemetry.
 
 WF-ADR-0055 adds bounded named routing presets for application-owned delivery
 policy. `model = "@route/<name>"` selects an operator-defined ordered alias

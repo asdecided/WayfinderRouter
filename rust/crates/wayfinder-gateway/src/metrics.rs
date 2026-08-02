@@ -16,6 +16,9 @@ const DECISION_BUCKETS: [f64; 9] = [
     0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05,
 ];
 const UPSTREAM_BUCKETS: [f64; 10] = [0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0];
+const TTFT_BUCKETS: [f64; 10] = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
+const THROUGHPUT_BUCKETS: [f64; 8] = [1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 500.0, 1_000.0];
+const CAPACITY_BUCKETS: [f64; 6] = [0.01, 0.1, 0.25, 0.5, 0.75, 1.0];
 const QUEUE_WAIT_BUCKETS: [f64; 8] = [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0];
 
 /// Metrics synchronization or invalid-observation failure.
@@ -67,6 +70,10 @@ struct MetricsState {
     reload_failures: u64,
     decision: Histogram<9>,
     upstream: BTreeMap<String, Histogram<10>>,
+    deployment_ttft: BTreeMap<String, Histogram<10>>,
+    deployment_throughput: BTreeMap<String, Histogram<8>>,
+    deployment_capacity: BTreeMap<String, Histogram<6>>,
+    deployment_selections: BTreeMap<(String, String, String), u64>,
     model_costs: BTreeMap<String, f64>,
     realized_cost: f64,
     baseline_cost: f64,
@@ -90,6 +97,10 @@ impl Default for MetricsState {
             reload_failures: 0,
             decision: Histogram::new(DECISION_BUCKETS),
             upstream: BTreeMap::new(),
+            deployment_ttft: BTreeMap::new(),
+            deployment_throughput: BTreeMap::new(),
+            deployment_capacity: BTreeMap::new(),
+            deployment_selections: BTreeMap::new(),
             model_costs: BTreeMap::new(),
             realized_cost: 0.0,
             baseline_cost: 0.0,
@@ -183,6 +194,83 @@ impl GatewayMetrics {
         let mut state = self.state.lock().map_err(|_| MetricsError::LockPoisoned)?;
         let key = bounded_map_key(&state.upstream_errors, model, self.max_label_series);
         saturating_increment(state.upstream_errors.entry(key).or_default());
+        Ok(())
+    }
+
+    /// Record a prompt-free deployment time-to-first-token observation.
+    pub fn observe_deployment_ttft(
+        &self,
+        deployment: &str,
+        seconds: f64,
+    ) -> Result<(), MetricsError> {
+        validate_observation(seconds)?;
+        let mut state = self.state.lock().map_err(|_| MetricsError::LockPoisoned)?;
+        let key = bounded_map_key(&state.deployment_ttft, deployment, self.max_label_series);
+        state
+            .deployment_ttft
+            .entry(key)
+            .or_insert_with(|| Histogram::new(TTFT_BUCKETS))
+            .observe(seconds)
+    }
+
+    /// Record a prompt-free deployment completion-throughput observation.
+    pub fn observe_deployment_throughput(
+        &self,
+        deployment: &str,
+        chars_per_second: f64,
+    ) -> Result<(), MetricsError> {
+        validate_observation(chars_per_second)?;
+        let mut state = self.state.lock().map_err(|_| MetricsError::LockPoisoned)?;
+        let key = bounded_map_key(
+            &state.deployment_throughput,
+            deployment,
+            self.max_label_series,
+        );
+        state
+            .deployment_throughput
+            .entry(key)
+            .or_insert_with(|| Histogram::new(THROUGHPUT_BUCKETS))
+            .observe(chars_per_second)
+    }
+
+    /// Record a prompt-free provider capacity-pressure observation.
+    pub fn observe_deployment_capacity(
+        &self,
+        deployment: &str,
+        pressure: f64,
+    ) -> Result<(), MetricsError> {
+        validate_observation(pressure)?;
+        let mut state = self.state.lock().map_err(|_| MetricsError::LockPoisoned)?;
+        let key = bounded_map_key(
+            &state.deployment_capacity,
+            deployment,
+            self.max_label_series,
+        );
+        state
+            .deployment_capacity
+            .entry(key)
+            .or_insert_with(|| Histogram::new(CAPACITY_BUCKETS))
+            .observe(pressure.min(1.0))
+    }
+
+    /// Count one bounded deployment-selection reason without request content.
+    pub fn observe_deployment_selection(
+        &self,
+        model: &str,
+        deployment: &str,
+        reason: &str,
+    ) -> Result<(), MetricsError> {
+        let mut state = self.state.lock().map_err(|_| MetricsError::LockPoisoned)?;
+        let key = bounded_triple_key(
+            &state.deployment_selections,
+            (
+                bounded_label(model),
+                bounded_label(deployment),
+                bounded_label(reason),
+            ),
+            self.max_label_series,
+        );
+        saturating_increment(state.deployment_selections.entry(key).or_default());
         Ok(())
     }
 
@@ -321,6 +409,22 @@ fn bounded_pair_key<V>(
         value
     } else {
         (OVERFLOW_LABEL.to_owned(), OVERFLOW_LABEL.to_owned())
+    }
+}
+
+fn bounded_triple_key<V>(
+    map: &BTreeMap<(String, String, String), V>,
+    value: (String, String, String),
+    maximum: usize,
+) -> (String, String, String) {
+    if map.contains_key(&value) || map.len() < maximum {
+        value
+    } else {
+        (
+            OVERFLOW_LABEL.to_owned(),
+            OVERFLOW_LABEL.to_owned(),
+            OVERFLOW_LABEL.to_owned(),
+        )
     }
 }
 
@@ -580,6 +684,57 @@ fn render_state(version: &str, state: &MetricsState) -> String {
             &format!("model=\"{}\"", label_escape(model)),
         );
     }
+    if !state.deployment_selections.is_empty() {
+        output.push_str("# HELP wayfinder_router_deployment_selection_total Interchangeable deployment selections by bounded strategy reason (WF-ADR-0062).\n");
+        output.push_str("# TYPE wayfinder_router_deployment_selection_total counter\n");
+        for ((model, deployment, reason), count) in &state.deployment_selections {
+            let _ = writeln!(
+                output,
+                "wayfinder_router_deployment_selection_total{{model=\"{}\",deployment=\"{}\",reason=\"{}\"}} {count}",
+                label_escape(model),
+                label_escape(deployment),
+                label_escape(reason)
+            );
+        }
+    }
+    if !state.deployment_ttft.is_empty() {
+        output.push_str("# HELP wayfinder_router_deployment_time_to_first_token_seconds Deployment time to first token by concrete target.\n");
+        output
+            .push_str("# TYPE wayfinder_router_deployment_time_to_first_token_seconds histogram\n");
+        for (deployment, histogram) in &state.deployment_ttft {
+            render_histogram(
+                &mut output,
+                "wayfinder_router_deployment_time_to_first_token_seconds",
+                histogram,
+                &format!("deployment=\"{}\"", label_escape(deployment)),
+            );
+        }
+    }
+    if !state.deployment_throughput.is_empty() {
+        output.push_str("# HELP wayfinder_router_deployment_throughput_chars_per_second Completion throughput by concrete target.\n");
+        output
+            .push_str("# TYPE wayfinder_router_deployment_throughput_chars_per_second histogram\n");
+        for (deployment, histogram) in &state.deployment_throughput {
+            render_histogram(
+                &mut output,
+                "wayfinder_router_deployment_throughput_chars_per_second",
+                histogram,
+                &format!("deployment=\"{}\"", label_escape(deployment)),
+            );
+        }
+    }
+    if !state.deployment_capacity.is_empty() {
+        output.push_str("# HELP wayfinder_router_deployment_capacity_pressure Provider-reported capacity pressure by concrete target.\n");
+        output.push_str("# TYPE wayfinder_router_deployment_capacity_pressure histogram\n");
+        for (deployment, histogram) in &state.deployment_capacity {
+            render_histogram(
+                &mut output,
+                "wayfinder_router_deployment_capacity_pressure",
+                histogram,
+                &format!("deployment=\"{}\"", label_escape(deployment)),
+            );
+        }
+    }
     output
 }
 
@@ -606,6 +761,10 @@ mod tests {
         metrics.observe_decision("local", "scored", 0.0005)?;
         metrics.observe_upstream("local", 0.25)?;
         metrics.observe_upstream_error("cloud")?;
+        metrics.observe_deployment_ttft("cloud#eu", 0.05)?;
+        metrics.observe_deployment_throughput("cloud#eu", 100.0)?;
+        metrics.observe_deployment_capacity("cloud#eu", 0.25)?;
+        metrics.observe_deployment_selection("cloud", "cloud#eu", "latency")?;
         metrics.observe_cache_hit(0.01)?;
         metrics.observe_cache_miss()?;
         metrics.observe_rate_limited("rpm")?;
@@ -631,6 +790,12 @@ mod tests {
         assert!(text.contains("wayfinder_router_cache_avoided_cost_total 0.01"));
         assert!(text.contains("wayfinder_router_model_cost_per_1k{model=\"cloud\"} 10"));
         assert!(text.contains("wayfinder_router_savings_cost_total 0.01"));
+        assert!(text.contains(
+            "wayfinder_router_deployment_selection_total{model=\"cloud\",deployment=\"cloud#eu\",reason=\"latency\"} 1"
+        ));
+        assert!(text.contains(
+            "wayfinder_router_deployment_time_to_first_token_seconds_count{deployment=\"cloud#eu\"} 1"
+        ));
         assert!(text.contains("wayfinder_router_peak_in_flight_deliveries 1"));
         assert!(text.contains("wayfinder_router_in_flight_deliveries 0"));
         assert!(text.contains("wayfinder_router_admission_queue_wait_seconds_count 1"));

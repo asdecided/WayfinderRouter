@@ -136,7 +136,8 @@ unchanged). See [WF-ADR-0058](../decisions/WF-ADR-0058-opentelemetry-observabili
 | --- | --- |
 | `[gateway] retries` / `breaker_threshold` / `breaker_cooldown` | reliability: bounded retries on transport/`429`/`5xx`, including before a streaming response is established, and a per-target circuit breaker with one single-flight half-open probe. No retry starts after a stream is established (WF-ADR-0031) |
 | `[gateway] failover = same-tier\|degrade\|escalate` | on exhaustion, stay on the tier (default), fall to a cheaper one (never raises cost), or a dearer one (opt-in); per-request `X-Wayfinder-Failover` |
-| `[gateway.models.<name>] fallbacks = [...]` / `deployments = [...]` / `context_window` | same-tier endpoints to try on failure; weighted concrete deployments behind one alias for healthy throughput; skip a target whose window can't fit the prompt. Responses carry `x-wayfinder-router-served-by` |
+| `[gateway.models.<name>] fallbacks = [...]` / `deployments = [...]` / `context_window` | same-tier endpoints to try on failure; weighted concrete deployments behind one alias for healthy throughput; skip a target whose window can't fit the prompt. Responses carry `x-wayfinder-router-served-by` and, for a concrete pool member, `x-wayfinder-router-deployment` |
+| `[gateway.models.<name>.deployment_selection] strategy = weighted\|latency\|throughput\|availability\|cost\|capacity` / `observation_ttl` / `max_cost_per_1k` | optional ordering of otherwise eligible members within one alias. Runtime signals are prompt-free, bounded to 32 samples per target and 1,024 targets, and stale/sparse data falls back to weighted order. `max_cost_per_1k` is a hard filter; unknown-priced members are excluded while it is active. The selection reason is exposed as `x-wayfinder-router-deployment-selection`; shared Redis circuits and fleet admission remain authoritative (WF-ADR-0062) |
 
 ## Concurrency and backpressure
 

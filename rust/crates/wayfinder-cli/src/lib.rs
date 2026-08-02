@@ -881,6 +881,7 @@ fn configured_models(
                             .is_none_or(|reference| credentials.is_ready(reference)),
                         deployment.weight,
                     )
+                    .with_cost_per_1k(deployment.cost_per_1k)
                 })
                 .collect();
             ConfiguredModel::from_gateway_model(name, model, key_ready)

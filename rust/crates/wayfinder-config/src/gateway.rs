@@ -45,6 +45,19 @@ pub const DEFAULT_STATE_NAMESPACE: &str = "wayfinder";
 pub const MAX_MODEL_DEPLOYMENTS: usize = 32;
 /// Maximum weight accepted for one model deployment.
 pub const MAX_MODEL_DEPLOYMENT_WEIGHT: u64 = 100;
+/// Maximum accepted age of a deployment observation, in seconds.
+pub const MAX_MODEL_DEPLOYMENT_OBSERVATION_TTL: f64 = 3_600.0;
+/// Default age after which deployment observations are ignored.
+pub const DEFAULT_MODEL_DEPLOYMENT_OBSERVATION_TTL: f64 = 60.0;
+/// Supported strategies for interchangeable deployment selection.
+pub const DEPLOYMENT_SELECTION_STRATEGIES: [&str; 6] = [
+    "weighted",
+    "latency",
+    "throughput",
+    "availability",
+    "cost",
+    "capacity",
+];
 /// Maximum number of named routing presets in one gateway configuration.
 pub const MAX_ROUTE_PRESETS: usize = 64;
 /// Maximum number of ordered model aliases in one routing preset.
@@ -115,6 +128,80 @@ pub enum ProviderTier {
     Local,
 }
 
+/// Deterministic strategy used only to order eligible members of one alias.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DeploymentSelectionStrategy {
+    /// Preserve the existing weighted rotation and stable failover order.
+    #[default]
+    Weighted,
+    /// Prefer the lowest observed round-trip latency, then time to first token.
+    Latency,
+    /// Prefer the highest observed completion throughput.
+    Throughput,
+    /// Prefer the highest observed success availability and lowest rate limits.
+    Availability,
+    /// Prefer the lowest configured per-1k-token cost.
+    Cost,
+    /// Prefer the lowest observed provider capacity pressure.
+    Capacity,
+}
+
+impl DeploymentSelectionStrategy {
+    /// Stable TOML spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Weighted => "weighted",
+            Self::Latency => "latency",
+            Self::Throughput => "throughput",
+            Self::Availability => "availability",
+            Self::Cost => "cost",
+            Self::Capacity => "capacity",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "weighted" => Self::Weighted,
+            "latency" => Self::Latency,
+            "throughput" => Self::Throughput,
+            "availability" => Self::Availability,
+            "cost" => Self::Cost,
+            "capacity" => Self::Capacity,
+            _ => return None,
+        })
+    }
+}
+
+/// Policy for selecting among otherwise interchangeable deployments.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeploymentSelectionPolicy {
+    /// Strategy applied after hard eligibility and before delivery retries.
+    pub strategy: DeploymentSelectionStrategy,
+    /// Optional hard per-1k-token price ceiling for pool members.
+    pub max_cost_per_1k: Option<f64>,
+    /// Age in seconds after which runtime observations are stale.
+    pub observation_ttl: f64,
+}
+
+impl Default for DeploymentSelectionPolicy {
+    fn default() -> Self {
+        Self {
+            strategy: DeploymentSelectionStrategy::Weighted,
+            max_cost_per_1k: None,
+            observation_ttl: DEFAULT_MODEL_DEPLOYMENT_OBSERVATION_TTL,
+        }
+    }
+}
+
+impl DeploymentSelectionPolicy {
+    /// Whether this policy is the compatibility-preserving default.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 impl ProviderTier {
     /// Stable TOML spelling.
     #[must_use]
@@ -153,6 +240,8 @@ pub struct GatewayModel {
     pub context_window: Option<u64>,
     /// Additional weighted deployments behind this public model alias.
     pub deployments: Vec<GatewayDeployment>,
+    /// Optional bounded runtime-signal policy for interchangeable deployments.
+    pub deployment_selection: DeploymentSelectionPolicy,
 }
 
 /// One additional delivery target behind a stable model alias.
@@ -172,6 +261,8 @@ pub struct GatewayDeployment {
     pub api_key_env: Option<String>,
     /// Relative selection weight; higher values receive more turns.
     pub weight: u64,
+    /// Optional per-1k-token cost override for this deployment.
+    pub cost_per_1k: Option<f64>,
 }
 
 /// An ordered, named delivery route selected with `model = "@route/<name>"`.
@@ -742,6 +833,15 @@ fn render_gateway_toml(gateway: &GatewayConfig) -> String {
             lines.push(format!("context_window = {context_window}"));
         }
         blocks.push(lines.join("\n"));
+        if !model.deployment_selection.is_default() {
+            blocks.push(render_deployment_selection(
+                &format!(
+                    "[gateway.models.{}.deployment_selection]",
+                    quote_toml_key_segment(name)
+                ),
+                &model.deployment_selection,
+            ));
+        }
     }
     for (route_id, route) in &gateway.routes {
         let segment = quote_toml_key_segment(route_id);
@@ -828,11 +928,34 @@ fn render_deployments(values: &[GatewayDeployment]) -> String {
                 if deployment.weight != 1 {
                     fields.push(format!("weight = {}", deployment.weight));
                 }
+                if let Some(cost_per_1k) = deployment.cost_per_1k {
+                    fields.push(format!("cost_per_1k = {}", format_number(cost_per_1k)));
+                }
                 format!("{{ {} }}", fields.join(", "))
             })
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+fn render_deployment_selection(header: &str, policy: &DeploymentSelectionPolicy) -> String {
+    let mut lines = vec![
+        header.to_owned(),
+        format!("strategy = {}", quote_toml_string(policy.strategy.as_str())),
+    ];
+    if let Some(max_cost_per_1k) = policy.max_cost_per_1k {
+        lines.push(format!(
+            "max_cost_per_1k = {}",
+            format_number(max_cost_per_1k)
+        ));
+    }
+    if policy.observation_ttl != DEFAULT_MODEL_DEPLOYMENT_OBSERVATION_TTL {
+        lines.push(format!(
+            "observation_ttl = {}",
+            format_number(policy.observation_ttl)
+        ));
+    }
+    lines.join("\n")
 }
 
 fn parse_budget(value: Option<&Value>, where_: &str) -> Result<Option<Budget>, ConfigError> {
@@ -1418,6 +1541,8 @@ fn parse_models(
             &format!("gateway.models.{name}.context_window"),
         )?;
         let deployments = parse_deployments(entry.get("deployments"), where_, name, provider)?;
+        let deployment_selection =
+            parse_deployment_selection(entry.get("deployment_selection"), where_, name, provider)?;
         models.insert(
             name.clone(),
             GatewayModel {
@@ -1431,6 +1556,7 @@ fn parse_models(
                 fallbacks,
                 context_window,
                 deployments,
+                deployment_selection,
             },
         );
     }
@@ -1511,15 +1637,90 @@ fn parse_deployments(
                 format!("'{label}.weight' must be at most {MAX_MODEL_DEPLOYMENT_WEIGHT}"),
             ));
         }
+        let cost_per_1k = optional_non_negative_finite_number(
+            entry.get("cost_per_1k"),
+            where_,
+            &format!("{label}.cost_per_1k"),
+        )?;
         deployments.push(GatewayDeployment {
             id,
             base_url,
             model,
             api_key_env,
             weight,
+            cost_per_1k,
         });
     }
     Ok(deployments)
+}
+
+fn parse_deployment_selection(
+    value: Option<&Value>,
+    where_: &str,
+    model_name: &str,
+    provider: ProviderKind,
+) -> Result<DeploymentSelectionPolicy, ConfigError> {
+    let Some(value) = value else {
+        return Ok(DeploymentSelectionPolicy::default());
+    };
+    if provider != ProviderKind::OpenAiCompatible {
+        return Err(invalid(
+            where_,
+            format!(
+                "'gateway.models.{model_name}.deployment_selection' is only valid for openai-compatible providers"
+            ),
+        ));
+    }
+    let table = value.as_table().ok_or_else(|| {
+        invalid(
+            where_,
+            format!("'gateway.models.{model_name}.deployment_selection' must be a table"),
+        )
+    })?;
+    let strategy = match table.get("strategy") {
+        None => DeploymentSelectionStrategy::Weighted,
+        Some(Value::String(value)) => DeploymentSelectionStrategy::parse(value).ok_or_else(|| {
+            invalid(
+                where_,
+                format!(
+                    "'gateway.models.{model_name}.deployment_selection.strategy' must be one of {}",
+                    DEPLOYMENT_SELECTION_STRATEGIES.join(", ")
+                ),
+            )
+        })?,
+        Some(_) => {
+            return Err(invalid(
+                where_,
+                format!(
+                    "'gateway.models.{model_name}.deployment_selection.strategy' must be a string"
+                ),
+            ));
+        }
+    };
+    let max_cost_per_1k = optional_non_negative_finite_number(
+        table.get("max_cost_per_1k"),
+        where_,
+        &format!("gateway.models.{model_name}.deployment_selection.max_cost_per_1k"),
+    )?;
+    let observation_ttl = optional_positive_number(
+        table.get("observation_ttl"),
+        DEFAULT_MODEL_DEPLOYMENT_OBSERVATION_TTL,
+        where_,
+        &format!("gateway.models.{model_name}.deployment_selection.observation_ttl"),
+    )?;
+    if observation_ttl <= 0.0 || observation_ttl > MAX_MODEL_DEPLOYMENT_OBSERVATION_TTL {
+        return Err(invalid(
+            where_,
+            format!(
+                "'gateway.models.{model_name}.deployment_selection.observation_ttl' must be greater than 0 and at most {MAX_MODEL_DEPLOYMENT_OBSERVATION_TTL}"
+            ),
+        ));
+    }
+    Ok(DeploymentSelectionPolicy {
+        strategy,
+        max_cost_per_1k,
+        observation_ttl,
+    })
 }
 
 fn validate_model_fallbacks(
@@ -2131,6 +2332,25 @@ rpm = 5
     }
 
     #[test]
+    fn deployment_selection_policy_and_member_cost_round_trip() -> Result<(), ConfigError> {
+        let text = "[gateway.models.cloud]\nbase_url = \"https://primary.example/v1\"\nmodel = \"gpt-5\"\ndeployments = [{ id = \"eu\", base_url = \"https://eu.example/v1\", model = \"gpt-5\", cost_per_1k = 0.01 }]\n\n[gateway.models.cloud.deployment_selection]\nstrategy = \"latency\"\nmax_cost_per_1k = 0.02\nobservation_ttl = 30.0";
+        let config = parse(text)?;
+        let model = config
+            .models
+            .get("cloud")
+            .ok_or_else(|| invalid("test", "missing model"))?;
+        assert_eq!(
+            model.deployment_selection.strategy,
+            DeploymentSelectionStrategy::Latency
+        );
+        assert_eq!(model.deployment_selection.observation_ttl, 30.0);
+        assert_eq!(model.deployment_selection.max_cost_per_1k, Some(0.02));
+        assert_eq!(model.deployments[0].cost_per_1k, Some(0.01));
+        assert_eq!(dump_gateway_toml(&config)?, text);
+        Ok(())
+    }
+
+    #[test]
     fn dump_defaults_to_an_empty_document() -> Result<(), ConfigError> {
         assert_eq!(dump_gateway_toml(&GatewayConfig::default())?, "");
         Ok(())
@@ -2224,6 +2444,7 @@ cost_per_1k = 0.0"#;
                 fallbacks: Vec::new(),
                 context_window: Some(8_192),
                 deployments: Vec::new(),
+                deployment_selection: DeploymentSelectionPolicy::default(),
             },
         );
         config.keys.insert(
