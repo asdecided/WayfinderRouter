@@ -15,8 +15,8 @@ use tokio::time::sleep;
 use uuid::Uuid;
 use wayfinder_gateway::rate_limit::LimitKind;
 use wayfinder_gateway::state::{
-    RedisStateBackend, SharedBudgetReservation, SharedBudgetScope, SharedCostObservation,
-    StateBackend, StateBackendError, StateLimitConfig,
+    RedisStateBackend, SharedBudgetReservation, SharedBudgetScope, SharedCachePut,
+    SharedCostObservation, StateBackend, StateBackendError, StateLimitConfig,
 };
 use wayfinder_service::pricing::TurnCost;
 
@@ -324,6 +324,165 @@ async fn replicated_accounting_admission_and_health_are_atomic() -> TestResult {
         .await?;
     if !keys.is_empty() {
         let _: i64 = redis::cmd("DEL").arg(keys).query_async(&mut admin).await?;
+    }
+    let _: i64 = redis::cmd("ACL")
+        .arg("DELUSER")
+        .arg(&username)
+        .query_async(&mut admin)
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn replicated_shared_response_cache_is_bounded_isolated_and_expiring() -> TestResult {
+    let Some(admin_url) = live_redis_url()? else {
+        return Ok(());
+    };
+
+    let mut admin = admin_connection(&admin_url).await?;
+    let suffix = Uuid::new_v4().simple().to_string();
+    let username = format!("wayfinder_ci_{suffix}");
+    let password = format!("secret_{suffix}");
+    let namespace = format!("ci:cache:{suffix}");
+    let authenticated_url = authenticated_url(&admin_url, &username, &password)?;
+    configure_gateway_user(&mut admin, &username, &password).await?;
+
+    let first = RedisStateBackend::connect(&authenticated_url, namespace.clone()).await?;
+    let second = RedisStateBackend::connect(&authenticated_url, namespace.clone()).await?;
+    let key_a = "a".repeat(64);
+    let key_b = "b".repeat(64);
+    let key_c = "c".repeat(64);
+    let key_ttl = "d".repeat(64);
+    let body_a = b"one".to_vec();
+    let body_b = b"two".to_vec();
+    let body_c = b"six".to_vec();
+
+    assert!(redis_step(
+        first
+            .shared_cache_put(SharedCachePut {
+                generation: "generation-a".to_owned(),
+                key: key_a.clone(),
+                value: body_a.clone(),
+                body_bytes: body_a.len(),
+                ttl_seconds: 0.0,
+                max_entries: 2,
+                max_bytes: 10,
+            })
+            .await,
+        "cache put generation a",
+    )?);
+    assert_eq!(
+        redis_step(
+            second.shared_cache_get("generation-a", &key_a).await,
+            "cache get from second replica",
+        )?
+        .as_deref(),
+        Some(body_a.as_slice()),
+        "a second replica must see the shared response"
+    );
+
+    assert!(
+        redis_step(
+            second.shared_cache_get("generation-b", &key_a).await,
+            "generation isolation",
+        )?
+        .is_none(),
+        "a config-generation change must invalidate the old value"
+    );
+    assert!(redis_step(
+        first
+            .shared_cache_put(SharedCachePut {
+                generation: "generation-b".to_owned(),
+                key: key_b.clone(),
+                value: body_b.clone(),
+                body_bytes: body_b.len(),
+                ttl_seconds: 0.0,
+                max_entries: 1,
+                max_bytes: 10,
+            })
+            .await,
+        "cache put first bounded value",
+    )?);
+    sleep(Duration::from_millis(5)).await;
+    assert!(redis_step(
+        second
+            .shared_cache_put(SharedCachePut {
+                generation: "generation-b".to_owned(),
+                key: key_c.clone(),
+                value: body_c.clone(),
+                body_bytes: body_c.len(),
+                ttl_seconds: 0.0,
+                max_entries: 1,
+                max_bytes: 10,
+            })
+            .await,
+        "cache put second bounded value",
+    )?);
+    assert!(
+        redis_step(
+            first.shared_cache_get("generation-b", &key_b).await,
+            "entry-bound eviction",
+        )?
+        .is_none(),
+        "the oldest value must be evicted at max_entries"
+    );
+    assert_eq!(
+        redis_step(
+            first.shared_cache_get("generation-b", &key_c).await,
+            "newest bounded value",
+        )?
+        .as_deref(),
+        Some(body_c.as_slice())
+    );
+
+    assert!(!redis_step(
+        first
+            .shared_cache_put(SharedCachePut {
+                generation: "generation-b".to_owned(),
+                key: key_a.clone(),
+                value: b"oversized".to_vec(),
+                body_bytes: 9,
+                ttl_seconds: 0.0,
+                max_entries: 2,
+                max_bytes: 3,
+            })
+            .await,
+        "byte-bound rejection",
+    )?);
+    assert!(redis_step(
+        second
+            .shared_cache_put(SharedCachePut {
+                generation: "generation-b".to_owned(),
+                key: key_ttl.clone(),
+                value: b"ttl".to_vec(),
+                body_bytes: 3,
+                ttl_seconds: 0.02,
+                max_entries: 2,
+                max_bytes: 10,
+            })
+            .await,
+        "cache put with ttl",
+    )?);
+    sleep(Duration::from_millis(40)).await;
+    assert!(
+        redis_step(
+            first.shared_cache_get("generation-b", &key_ttl).await,
+            "cache ttl expiry",
+        )?
+        .is_none(),
+        "expired values must not be replayed"
+    );
+
+    let namespace_component = URL_SAFE_NO_PAD.encode(namespace.as_bytes());
+    let namespace_keys: Vec<String> = redis::cmd("KEYS")
+        .arg(format!("wayfinder:v1:{namespace_component}:*"))
+        .query_async(&mut admin)
+        .await?;
+    if !namespace_keys.is_empty() {
+        let _: i64 = redis::cmd("DEL")
+            .arg(namespace_keys)
+            .query_async(&mut admin)
+            .await?;
     }
     let _: i64 = redis::cmd("ACL")
         .arg("DELUSER")

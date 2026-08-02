@@ -32,6 +32,14 @@ budgets, cache, retry/failover/breakers, prompt-free metrics, last-good hot
 reload, and bounded graceful shutdown. Track B therefore starts from these
 implemented primitives rather than rebuilding them.
 
+Issue #149 adds the next cache slice: the exact-response cache remains memory
+backed and off by default, while an operator may explicitly select a bounded
+Redis cache alongside the shared policy-state backend. Versioned canonical keys,
+virtual-key/privacy/model partitions, generation invalidation, server-time TTL,
+atomic entry/byte eviction, and miss/no-store degradation preserve the existing
+authentication and privacy boundaries. Redis response bodies are retained data;
+zero-data-retention deployments keep the feature disabled. See WF-ADR-0061.
+
 WF-ADR-0051 adds the next process-level capacity boundary: 32 simultaneous
 deliveries, 64 bounded waiters, a two-second queue deadline by default, explicit
 `503` overload responses, and a real-listener test proving twenty concurrent
@@ -252,9 +260,11 @@ reversible decision, and it is deliberately shaped like the circuit breaker
 
 ### 4. Shared state (Redis first) and token-truthful money
 
-Every counter the evidence engine and the control plane rely on is per-process today — the code
-says so itself: "one long-lived limiter; its window counters survive config hot-reloads"
-(`gateway.py:1564`); the ledger persists to a local JSON file; the cache is an in-process dict.
+Every counter the evidence engine and the control plane relied on in the original Python design
+was per-process — the historical code says so itself: "one long-lived limiter; its window counters
+survive config hot-reloads" (`gateway.py:1564`); the ledger persisted to a local JSON file; and
+the memory-mode cache was an in-process dict. The Rust enterprise implementation now has the
+optional Redis policy and response-cache tiers described above.
 Fleet-wide budgets, rate limits, canary tripwires, and a shared shadow store are impossible without
 a shared backend. Separately, cost claims must survive an adversarial reader: the plumbing is
 further along than it looks — `usage_tokens` (`pricing.py:60`) already prefers the upstream's real
@@ -287,8 +297,9 @@ The Rust implementation of the shared policy-state contract, Redis server-time
 fixed-window counters, and loud process-local degradation is tracked in
 WF-ADR-0053. WF-ADR-0060 extends that contract to idempotent realized-cost
 accounting, workspace budgets, fleet admission leases, and provider-health
-circuits while keeping the response cache and local evidence sink process-local.
-Issue #147 carries the two-replica failure and recovery evidence.
+circuits. WF-ADR-0061 adds the separately opt-in, bounded Redis response cache;
+the local evidence sink remains process-local. Issues #147 and #149 carry the
+two-replica policy and cache failure/recovery evidence.
 
 Stable public aliases may now carry bounded weighted OpenAI-compatible
 deployments under WF-ADR-0054. Rotation and deployment-health state remain

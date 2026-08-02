@@ -5,7 +5,7 @@ type: decision
 tags: [gateway, cache, response, cost, reliability, privacy, invocation]
 ---
 
-# WF-ADR-0033: Exact-Match Response Cache (deterministic, opt-in, in-memory)
+# WF-ADR-0033: Exact-Match Response Cache (deterministic, opt-in, memory default)
 
 ## Status
 
@@ -50,12 +50,11 @@ Two constraints frame the decision:
 
 3. **First response-body store → governed by WF-DESIGN-0008, not WF-ADR-0014.** The cache is the
    project's first sanctioned store of response-body text. It is therefore **off by default**,
-   **in-memory only** (no disk tier in v1), bounded by an LRU `max_entries`, a `max_bytes` ceiling,
-   and a `ttl`, and **purged on disable** — flipping `enabled = false` (or a process exit) drops
-   all retained bodies immediately rather than waiting out the TTL. Cached bodies are **never
-   logged** and **never surfaced** in `/router/recent`, `/metrics`, or the `X-Wayfinder-Debug`
-   payload; only the hit/miss header and aggregate counters are exposed. Enabling the cache is a
-   deliberate, documented choice the operator makes for their own self-hosted data.
+   **memory-backed by default**, bounded by an LRU `max_entries`, a `max_bytes` ceiling, and a
+   `ttl`, and **purged on disable**. Cached bodies are **never logged** and **never surfaced** in
+   `/router/recent`, `/metrics`, or the `X-Wayfinder-Debug` payload; only the hit/miss header and
+   aggregate counters are exposed. An explicit bounded Redis mode is specified separately by
+   WF-ADR-0061 and carries the same opt-in retention rules.
 
 4. **A cache hit is free.** A hit records realized cost `0` and does **not** advance the savings
    ledger or the budget's `spent()` — no upstream tokens were bought, so charging for them would
@@ -93,8 +92,8 @@ Two constraints frame the decision:
 - **Risk — body retention.** Completions live in memory while enabled. Mitigated by off-by-default,
   hashed keys (no prompt plaintext stored), in-memory only, the `max_bytes` ceiling, and never
   logging/surfacing bodies.
-- **Limitation — per process.** The cache is in-memory and per worker (like the breaker and
-  ledger); a shared/disk tier is a deliberate later option, not v1.
+- **Limitation — memory default.** The cache is in-memory and per worker unless the operator
+  explicitly selects the bounded Redis mode in WF-ADR-0061. There is still no on-disk tier.
 - **Limitation — no per-model TTL, no force-refresh header, no streaming/cross-mode** in v1. A
   force-refresh header was rejected because the chat endpoint is unauthenticated (it would be a
   write/probe primitive); revisit after virtual keys (WF-ROADMAP-0006 #5) add an auth boundary.
@@ -132,4 +131,5 @@ Two constraints frame the decision:
 - WF-DESIGN-0008 (the opt-in / retention-bounded framing this cache adopts)
 - WF-DESIGN-0007 (savings accounting — a hit reports avoided cost, kept separate)
 - WF-ADR-0031 (circuit breaker — untouched by a hit) / WF-DESIGN-0011 (the adapter a hit also covers)
+- WF-ADR-0061 (optional shared Redis cache and retained-data boundary)
 - WF-ROADMAP-0006 (item #10: exact-match response cache)

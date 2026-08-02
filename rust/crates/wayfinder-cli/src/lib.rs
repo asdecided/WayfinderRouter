@@ -805,7 +805,8 @@ async fn build_serve_state<W: Write>(
         .await
         .map_err(|error| error.to_string())?;
     state = state
-        .with_gateway_cache(&gateway)
+        .with_gateway_cache_async(&gateway)
+        .await
         .map_err(|error| error.to_string())?;
 
     if codex_provider_configured {
