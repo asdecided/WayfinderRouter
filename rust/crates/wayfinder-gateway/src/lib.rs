@@ -78,7 +78,9 @@ use crate::access::{
 use crate::admission::{AdmissionError, AdmissionPermit, AdmissionPolicy};
 use crate::budget::{BudgetDecision, BudgetPolicy, format_limit};
 use crate::cache::{
-    CacheError, CacheSettings, CachedResponse, ResponseCache, cache_key, is_cacheable, is_storable,
+    CACHE_KEY_SCHEMA_VERSION, CacheError, CacheSettings, CachedResponse, ResponseCache,
+    cache_key_with_version, decode_shared_response, encode_shared_response, is_cacheable,
+    is_storable,
 };
 use crate::decision_policy::{
     AUTO_MODEL, PREFER_HIGH, PREFER_HIGH_ALIAS, PREFER_LOW, ROUTE_ON_HEADER,
@@ -95,7 +97,7 @@ use crate::rate_limit::{RateResult, RateSnapshot};
 use crate::recent::{RecentCost, RecentEntry, RecentRoutes};
 use crate::reliability::{ReliabilityAttempt, ReliabilityError, ReliabilityPolicy, sleep_retry};
 use crate::reload::LastGood;
-use crate::state::{SharedBudgetReservation, SharedCostObservation, StateBackend};
+use crate::state::{SharedBudgetReservation, SharedCachePut, SharedCostObservation, StateBackend};
 
 fn shared_state_identity(config: &wayfinder_config::gateway::StateConfig) -> [u8; 32] {
     let mut digest = Sha256::new();
@@ -108,6 +110,24 @@ fn shared_state_identity(config: &wayfinder_config::gateway::StateConfig) -> [u8
         digest.update([0]);
     }
     digest.finalize().into()
+}
+
+fn cache_generation(
+    config: &wayfinder_config::gateway::GatewayConfig,
+) -> Result<String, CacheError> {
+    let rendered = wayfinder_config::gateway::dump_gateway_toml(config)
+        .map_err(|error| CacheError::Json(error.to_string()))?;
+    let mut digest = Sha256::new();
+    digest.update(CACHE_KEY_SCHEMA_VERSION.as_bytes());
+    digest.update([0]);
+    digest.update(rendered.as_bytes());
+    let digest = digest.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(char::from(b"0123456789abcdef"[usize::from(byte >> 4)]));
+        encoded.push(char::from(b"0123456789abcdef"[usize::from(byte & 0x0f)]));
+    }
+    Ok(encoded)
 }
 
 /// Default maximum request body accepted by body-buffering extractors (1 MiB).
@@ -463,6 +483,9 @@ pub struct AppState {
     budget_policy: Arc<BudgetPolicy>,
     reliability_policy: Arc<ReliabilityPolicy>,
     response_cache: Arc<ResponseCache>,
+    cache_settings: CacheSettings,
+    shared_cache_enabled: bool,
+    cache_generation: Arc<str>,
     cache_clock: MonotonicClock,
     price_table: Arc<PriceTable>,
     price_table_version: Arc<str>,
@@ -525,6 +548,9 @@ impl AppState {
             budget_policy: Arc::new(BudgetPolicy::default()),
             reliability_policy: Arc::new(ReliabilityPolicy::default()),
             response_cache: Arc::new(ResponseCache::default()),
+            cache_settings: CacheSettings::default(),
+            shared_cache_enabled: false,
+            cache_generation: Arc::from(CACHE_KEY_SCHEMA_VERSION),
             cache_clock: Arc::new(move || cache_started.elapsed().as_secs_f64()),
             price_table: Arc::new(price_table),
             price_table_version: Arc::from(price_table_version),
@@ -767,6 +793,8 @@ impl AppState {
         clock: impl Fn() -> f64 + Send + Sync + 'static,
     ) -> Result<Self, CacheError> {
         self.response_cache = Arc::new(ResponseCache::new(settings)?);
+        self.cache_settings = settings;
+        self.shared_cache_enabled = false;
         self.cache_clock = Arc::new(clock);
         Ok(self)
     }
@@ -779,12 +807,36 @@ impl AppState {
 
     /// Build cache settings from validated gateway configuration.
     pub fn with_gateway_cache(
-        self,
+        mut self,
         config: &wayfinder_config::gateway::GatewayConfig,
     ) -> Result<Self, CacheError> {
+        self.cache_generation = Arc::from(cache_generation(config)?);
         let Some(config) = &config.cache else {
-            return Ok(self);
+            self.shared_cache_enabled = false;
+            return self.with_cache(CacheSettings::default());
         };
+        if config.backend == "redis" {
+            if self
+                .shared_state_backend
+                .as_ref()
+                .is_none_or(|backend| backend.backend_name() != "redis")
+            {
+                return Err(CacheError::SharedBackendRequired);
+            }
+            let settings = CacheSettings {
+                enabled: config.enabled,
+                ttl_seconds: config.ttl,
+                max_entries: usize::try_from(config.max_entries)
+                    .map_err(|_| CacheError::InvalidBounds)?,
+                max_bytes: usize::try_from(config.max_bytes)
+                    .map_err(|_| CacheError::InvalidBounds)?,
+            };
+            self.cache_settings = settings;
+            self.shared_cache_enabled = config.enabled;
+            self.response_cache = Arc::new(ResponseCache::default());
+            return Ok(self);
+        }
+        self.shared_cache_enabled = false;
         self.with_cache(CacheSettings {
             enabled: config.enabled,
             ttl_seconds: config.ttl,
@@ -792,6 +844,30 @@ impl AppState {
                 .map_err(|_| CacheError::InvalidBounds)?,
             max_bytes: usize::try_from(config.max_bytes).map_err(|_| CacheError::InvalidBounds)?,
         })
+    }
+
+    /// Build cache state and purge the shared namespace when shared retention
+    /// is disabled. Shared cache failures remain a degraded cache miss rather
+    /// than blocking routing or provider delivery.
+    pub async fn with_gateway_cache_async(
+        self,
+        config: &wayfinder_config::gateway::GatewayConfig,
+    ) -> Result<Self, CacheError> {
+        let state = self.with_gateway_cache(config)?;
+        let shared_backend = state
+            .shared_state_backend
+            .as_ref()
+            .filter(|backend| backend.backend_name() == "redis");
+        let shared_enabled = config
+            .cache
+            .as_ref()
+            .is_some_and(|cache| cache.backend == "redis" && cache.enabled);
+        if let Some(backend) = shared_backend {
+            if !shared_enabled {
+                let _ = backend.shared_cache_clear(&state.cache_generation).await;
+            }
+        }
+        Ok(state)
     }
 
     /// Use a caller-owned in-memory savings ledger.
@@ -1051,6 +1127,64 @@ impl AppState {
     #[must_use]
     pub fn response_cache(&self) -> &ResponseCache {
         &self.response_cache
+    }
+
+    fn cache_enabled(&self) -> Result<bool, CacheError> {
+        if self.shared_cache_enabled {
+            Ok(self.cache_settings.enabled)
+        } else {
+            self.response_cache.enabled()
+        }
+    }
+
+    fn cache_generation(&self) -> &str {
+        &self.cache_generation
+    }
+
+    async fn get_cached_response(
+        &self,
+        key: &str,
+    ) -> Result<Option<Arc<CachedResponse>>, CacheError> {
+        if self.shared_cache_enabled {
+            let Some(backend) = self.shared_state_backend.as_ref() else {
+                return Ok(None);
+            };
+            let value = backend
+                .shared_cache_get(&self.cache_generation, key)
+                .await
+                .unwrap_or(None);
+            return Ok(value
+                .and_then(|value| decode_shared_response(&value).ok())
+                .map(Arc::new));
+        }
+        self.response_cache.get_at(key, self.cache_now())
+    }
+
+    async fn put_cached_response(
+        &self,
+        key: String,
+        response: CachedResponse,
+    ) -> Result<(), CacheError> {
+        if self.shared_cache_enabled {
+            let Some(backend) = self.shared_state_backend.as_ref() else {
+                return Ok(());
+            };
+            let body_bytes = response.body.len();
+            let value = encode_shared_response(&response)?;
+            let _ = backend
+                .shared_cache_put(SharedCachePut {
+                    generation: self.cache_generation.to_string(),
+                    key,
+                    value,
+                    body_bytes,
+                    ttl_seconds: self.cache_settings.ttl_seconds,
+                    max_entries: self.cache_settings.max_entries,
+                    max_bytes: self.cache_settings.max_bytes,
+                })
+                .await;
+            return Ok(());
+        }
+        self.response_cache.put_at(key, response, self.cache_now())
     }
 
     fn cache_now(&self) -> f64 {
@@ -2280,7 +2414,7 @@ async fn chat_completions(
         .ok()
         .flatten()
         .is_some_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true" | "yes"));
-    let cache_enabled = match state.response_cache().enabled() {
+    let cache_enabled = match state.cache_enabled() {
         Ok(enabled) => enabled,
         Err(error) => {
             return error_response(
@@ -2309,7 +2443,8 @@ async fn chat_completions(
         && is_cacheable(&request_body);
     let mut cache_state = None;
     if cacheable {
-        let key = match cache_key(
+        let key = match cache_key_with_version(
+            state.cache_generation(),
             &cache_partition,
             &cache_route,
             target.provider_model(),
@@ -2325,7 +2460,7 @@ async fn chat_completions(
                 );
             }
         };
-        let cached = match state.response_cache().get_at(&key, state.cache_now()) {
+        let cached = match state.get_cached_response(&key).await {
             Ok(cached) => cached,
             Err(error) => {
                 return error_response(
@@ -2678,24 +2813,26 @@ async fn chat_completions(
                 .find(|model| model.name() == served_by)
             {
                 if served_target.provider() != ProviderKind::CodexAppServer {
-                    if let Ok(key) = cache_key(
+                    if let Ok(key) = cache_key_with_version(
+                        state.cache_generation(),
                         &cache_partition,
                         &cache_route,
                         served_target.provider_model(),
                         &request_body,
                     ) {
-                        let _ = state.response_cache().put_at(
-                            key,
-                            CachedResponse {
-                                status: status.as_u16(),
-                                content_type: response_content_type.clone(),
-                                body: body.to_vec(),
-                                prompt_tokens: usage.prompt_tokens,
-                                completion_tokens: usage.completion_tokens,
-                                estimated: usage.estimated,
-                            },
-                            state.cache_now(),
-                        );
+                        let _ = state
+                            .put_cached_response(
+                                key,
+                                CachedResponse {
+                                    status: status.as_u16(),
+                                    content_type: response_content_type.clone(),
+                                    body: body.to_vec(),
+                                    prompt_tokens: usage.prompt_tokens,
+                                    completion_tokens: usage.completion_tokens,
+                                    estimated: usage.estimated,
+                                },
+                            )
+                            .await;
                     }
                 }
             }

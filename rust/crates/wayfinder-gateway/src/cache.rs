@@ -8,6 +8,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -18,9 +19,12 @@ pub const DEFAULT_TTL_SECONDS: f64 = 300.0;
 pub const DEFAULT_MAX_ENTRIES: usize = 1_024;
 /// Default retained response bytes (64 MiB).
 pub const DEFAULT_MAX_BYTES: usize = 64 * 1_024 * 1_024;
+/// Cache-key schema version. Bump when request or provider-contract semantics
+/// change so shared entries cannot cross a prompt-contract boundary.
+pub const CACHE_KEY_SCHEMA_VERSION: &str = "v2";
 
 /// A complete buffered response eligible for exact replay.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct CachedResponse {
     /// Original upstream status.
     pub status: u16,
@@ -108,6 +112,9 @@ pub enum CacheError {
     /// Internal state could not be synchronized.
     #[error("cache state lock is unavailable")]
     LockPoisoned,
+    /// A shared cache requires the configured Redis state backend.
+    #[error("shared response cache requires the Redis state backend")]
+    SharedBackendRequired,
 }
 
 #[derive(Debug)]
@@ -299,6 +306,23 @@ pub fn cache_key(
     served_model: &str,
     body: &Value,
 ) -> Result<String, CacheError> {
+    cache_key_with_version(
+        CACHE_KEY_SCHEMA_VERSION,
+        partition,
+        route,
+        served_model,
+        body,
+    )
+}
+
+/// SHA-256 cache key with an explicit configuration/prompt-contract version.
+pub fn cache_key_with_version(
+    version: &str,
+    partition: &str,
+    route: &str,
+    served_model: &str,
+    body: &Value,
+) -> Result<String, CacheError> {
     let object = body.as_object().ok_or(CacheError::InvalidBody)?;
     let projected = object
         .iter()
@@ -306,6 +330,7 @@ pub fn cache_key(
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect::<Map<_, _>>();
     let envelope = canonical_json(serde_json::json!({
+        "version": version,
         "partition": partition,
         "route": route,
         "model": served_model,
@@ -320,6 +345,17 @@ pub fn cache_key(
         encoded.push(char::from(b"0123456789abcdef"[usize::from(byte & 0x0f)]));
     }
     Ok(encoded)
+}
+
+/// Serialize a response for the shared cache without exposing its contents in
+/// logs or route metadata.
+pub fn encode_shared_response(response: &CachedResponse) -> Result<Vec<u8>, CacheError> {
+    serde_json::to_vec(response).map_err(|error| CacheError::Json(error.to_string()))
+}
+
+/// Decode one shared-cache value and reject malformed or truncated entries.
+pub fn decode_shared_response(value: &[u8]) -> Result<CachedResponse, CacheError> {
+    serde_json::from_slice(value).map_err(|error| CacheError::Json(error.to_string()))
 }
 
 fn canonical_json(value: Value) -> Value {
@@ -502,6 +538,24 @@ mod tests {
         assert_ne!(key, cache_key("other-key", "cloud", "llama3.2", &body)?);
         assert_ne!(key, cache_key("local", "other-route", "llama3.2", &body)?);
         assert_ne!(key, cache_key("local", "cloud", "other-model", &body)?);
+        Ok(())
+    }
+
+    #[test]
+    fn shared_key_version_and_response_encoding_are_explicit() -> Result<(), CacheError> {
+        let body = json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "temperature": 0
+        });
+        let current = cache_key("tenant", "auto", "local", &body)?;
+        let prior = cache_key_with_version("v1", "tenant", "auto", "local", &body)?;
+        assert_ne!(current, prior);
+
+        let response = entry(b"exact bytes");
+        let encoded = encode_shared_response(&response)?;
+        assert!(!encoded.is_empty());
+        assert_eq!(decode_shared_response(&encoded)?, response);
+        assert!(decode_shared_response(b"not-json").is_err());
         Ok(())
     }
 

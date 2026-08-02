@@ -38,11 +38,12 @@ has a bounded namespace key. Redis keys use a versioned
 virtual-key, and audit-stream components. User-selected values therefore cannot
 create delimiter collisions, and limit and audit domains cannot alias the
 legacy raw-key layout. A request rejected by one dimension is not sent upstream.
-The response cache remains local because cache locality is a performance and
-privacy decision, not a policy counter. Realized accounting, fleet admission,
-and provider health are coordinated by the follow-on WF-ADR-0060 contract;
-selecting Redis therefore changes policy consistency but never changes cache
-or prompt-retention behavior.
+The response cache remains local by default because cache locality is a
+performance and privacy decision, not a policy counter. WF-ADR-0061 defines an
+explicit, bounded Redis response-cache mode for operators who accept shared
+prompt/response retention; selecting Redis state alone never enables that mode.
+Realized accounting, fleet admission, and provider health are coordinated by
+the follow-on WF-ADR-0060 contract.
 
 If Redis becomes unavailable, the gateway does not drop requests or expose a
 connection error. It marks the policy degraded, falls back to its bounded
@@ -65,7 +66,8 @@ enforcement.
   expire naturally; legacy audit keys remain separate evidence until the
   operator's retention policy removes them.
 - Cross-replica accounting, admission, and provider health are specified in
-  WF-ADR-0060. Response caches remain process-local by design.
+  WF-ADR-0060. Response caches remain process-local unless the operator opts
+  into the bounded Redis mode specified by WF-ADR-0061.
 
 ## Rejected alternatives
 
@@ -86,4 +88,5 @@ enforcement.
 - WF-ADR-0050 — separate managed model data plane from local operator surfaces
 - WF-ADR-0051 — bounded delivery concurrency
 - WF-ADR-0052 — workspace-scoped model routing and multi-turn request support
+- WF-ADR-0061 — optional shared exact-response cache with bounded retention
 - WF-ROADMAP-0010 — shared state, token-truthful accounting, and enterprise substrate

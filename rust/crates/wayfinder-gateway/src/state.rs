@@ -138,6 +138,25 @@ pub struct SharedBudgetReservation {
     pub scopes: Vec<SharedBudgetScope>,
 }
 
+/// One bounded exact-response cache insertion sent to the shared backend.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharedCachePut {
+    /// Current cache/config generation.
+    pub generation: String,
+    /// SHA-256 cache key.
+    pub key: String,
+    /// Opaque serialized response value.
+    pub value: Vec<u8>,
+    /// Retained response-body bytes used for the operator byte bound.
+    pub body_bytes: usize,
+    /// Entry lifetime in seconds; zero means no expiry.
+    pub ttl_seconds: f64,
+    /// Maximum number of retained entries.
+    pub max_entries: usize,
+    /// Maximum aggregate retained response-body bytes.
+    pub max_bytes: usize,
+}
+
 impl StateLimitConfig {
     fn validate(self) -> Result<Self, StateBackendError> {
         if !self.window_seconds.is_finite() || self.window_seconds <= 0.0 {
@@ -304,6 +323,30 @@ pub trait StateBackend: Send + Sync {
         _target: &'a str,
         _probe_id: &'a str,
     ) -> StateFuture<'a, ()> {
+        Box::pin(async { Err(StateBackendError::Unavailable) })
+    }
+
+    /// Read one bounded, exact-response cache value from shared state.
+    ///
+    /// The value is opaque to the state backend. Callers own serialization and
+    /// must ensure it contains no prompt-free metadata beyond the response
+    /// contract they intentionally retain.
+    fn shared_cache_get<'a>(
+        &'a self,
+        _generation: &'a str,
+        _key: &'a str,
+    ) -> StateFuture<'a, Option<Vec<u8>>> {
+        Box::pin(async { Err(StateBackendError::Unavailable) })
+    }
+
+    /// Insert one exact-response cache value, enforcing shared entry and body
+    /// bounds atomically when the backend supports it.
+    fn shared_cache_put<'a>(&'a self, _put: SharedCachePut) -> StateFuture<'a, bool> {
+        Box::pin(async { Err(StateBackendError::Unavailable) })
+    }
+
+    /// Purge all values in the current shared cache generation.
+    fn shared_cache_clear<'a>(&'a self, _generation: &'a str) -> StateFuture<'a, ()> {
         Box::pin(async { Err(StateBackendError::Unavailable) })
     }
 
@@ -783,6 +826,86 @@ end
 return 1
 "#;
 
+const SHARED_CACHE_GET_SCRIPT: &str = r#"
+local generation = redis.call('HGET', KEYS[2], 'generation')
+if generation ~= ARGV[2] then
+  local stale = redis.call('ZRANGE', KEYS[4], 0, -1)
+  for _, digest in ipairs(stale) do
+    redis.call('DEL', ARGV[3] .. digest)
+  end
+  redis.call('DEL', KEYS[3], KEYS[4])
+  redis.call('HSET', KEYS[2], 'generation', ARGV[2], 'bytes', 0)
+end
+local entry = redis.call('GET', KEYS[1])
+if not entry then
+  local prior = tonumber(redis.call('HGET', KEYS[3], ARGV[1]) or '0')
+  if prior > 0 then
+    redis.call('HINCRBY', KEYS[2], 'bytes', -prior)
+    redis.call('HDEL', KEYS[3], ARGV[1])
+    redis.call('ZREM', KEYS[4], ARGV[1])
+  end
+  return false
+end
+local time = redis.call('TIME')
+local now_ms = (tonumber(time[1]) * 1000) + math.floor(tonumber(time[2]) / 1000)
+redis.call('ZADD', KEYS[4], now_ms, ARGV[1])
+return entry
+"#;
+
+const SHARED_CACHE_PUT_SCRIPT: &str = r#"
+local generation = redis.call('HGET', KEYS[2], 'generation')
+if generation ~= ARGV[2] then
+  local stale = redis.call('ZRANGE', KEYS[4], 0, -1)
+  for _, digest in ipairs(stale) do
+    redis.call('DEL', ARGV[3] .. digest)
+  end
+  redis.call('DEL', KEYS[3], KEYS[4])
+  redis.call('HSET', KEYS[2], 'generation', ARGV[2], 'bytes', 0)
+end
+local body_bytes = tonumber(ARGV[5])
+local ttl_ms = tonumber(ARGV[6])
+local max_entries = tonumber(ARGV[7])
+local max_bytes = tonumber(ARGV[8])
+if body_bytes == nil or body_bytes < 0 or ttl_ms == nil or ttl_ms < 0
+    or max_entries == nil or max_entries < 1 or max_bytes == nil or max_bytes < 1 then
+  return 0
+end
+if body_bytes > max_bytes then return 0 end
+local previous = tonumber(redis.call('HGET', KEYS[3], ARGV[1]) or '0')
+if previous > 0 then
+  redis.call('HINCRBY', KEYS[2], 'bytes', -previous)
+end
+redis.call('SET', KEYS[1], ARGV[4])
+if ttl_ms > 0 then redis.call('PEXPIRE', KEYS[1], ttl_ms) end
+redis.call('HSET', KEYS[3], ARGV[1], body_bytes)
+local time = redis.call('TIME')
+local now_ms = (tonumber(time[1]) * 1000) + math.floor(tonumber(time[2]) / 1000)
+redis.call('ZADD', KEYS[4], now_ms, ARGV[1])
+redis.call('HINCRBY', KEYS[2], 'bytes', body_bytes - previous)
+local bytes = tonumber(redis.call('HGET', KEYS[2], 'bytes') or '0')
+while redis.call('ZCARD', KEYS[4]) > max_entries or bytes > max_bytes do
+  local oldest = redis.call('ZRANGE', KEYS[4], 0, 0)
+  if #oldest == 0 then break end
+  local victim = oldest[1]
+  local victim_bytes = tonumber(redis.call('HGET', KEYS[3], victim) or '0')
+  redis.call('DEL', ARGV[3] .. victim)
+  redis.call('HDEL', KEYS[3], victim)
+  redis.call('ZREM', KEYS[4], victim)
+  bytes = math.max(0, bytes - victim_bytes)
+  redis.call('HSET', KEYS[2], 'bytes', bytes)
+end
+return redis.call('EXISTS', KEYS[1])
+"#;
+
+const SHARED_CACHE_CLEAR_SCRIPT: &str = r#"
+local entries = redis.call('ZRANGE', KEYS[3], 0, -1)
+for _, digest in ipairs(entries) do
+  redis.call('DEL', ARGV[1] .. digest)
+end
+redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])
+return 1
+"#;
+
 /// Redis-backed fixed-window counters using server time and Lua atomicity.
 #[derive(Clone)]
 pub struct RedisStateBackend {
@@ -861,6 +984,26 @@ impl RedisKeyNamespace {
             encode_redis_component(target)
         )
     }
+
+    fn cache_entry_prefix(&self) -> String {
+        format!("{REDIS_KEY_ROOT}:{}:cache:entry:", self.encoded_namespace)
+    }
+
+    fn cache_entry(&self, key: &str) -> String {
+        format!("{}{}", self.cache_entry_prefix(), key)
+    }
+
+    fn cache_meta(&self) -> String {
+        format!("{REDIS_KEY_ROOT}:{}:cache:meta", self.encoded_namespace)
+    }
+
+    fn cache_sizes(&self) -> String {
+        format!("{REDIS_KEY_ROOT}:{}:cache:sizes", self.encoded_namespace)
+    }
+
+    fn cache_index(&self) -> String {
+        format!("{REDIS_KEY_ROOT}:{}:cache:index", self.encoded_namespace)
+    }
 }
 
 impl RedisStateBackend {
@@ -934,6 +1077,30 @@ fn shared_budget_keys(
         keys.push(namespace.budget_amounts(&period, &scope.scope));
     }
     Ok(keys)
+}
+
+fn validate_shared_cache_inputs(generation: &str, key: &str) -> Result<(), StateBackendError> {
+    if generation.is_empty() || generation.len() > 128 {
+        return Err(StateBackendError::Unavailable);
+    }
+    if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(StateBackendError::Unavailable);
+    }
+    Ok(())
+}
+
+fn cache_ttl_millis(ttl_seconds: f64) -> Result<u64, StateBackendError> {
+    if !ttl_seconds.is_finite() || ttl_seconds < 0.0 {
+        return Err(StateBackendError::Unavailable);
+    }
+    if ttl_seconds == 0.0 {
+        return Ok(0);
+    }
+    let millis = (ttl_seconds * 1_000.0).ceil();
+    if !millis.is_finite() || millis > u64::MAX as f64 {
+        return Err(StateBackendError::Unavailable);
+    }
+    Ok(millis as u64)
 }
 
 impl StateBackend for RedisStateBackend {
@@ -1368,6 +1535,86 @@ impl StateBackend for RedisStateBackend {
             let result: Result<i64, _> = Script::new(RELEASE_HEALTH_SCRIPT)
                 .key(self.keys.health(target))
                 .arg(probe_id)
+                .invoke_async(&mut connection)
+                .await;
+            self.mark(
+                result
+                    .map(|_| ())
+                    .map_err(|_| StateBackendError::Unavailable),
+            )
+        })
+    }
+
+    fn shared_cache_get<'a>(
+        &'a self,
+        generation: &'a str,
+        key: &'a str,
+    ) -> StateFuture<'a, Option<Vec<u8>>> {
+        Box::pin(async move {
+            validate_shared_cache_inputs(generation, key)?;
+            let mut connection = self.connection.clone();
+            let value: Result<Option<Vec<u8>>, _> = Script::new(SHARED_CACHE_GET_SCRIPT)
+                .key(self.keys.cache_entry(key))
+                .key(self.keys.cache_meta())
+                .key(self.keys.cache_sizes())
+                .key(self.keys.cache_index())
+                .arg(key)
+                .arg(generation)
+                .arg(self.keys.cache_entry_prefix())
+                .invoke_async(&mut connection)
+                .await;
+            self.mark(value.map_err(|_| StateBackendError::Unavailable))
+        })
+    }
+
+    fn shared_cache_put<'a>(&'a self, put: SharedCachePut) -> StateFuture<'a, bool> {
+        Box::pin(async move {
+            validate_shared_cache_inputs(&put.generation, &put.key)?;
+            let body_bytes =
+                u64::try_from(put.body_bytes).map_err(|_| StateBackendError::Unavailable)?;
+            let max_entries =
+                u64::try_from(put.max_entries).map_err(|_| StateBackendError::Unavailable)?;
+            let max_bytes =
+                u64::try_from(put.max_bytes).map_err(|_| StateBackendError::Unavailable)?;
+            if max_entries == 0 || max_bytes == 0 || body_bytes > max_bytes {
+                return Ok(false);
+            }
+            let ttl_ms = cache_ttl_millis(put.ttl_seconds)?;
+            let mut connection = self.connection.clone();
+            let result: Result<i64, _> = Script::new(SHARED_CACHE_PUT_SCRIPT)
+                .key(self.keys.cache_entry(&put.key))
+                .key(self.keys.cache_meta())
+                .key(self.keys.cache_sizes())
+                .key(self.keys.cache_index())
+                .arg(&put.key)
+                .arg(&put.generation)
+                .arg(self.keys.cache_entry_prefix())
+                .arg(put.value)
+                .arg(body_bytes)
+                .arg(ttl_ms)
+                .arg(max_entries)
+                .arg(max_bytes)
+                .invoke_async(&mut connection)
+                .await;
+            self.mark(
+                result
+                    .map(|value| value == 1)
+                    .map_err(|_| StateBackendError::Unavailable),
+            )
+        })
+    }
+
+    fn shared_cache_clear<'a>(&'a self, generation: &'a str) -> StateFuture<'a, ()> {
+        Box::pin(async move {
+            if generation.is_empty() || generation.len() > 128 {
+                return Err(StateBackendError::Unavailable);
+            }
+            let mut connection = self.connection.clone();
+            let result: Result<i64, _> = Script::new(SHARED_CACHE_CLEAR_SCRIPT)
+                .key(self.keys.cache_meta())
+                .key(self.keys.cache_sizes())
+                .key(self.keys.cache_index())
+                .arg(self.keys.cache_entry_prefix())
                 .invoke_async(&mut connection)
                 .await;
             self.mark(

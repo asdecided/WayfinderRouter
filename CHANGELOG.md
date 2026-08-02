@@ -240,6 +240,18 @@ work to reach PyPI).
 
 ### Added
 
+- **Optional bounded shared exact-response cache** (WF-ADR-0061, issue #149).
+  The Rust gateway keeps the deterministic response cache in memory by default,
+  and can now share buffered deterministic responses across replicas when
+  `[gateway.cache].backend = "redis"` is explicitly paired with the Redis state
+  backend. Versioned canonical keys partition virtual-key/privacy/route/model
+  scope; Redis server-time Lua operations enforce TTL, entry, and body-byte
+  bounds atomically. Streaming, tools, nondeterministic requests, and managed
+  Codex turns bypass the cache. Redis failures become misses/no-stores without
+  bypassing authentication, routing, privacy, budgets, or admission. Because
+  shared values retain prompt/response bodies, zero-data-retention deployments
+  must leave this mode disabled.
+
 - **Informational `X-RateLimit-*` response headers** (WF-ADR-0034). When a rate limit is
   configured, every response now carries `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and
   `X-RateLimit-Reset` (seconds until the window rolls), so a well-behaved client can see its

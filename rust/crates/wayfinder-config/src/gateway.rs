@@ -27,6 +27,8 @@ pub const DEFAULT_CACHE_TTL: f64 = 300.0;
 pub const DEFAULT_CACHE_MAX_ENTRIES: u64 = 1_024;
 /// Default maximum aggregate cache body size (64 MiB).
 pub const DEFAULT_CACHE_MAX_BYTES: u64 = 64 * 1_024 * 1_024;
+/// Supported exact-response cache storage backends.
+pub const CACHE_BACKENDS: [&str; 2] = ["memory", "redis"];
 /// Default rate-limit window, in seconds.
 pub const DEFAULT_RATE_LIMIT_WINDOW: f64 = 60.0;
 /// Default simultaneous upstream deliveries accepted by one process.
@@ -193,6 +195,8 @@ pub struct Budget {
 /// Exact-match response cache settings.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CacheConfig {
+    /// Response storage backend: `memory` or the configured shared `redis` state.
+    pub backend: String,
     /// Whether response retention is enabled.
     pub enabled: bool,
     /// Entry lifetime in seconds; zero means no expiry.
@@ -206,6 +210,7 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
+            backend: "memory".to_owned(),
             enabled: false,
             ttl: DEFAULT_CACHE_TTL,
             max_entries: DEFAULT_CACHE_MAX_ENTRIES,
@@ -445,6 +450,12 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
     let rate_limit = parse_rate_limit(gateway.get("rate_limit"), where_)?;
     let concurrency = parse_concurrency(gateway.get("concurrency"), where_)?;
     let state = parse_state(gateway.get("state"), where_)?;
+    if cache.as_ref().is_some_and(|cache| cache.backend == "redis") && state.backend != "redis" {
+        return Err(invalid(
+            where_,
+            "'gateway.cache.backend' = 'redis' requires 'gateway.state.backend' = 'redis'",
+        ));
+    }
     let auth = parse_auth(gateway.get("auth"), where_)?;
     let workspaces = parse_workspaces(gateway.get("workspaces"), where_)?;
     let keys = parse_keys(gateway.get("keys"), where_)?;
@@ -555,6 +566,12 @@ fn render_gateway_toml(gateway: &GatewayConfig) -> String {
             "[gateway.cache]".to_owned(),
             format!("enabled = {}", cache.enabled),
         ];
+        if cache.backend != "memory" {
+            lines.insert(
+                1,
+                format!("backend = {}", quote_toml_string(&cache.backend)),
+            );
+        }
         if cache.ttl != DEFAULT_CACHE_TTL {
             lines.push(format!("ttl = {}", format_number(cache.ttl)));
         }
@@ -859,6 +876,13 @@ fn parse_cache(value: Option<&Value>, where_: &str) -> Result<Option<CacheConfig
         .as_table()
         .ok_or_else(|| invalid(where_, "'[gateway.cache]' must be a table"))?;
     Ok(Some(CacheConfig {
+        backend: optional_allowed_string(
+            table.get("backend"),
+            "memory",
+            &CACHE_BACKENDS,
+            where_,
+            "gateway.cache.backend",
+        )?,
         enabled: optional_bool(table.get("enabled"), false, where_, "gateway.cache.enabled")?,
         ttl: optional_non_negative_number(
             table.get("ttl"),
@@ -1910,6 +1934,7 @@ rpm = 5
         assert_eq!(
             config.cache,
             Some(CacheConfig {
+                backend: "memory".to_owned(),
                 enabled: true,
                 ttl: 600.0,
                 max_entries: 2_048,
@@ -2057,6 +2082,28 @@ rpm = 5
             "[gateway.state]\nbackend = \"redis\"",
             "[gateway.state]\nbackend = \"memory\"\nurl = \"redis://127.0.0.1\"",
             "[gateway.state]\nbackend = \"redis\"\nurl = \"redis://127.0.0.1\"\nnamespace = \"\"",
+        ] {
+            assert!(parse(invalid_text).is_err(), "accepted: {invalid_text}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn shared_response_cache_requires_redis_state_and_round_trips() -> Result<(), ConfigError> {
+        let text = "[gateway.state]\nbackend = \"redis\"\nurl = \"redis://127.0.0.1:6379\"\nnamespace = \"prod\"\n\n[gateway.cache]\nbackend = \"redis\"\nenabled = true\nttl = 30\nmax_entries = 8\nmax_bytes = 4096";
+        let config = parse(text)?;
+        assert_eq!(
+            config.cache.as_ref().map(|cache| cache.backend.as_str()),
+            Some("redis")
+        );
+        let rendered = dump_gateway_toml(&config)?;
+        assert!(rendered.contains("backend = \"redis\""));
+        assert_eq!(gateway_config_from_toml(&rendered, "round-trip")?, config);
+
+        for invalid_text in [
+            "[gateway.cache]\nbackend = \"redis\"\nenabled = true",
+            "[gateway.state]\nbackend = \"memory\"\n\n[gateway.cache]\nbackend = \"redis\"",
+            "[gateway.cache]\nbackend = \"disk\"",
         ] {
             assert!(parse(invalid_text).is_err(), "accepted: {invalid_text}");
         }
