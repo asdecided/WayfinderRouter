@@ -19,6 +19,7 @@ pub mod delivery;
 pub mod deployment_selection;
 pub mod evidence;
 pub mod metrics;
+pub mod modalities;
 pub mod operator_auth;
 pub mod otel;
 pub mod rate_limit;
@@ -71,9 +72,10 @@ use wayfinder_providers::sse::{SseDecoder, SseEvent};
 use wayfinder_routing_core::profiles::{LexiconProfile, profiles};
 use wayfinder_routing_core::{
     CandidateAssessment, ComplexityScore, DestinationCapabilities, DestinationSnapshot,
-    ExclusionReason, ExecutionBoundary, FeatureContribution, Features, PrivacyPosture,
-    ProviderReadiness, RoutingConfig, RoutingRequest, RoutingRequirements, Tier,
-    assess_destination, explain_score, python_round, recommend_tier, score_complexity,
+    ExclusionReason, ExecutionBoundary, FeatureContribution, Features, InferenceSurface,
+    ModalityCapabilities, PrivacyPosture, ProviderReadiness, RoutingConfig, RoutingRequest,
+    RoutingRequirements, Tier, assess_destination, explain_score, python_round, recommend_tier,
+    score_complexity,
 };
 use wayfinder_service::pricing::{
     LedgerError, PriceTable, SavingsLedger, SavingsReport, UtcDate, estimate_tokens, price_table,
@@ -2577,6 +2579,14 @@ pub(crate) async fn chat_completions(
         Err(response) => return *response,
     };
     let request_id = new_request_id();
+    if let Some(message) = modalities::unsupported_text_surface(&body) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "wayfinder_router_unsupported_modality",
+            message,
+            request_id_headers(&request_id),
+        );
+    }
     let access_grant = match preflight_access(&state, &headers, &request_id).await {
         Ok(grant) => grant,
         Err(response) => return *response,
@@ -4993,14 +5003,15 @@ fn model_execution_boundary(model: &ConfiguredModel) -> ExecutionBoundary {
 
 fn model_capabilities(model: &ConfiguredModel) -> DestinationCapabilities {
     match model.provider() {
-        // The OpenAI-compatible adapter is deliberately a pass-through. Its
-        // request contract supports multimodal messages and tool declarations;
-        // provider-specific rejection still remains a delivery failure.
+        // The OpenAI-compatible adapter currently supports text, tools, and
+        // streaming. Non-text surfaces remain explicit opt-ins and are not
+        // advertised until their adapters and parity fixtures ship.
         ProviderKind::OpenAiCompatible => DestinationCapabilities {
             text: true,
             streaming: true,
-            image_input: true,
+            image_input: false,
             tools: true,
+            modalities: ModalityCapabilities::default(),
         },
         // The bounded native adapters currently accept text-only turns. They
         // both expose ordered streaming, but reject images and tools before
@@ -5011,6 +5022,7 @@ fn model_capabilities(model: &ConfiguredModel) -> DestinationCapabilities {
                 streaming: true,
                 image_input: false,
                 tools: false,
+                modalities: ModalityCapabilities::default(),
             }
         }
     }
@@ -5153,6 +5165,7 @@ fn request_requirements(
         image_input: request_requires_image_input(messages),
         tools: request_requires_tools(body),
         streaming: body.get("stream").and_then(Value::as_bool) == Some(true),
+        surface: InferenceSurface::Text,
     }
 }
 
@@ -5196,6 +5209,10 @@ fn exclusion_reason_name(reason: ExclusionReason) -> &'static str {
         ExclusionReason::ImageInputUnsupported => "image-input-unsupported",
         ExclusionReason::ToolsUnsupported => "tools-unsupported",
         ExclusionReason::StreamingUnsupported => "streaming-unsupported",
+        ExclusionReason::EmbeddingsUnsupported => "embeddings-unsupported",
+        ExclusionReason::ImageGenerationUnsupported => "image-generation-unsupported",
+        ExclusionReason::AudioUnsupported => "audio-unsupported",
+        ExclusionReason::BatchUnsupported => "batch-unsupported",
         ExclusionReason::AutomaticNotAllowed => "automatic-not-allowed",
     }
 }
@@ -8148,6 +8165,42 @@ mod tests {
             json_body(oversized).await?["error"]["type"],
             "wayfinder_router_request_too_large"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unsupported_modalities_fail_before_provider_delivery() -> TestResult {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = AppState::new(
+            RoutingConfig::binary(0.5),
+            vec![ConfiguredModel::new(
+                "local",
+                "http://127.0.0.1:11434/v1",
+                "provider-local",
+                None,
+                true,
+            )],
+            false,
+            "test",
+        )
+        .with_delivery(Arc::new(CountingUsageDelivery {
+            calls: Arc::clone(&calls),
+        }));
+
+        for payload in [
+            json!({"input": "embed this"}),
+            json!({"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:"}}]}]}),
+            json!({"messages": [{"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": "..."}}]}]}),
+            json!({"batch": {"id": "batch-1"}}),
+        ] {
+            let response = post_json(&state, "/v1/chat/completions", &payload, &[]).await?;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                json_body(response).await?["error"]["type"],
+                "wayfinder_router_unsupported_modality"
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
         Ok(())
     }
 

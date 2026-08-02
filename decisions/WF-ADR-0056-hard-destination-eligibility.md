@@ -50,8 +50,9 @@ control contract when entering the shared chat path.
 Request requirements are derived from the bounded OpenAI-compatible body:
 estimated prompt plus requested output context, image content, tool/function
 declarations, and streaming. Provider defaults are conservative for the two
-text-only native adapters; OpenAI-compatible delivery retains its existing
-pass-through multimodal/tool contract.
+text-only native adapters; non-text surfaces are additionally governed by the
+explicit capability contract in WF-ADR-0067 and fail closed until a reviewed
+adapter is enabled. Tool declarations remain an explicit provider capability.
 
 Explicit pins and named `@route/<name>` presets fail closed with
 `422 wayfinder_router_destination_ineligible` when no eligible destination
@@ -69,7 +70,8 @@ remain unchanged.
 - A provider with unknown native readiness is not guessed ready; missing
   credentials are excluded before delivery.
 - Generic OpenAI-compatible endpoints remain backward-compatible for their
-  existing text, image, tool, and streaming pass-through requests.
+  existing text, tool, and streaming requests; non-text payloads are rejected
+  until their modality adapters are independently enabled.
 - Explicit pins may now return a specific eligibility error instead of a
   provider-side malformed-request or privacy leak.
 

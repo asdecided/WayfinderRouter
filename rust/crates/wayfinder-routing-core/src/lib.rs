@@ -16,9 +16,9 @@ use thiserror::Error;
 
 pub use wayfinder_runtime_contracts::{
     BillingClass, CandidateAssessment, DestinationCapabilities, DestinationSnapshot,
-    ExclusionReason, ExecutionBoundary, PrivacyPosture, ProviderReadiness,
-    RUNTIME_CONTRACT_VERSION, RouteExplanation, RoutePlan, RouteReceipt, RoutingRequest,
-    RoutingRequirements,
+    ExclusionReason, ExecutionBoundary, InferenceSurface, ModalityCapabilities, PrivacyPosture,
+    ProviderReadiness, RUNTIME_CONTRACT_VERSION, RouteExplanation, RoutePlan, RouteReceipt,
+    RoutingRequest, RoutingRequirements,
 };
 
 /// Default cut for the binary local/cloud router.
@@ -786,8 +786,34 @@ pub fn assess_destination(
     {
         exclusions.push(ExclusionReason::PrivacyBoundaryDenied);
     }
-    if !destination.capabilities.text {
-        exclusions.push(ExclusionReason::TextUnsupported);
+    match request.requirements.surface {
+        InferenceSurface::Text => {
+            if !destination.capabilities.text {
+                exclusions.push(ExclusionReason::TextUnsupported);
+            }
+        }
+        InferenceSurface::Embeddings => {
+            if !destination.capabilities.modalities.embeddings {
+                exclusions.push(ExclusionReason::EmbeddingsUnsupported);
+            }
+        }
+        InferenceSurface::ImageGeneration => {
+            if !destination.capabilities.modalities.image_generation {
+                exclusions.push(ExclusionReason::ImageGenerationUnsupported);
+            }
+        }
+        InferenceSurface::Audio => {
+            if !destination.capabilities.modalities.audio_input
+                && !destination.capabilities.modalities.audio_output
+            {
+                exclusions.push(ExclusionReason::AudioUnsupported);
+            }
+        }
+        InferenceSurface::Batch => {
+            if !destination.capabilities.modalities.batch {
+                exclusions.push(ExclusionReason::BatchUnsupported);
+            }
+        }
     }
     if let Some(required) = request.requirements.context_tokens {
         match destination.context_window {
@@ -1065,6 +1091,7 @@ mod tests {
                 streaming: true,
                 image_input: false,
                 tools: false,
+                modalities: ModalityCapabilities::default(),
             },
             automatic_eligible: true,
         }
@@ -1081,6 +1108,34 @@ mod tests {
                 ..RoutingRequirements::default()
             },
         }
+    }
+
+    #[test]
+    fn modality_capabilities_are_hard_filters_before_scoring() {
+        let mut request = request(PrivacyPosture::HostedAllowed);
+        request.requirements.surface = InferenceSurface::Embeddings;
+        let text_only = destination("text-only", "local", ExecutionBoundary::Hosted);
+        let assessment = assess_destination(&request, &text_only);
+        assert_eq!(
+            assessment.exclusions,
+            vec![ExclusionReason::EmbeddingsUnsupported]
+        );
+
+        let mut embeddings = destination("embeddings", "local", ExecutionBoundary::Hosted);
+        embeddings.capabilities.modalities.embeddings = true;
+        assert!(assess_destination(&request, &embeddings).is_eligible());
+    }
+
+    #[test]
+    fn non_text_surface_contracts_round_trip_with_defaults() -> Result<(), CoreError> {
+        let mut request = request(PrivacyPosture::HostedAllowed);
+        request.requirements.surface = InferenceSurface::Batch;
+        let encoded = serde_json::to_string(&request)
+            .map_err(|_| CoreError::InvalidContract("encode".to_owned()))?;
+        let decoded: RoutingRequest = serde_json::from_str(&encoded)
+            .map_err(|_| CoreError::InvalidContract("decode".to_owned()))?;
+        assert_eq!(decoded.requirements.surface, InferenceSurface::Batch);
+        Ok(())
     }
 
     #[test]
