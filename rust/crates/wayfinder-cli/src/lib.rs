@@ -777,6 +777,8 @@ async fn build_serve_state<W: Write>(
         .with_slash_directives(gateway.slash_directives)
         .with_route_presets(gateway.routes.clone())
         .with_gateway_budget(&gateway)
+        .with_gateway_shadow(&gateway)
+        .map_err(|error| error.to_string())?
         .with_audit_log(audit_log)
         .with_gateway_operator_auth(&gateway)
         .map_err(|error| error.to_string())?;

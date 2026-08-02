@@ -50,6 +50,16 @@ details, release history over commit history.
 
 ### Changed
 
+- **Bounded deterministic shadow routing** (WF-ADR-0063, issue #150). The Rust
+  gateway can now opt into prompt-free, deterministically sampled counterfactual
+  route evaluation without changing the production response. Candidate routes,
+  concurrency, record retention, provider-comparison consent, and provider
+  budgets are bounded; provider comparisons require both configuration and an
+  explicit hosted-privacy request header. Records carry scorer/configuration
+  fingerprints and reason codes, while Prometheus exposes bounded coverage,
+  divergence, error, and comparison-cost events. Disabling the policy at a
+  hot-reload boundary stops queued and in-flight shadow work cooperatively.
+
 - **Bounded deployment-signal selection** (WF-ADR-0062, issue #148). Interchangeable
   OpenAI-compatible deployments can opt into deterministic latency, throughput, availability,
   cost, or capacity ordering after hard eligibility checks. Runtime observations are prompt-free

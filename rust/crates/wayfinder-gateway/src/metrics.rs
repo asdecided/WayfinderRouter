@@ -74,6 +74,8 @@ struct MetricsState {
     deployment_throughput: BTreeMap<String, Histogram<8>>,
     deployment_capacity: BTreeMap<String, Histogram<6>>,
     deployment_selections: BTreeMap<(String, String, String), u64>,
+    shadow_events: BTreeMap<(String, String), u64>,
+    shadow_provider_cost: f64,
     model_costs: BTreeMap<String, f64>,
     realized_cost: f64,
     baseline_cost: f64,
@@ -101,6 +103,8 @@ impl Default for MetricsState {
             deployment_throughput: BTreeMap::new(),
             deployment_capacity: BTreeMap::new(),
             deployment_selections: BTreeMap::new(),
+            shadow_events: BTreeMap::new(),
+            shadow_provider_cost: 0.0,
             model_costs: BTreeMap::new(),
             realized_cost: 0.0,
             baseline_cost: 0.0,
@@ -272,6 +276,31 @@ impl GatewayMetrics {
         );
         saturating_increment(state.deployment_selections.entry(key).or_default());
         Ok(())
+    }
+
+    /// Count one bounded prompt-free shadow event.
+    pub fn observe_shadow_event(&self, event: &str, candidate: &str) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        let key = bounded_pair_key(
+            &state.shadow_events,
+            (bounded_label(event), bounded_label(candidate)),
+            self.max_label_series,
+        );
+        saturating_increment(state.shadow_events.entry(key).or_default());
+    }
+
+    /// Accumulate the estimated cost of explicitly authorized provider shadows.
+    pub fn observe_shadow_cost(&self, cost: f64) {
+        if !cost.is_finite() || cost < 0.0 {
+            return;
+        }
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.shadow_provider_cost =
+            python_round((state.shadow_provider_cost + cost).min(f64::MAX), 6);
     }
 
     /// Record one exact-match cache hit and its avoided upstream cost.
@@ -697,6 +726,31 @@ fn render_state(version: &str, state: &MetricsState) -> String {
             );
         }
     }
+    if !state.shadow_events.is_empty() {
+        output.push_str(
+            "# HELP wayfinder_router_shadow_events_total Bounded prompt-free shadow-routing events (WF-ADR-0063).\n",
+        );
+        output.push_str("# TYPE wayfinder_router_shadow_events_total counter\n");
+        for ((event, candidate), count) in &state.shadow_events {
+            let _ = writeln!(
+                output,
+                "wayfinder_router_shadow_events_total{{event=\"{}\",candidate=\"{}\"}} {count}",
+                label_escape(event),
+                label_escape(candidate)
+            );
+        }
+    }
+    if state.shadow_provider_cost > 0.0 {
+        output.push_str(
+            "# HELP wayfinder_router_shadow_provider_cost_total Estimated cost of explicitly authorized provider comparisons (WF-ADR-0063).\n",
+        );
+        output.push_str("# TYPE wayfinder_router_shadow_provider_cost_total counter\n");
+        let _ = writeln!(
+            output,
+            "wayfinder_router_shadow_provider_cost_total {}",
+            python_general(state.shadow_provider_cost)
+        );
+    }
     if !state.deployment_ttft.is_empty() {
         output.push_str("# HELP wayfinder_router_deployment_time_to_first_token_seconds Deployment time to first token by concrete target.\n");
         output
@@ -765,6 +819,8 @@ mod tests {
         metrics.observe_deployment_throughput("cloud#eu", 100.0)?;
         metrics.observe_deployment_capacity("cloud#eu", 0.25)?;
         metrics.observe_deployment_selection("cloud", "cloud#eu", "latency")?;
+        metrics.observe_shadow_event("divergence", "candidate");
+        metrics.observe_shadow_cost(0.02);
         metrics.observe_cache_hit(0.01)?;
         metrics.observe_cache_miss()?;
         metrics.observe_rate_limited("rpm")?;
@@ -796,6 +852,10 @@ mod tests {
         assert!(text.contains(
             "wayfinder_router_deployment_time_to_first_token_seconds_count{deployment=\"cloud#eu\"} 1"
         ));
+        assert!(text.contains(
+            "wayfinder_router_shadow_events_total{event=\"divergence\",candidate=\"candidate\"} 1"
+        ));
+        assert!(text.contains("wayfinder_router_shadow_provider_cost_total 0.02"));
         assert!(text.contains("wayfinder_router_peak_in_flight_deliveries 1"));
         assert!(text.contains("wayfinder_router_in_flight_deliveries 0"));
         assert!(text.contains("wayfinder_router_admission_queue_wait_seconds_count 1"));

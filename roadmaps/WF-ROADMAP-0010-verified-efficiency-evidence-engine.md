@@ -47,6 +47,13 @@ requests reach delivery without router serialization. These are single-process
 limits; shared admission and accounting remain prerequisites for a truthful
 multi-replica claim.
 
+Issue #150 now supplies the Rust shadow-mode seam described below. The initial
+slice deliberately stays conservative: named-route counterfactual decisions,
+prompt-free bounded records, and explicitly consented provider comparisons are
+process-local and off-path. Report generation, fleet aggregation, and canary
+enforcement remain follow-on slices (#151–#153); the historical Python names in
+the original design are not runtime dependencies.
+
 WF-ADR-0052 adds bounded workspace policy above virtual keys: shared
 process-local RPM/TPM, inherited model allowlists, stable public model aliases,
 and explicit workspace response attribution. It also fixes the enterprise
