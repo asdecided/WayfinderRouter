@@ -87,11 +87,51 @@ The operator-only evidence surfaces are:
 | `GET /v1/evidence` (or `/router/evidence`) | deterministic `wf-evidence-v1` JSON report with sample counts, missingness, provider outcomes, cost class, quality labels, confidence intervals, evaluator agreement, and a tri-state outcome |
 | `GET /v1/evidence.txt` (or `/router/evidence.txt`) | self-contained human-readable report; it makes no external requests |
 | `POST /v1/evidence/labels` (or `/router/evidence/labels`) | add bounded `human` or versioned `automated` labels keyed by retained request ID and candidate route |
+| `GET /v1/canary` (or `/router/canary`) | operator-authenticated `wf-canary-v1` rollout state, bounded fleet counters, and shared rollback reason |
 
 The label endpoint rejects unknown fields, including `prompt` and `response`,
 and is covered by the same operator authentication and audit boundary as
 other `/router/*` surfaces. Content retention is not implemented by this
 release.
+
+## Canary rollouts and tripwires (opt-in)
+
+Canary routing is a post-decision gate for Automatic/scored requests only. It
+does not change the deterministic score, privacy filtering, explicit pins, or
+named preset behavior. Every enabled rollout requires fleet Redis state so
+exposure, observations, and rollback are shared by all replicas:
+
+```toml
+[gateway.canary]
+enabled = true
+rollout_id = "release-2026-08"
+candidate_route = "candidate"
+fraction = 0.05
+scope = "workspace" # request, workspace, key, or cohort
+max_requests = 1000
+window = 300
+min_samples = 30
+max_error_rate = 0.20
+max_latency_ms = 30000
+max_cost_multiplier = 2.0
+max_quality_loss = 0.10
+rollback_hold = 900
+```
+
+The identity scope is hashed with the rollout ID. `request` may be stabilized
+by `x-wayfinder-canary-identity`; `workspace` and `key` use the authenticated
+policy identity; `cohort` requires a matching configured value and
+`x-wayfinder-canary-cohort`. A request must pass the deterministic fraction and
+the fixed-window `max_requests` ceiling. Missing identity, candidate
+eligibility, Redis state, or a prior rollback suppresses canary assignment and
+leaves the normal route active.
+
+After the bounded minimum sample, fleet counters evaluate error rate, mean
+latency, priced cost multiplier, and labelled quality loss. The first failing
+tripwire writes a shared rollback reason and stops new assignments for
+`rollback_hold` seconds. Observations are prompt-free and idempotent by request
+ID; the operator audit log records rollback identity and reason only. See
+[WF-ADR-0065](../decisions/WF-ADR-0065-bounded-canary-rollouts.md).
 
 ## ChatGPT account provider (opt-in)
 
@@ -201,7 +241,7 @@ unchanged). See [WF-ADR-0058](../decisions/WF-ADR-0058-opentelemetry-observabili
 | setting | effect |
 | --- | --- |
 | `[gateway.rate_limit] rpm` / `tpm` / `window` | cap requests and/or upstream tokens over a fixed `window` (default 60s). RPM is admitted before scoring. Immediately before provider delivery, TPM reserves the complete sanitized request's encoded byte length plus explicit `max_tokens` or `max_completion_tokens` multiplied by `n`; requests without a positive output bound return `422 wayfinder_router_token_bound_required`. Exact provider usage reconciles the same window; missing/estimated usage, cancellation, or disconnect retains the conservative charge. A breach returns `429` with `Retry-After`; successful responses carry `X-RateLimit-Limit`/`-Remaining`/`-Reset` (WF-ADR-0034) |
-| `[gateway.state] backend = memory\|redis` / `url` / `namespace` | choose the shared policy-state backend. `memory` is the zero-configuration default; `redis` uses atomic server-time fixed windows for global, workspace, and virtual-key RPM/TPM across replicas and also coordinates realized accounting, workspace/key/global budgets, fleet admission, provider circuit health, and the optional shared response cache. Use certificate-validated `rediss://` outside a trusted local network. Backend, URL, and namespace changes are restart-only so reload cannot strand counters, audit events, or retained cache bodies in a previous destination. A Redis outage falls back to bounded process-local policy primitives and sets `wayfinder_state_degraded 1`; cache reads/writes become misses/no-stores and never relax auth, routing, privacy, budgets, or admission. The response cache remains process-local unless `[gateway.cache].backend = "redis"` is explicitly enabled (WF-ADR-0053, WF-ADR-0060, WF-ADR-0061) |
+| `[gateway.state] backend = memory\|redis` / `url` / `namespace` | choose the shared policy-state backend. `memory` is the zero-configuration default; `redis` uses atomic server-time fixed windows for global, workspace, and virtual-key RPM/TPM across replicas and also coordinates realized accounting, workspace/key/global budgets, fleet admission, provider circuit health, canary exposure/tripwires, and the optional shared response cache. Use certificate-validated `rediss://` outside a trusted local network. Backend, URL, and namespace changes are restart-only so reload cannot strand counters, audit events, or retained cache bodies in a previous destination. A Redis outage falls back to bounded process-local policy primitives and sets `wayfinder_state_degraded 1`; cache reads/writes become misses/no-stores and never relax auth, routing, privacy, budgets, admission, or canary exposure. The response cache remains process-local unless `[gateway.cache].backend = "redis"` is explicitly enabled (WF-ADR-0053, WF-ADR-0060, WF-ADR-0061) |
 
 ## Virtual API keys
 

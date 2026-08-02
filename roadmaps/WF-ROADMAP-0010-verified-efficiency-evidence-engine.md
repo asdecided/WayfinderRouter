@@ -61,6 +61,13 @@ historical Python plan: no prompt/response retention, no HTML renderer, and no
 fleet aggregation yet. Sparse, missing, conflicting, or statistically
 inconclusive inputs return `keep-shadowing` rather than a quality claim.
 
+Issue #152 adds the Rust canary gate: deterministic assignment across request,
+workspace, key, or approved cohort identities; a Redis fixed-window exposure
+ceiling; prompt-free fleet counters; and automatic error, latency, cost, and
+quality tripwires with shared rollback and audit state. An unavailable or
+degraded telemetry/state authority suppresses new canary exposure rather than
+expanding it. The deterministic scorer remains the sole routing authority.
+
 WF-ADR-0052 adds bounded workspace policy above virtual keys: shared
 process-local RPM/TPM, inherited model allowlists, stable public model aliases,
 and explicit workspace response attribution. It also fixes the enterprise

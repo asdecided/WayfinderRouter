@@ -12,6 +12,7 @@ pub mod audit;
 pub mod auth;
 pub mod budget;
 pub mod cache;
+pub mod canary;
 pub mod codex_control;
 pub mod decision_policy;
 pub mod delivery;
@@ -54,7 +55,8 @@ use tower::ServiceExt;
 use uuid::Uuid;
 use wayfinder_config::dump_routing_toml;
 use wayfinder_config::gateway::{
-    DeploymentSelectionPolicy, GatewayModel, ProviderKind, ProviderTier, RoutePreset, ShadowConfig,
+    CanaryConfig, DeploymentSelectionPolicy, GatewayModel, ProviderKind, ProviderTier, RoutePreset,
+    ShadowConfig,
 };
 use wayfinder_providers::anthropic::{
     MessagesStreamTranslator, anthropic_error, anthropic_to_openai_request,
@@ -87,6 +89,7 @@ use crate::cache::{
     cache_key_with_version, decode_shared_response, encode_shared_response, is_cacheable,
     is_storable,
 };
+use crate::canary::{CANARY_COHORT_HEADER, CANARY_IDENTITY_HEADER, CANARY_RESPONSE_HEADER};
 use crate::decision_policy::{
     AUTO_MODEL, PREFER_HIGH, PREFER_HIGH_ALIAS, PREFER_LOW, ROUTE_ON_HEADER,
     STICKY_COOLDOWN_HEADER, STICKY_HEADER, THRESHOLD_HEADER, TUNING_FIELD, apply_scoring_overrides,
@@ -107,7 +110,10 @@ use crate::recent::{RecentCost, RecentEntry, RecentRoutes};
 use crate::reliability::{ReliabilityAttempt, ReliabilityError, ReliabilityPolicy, sleep_retry};
 use crate::reload::LastGood;
 use crate::shadow::{ShadowJob, ShadowSnapshot, ShadowStore};
-use crate::state::{SharedBudgetReservation, SharedCachePut, SharedCostObservation, StateBackend};
+use crate::state::{
+    SharedBudgetReservation, SharedCachePut, SharedCanaryObservation, SharedCanarySnapshot,
+    SharedCostObservation, StateBackend, StateLimitConfig,
+};
 
 fn shared_state_identity(config: &wayfinder_config::gateway::StateConfig) -> [u8; 32] {
     let mut digest = Sha256::new();
@@ -120,6 +126,242 @@ fn shared_state_identity(config: &wayfinder_config::gateway::StateConfig) -> [u8
         digest.update([0]);
     }
     digest.finalize().into()
+}
+
+struct CanaryContext {
+    state: AppState,
+    request_id: String,
+    rollout_id: String,
+    baseline_route: String,
+    candidate_route: String,
+    started: Instant,
+}
+
+struct CanaryObservationGuard {
+    context: Option<CanaryContext>,
+}
+
+impl CanaryObservationGuard {
+    async fn finish(&mut self, succeeded: bool, route: &str, usage: Option<AccountedUsage>) {
+        let Some(context) = self.context.take() else {
+            return;
+        };
+        record_canary_outcome(context, succeeded, route, usage).await;
+    }
+}
+
+impl Drop for CanaryObservationGuard {
+    fn drop(&mut self) {
+        let Some(context) = self.context.take() else {
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
+            record_canary_outcome(context, false, "canary-error", None).await;
+        });
+    }
+}
+
+fn wall_clock_seconds() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |duration| duration.as_secs_f64())
+}
+
+struct CanaryRequest<'a> {
+    request_id: &'a str,
+    baseline_route: &'a str,
+    routing_request: &'a RoutingRequest,
+    offline: bool,
+    prompt_estimate: u64,
+    workspace_id: Option<&'a str>,
+    key_id: Option<&'a str>,
+    access_grant: Option<AccessGrant>,
+    headers: &'a HeaderMap,
+}
+
+async fn maybe_assign_canary(
+    state: &AppState,
+    request: CanaryRequest<'_>,
+) -> Option<CanaryObservationGuard> {
+    let config = state.canary_config();
+    if !config.enabled || config.fraction <= 0.0 {
+        return None;
+    }
+    let backend = state
+        .shared_state_backend()
+        .filter(|backend| backend.backend_name() == "redis")?;
+    let now = wall_clock_seconds();
+    let snapshot = backend
+        .canary_snapshot(&config.rollout_id, config.window, now)
+        .await
+        .ok()?;
+    if snapshot.tripped_reason.is_some() {
+        return None;
+    }
+    let identity_header = request_header(request.headers, CANARY_IDENTITY_HEADER)
+        .ok()
+        .flatten();
+    let cohort_header = request_header(request.headers, CANARY_COHORT_HEADER)
+        .ok()
+        .flatten();
+    let assignment = crate::canary::assignment_identity(
+        config,
+        request.request_id,
+        request.workspace_id,
+        request.key_id,
+        identity_header,
+        cohort_header,
+    );
+    let crate::canary::Assignment::Eligible { .. } = assignment else {
+        return None;
+    };
+    let exposure = backend
+        .admit(
+            &format!("canary-exposure:{}", config.rollout_id),
+            StateLimitConfig {
+                rpm: Some(config.max_requests),
+                tpm: None,
+                window_seconds: config.window,
+            },
+            now,
+        )
+        .await
+        .ok()?;
+    if exposure.limited_by.is_some() {
+        return None;
+    }
+    let route = state.route_preset(&config.candidate_route)?;
+    let allowed_models = state
+        .access_policy()
+        .and_then(|policy| {
+            request
+                .access_grant
+                .map(|grant| policy.allowed_models(grant))
+        })
+        .filter(|allowed| !allowed.is_empty());
+    let candidate_route = route
+        .models
+        .iter()
+        .find(|name| {
+            let Some(model) = state.models().iter().find(|model| model.name() == *name) else {
+                return false;
+            };
+            assess_model(request.routing_request, model).is_eligible()
+                && (!request.offline || model_is_proven_local(model))
+                && precheck_ok(request.prompt_estimate, model.context_window())
+                && has_eligible_deployment_target(
+                    state,
+                    name,
+                    request.routing_request,
+                    request.offline,
+                    request.prompt_estimate,
+                )
+                && allowed_models
+                    .as_ref()
+                    .is_none_or(|allowed| allowed.iter().any(|allowed| allowed == *name))
+        })?
+        .clone();
+    Some(CanaryObservationGuard {
+        context: Some(CanaryContext {
+            state: state.clone(),
+            request_id: request.request_id.to_owned(),
+            rollout_id: config.rollout_id.clone(),
+            baseline_route: request.baseline_route.to_owned(),
+            candidate_route,
+            started: Instant::now(),
+        }),
+    })
+}
+
+async fn record_canary_outcome(
+    context: CanaryContext,
+    succeeded: bool,
+    route: &str,
+    usage: Option<AccountedUsage>,
+) {
+    let Some(backend) = context
+        .state
+        .shared_state_backend()
+        .filter(|backend| backend.backend_name() == "redis")
+    else {
+        return;
+    };
+    let cost = usage.and_then(|usage| {
+        turn_cost(
+            route,
+            i64::try_from(usage.prompt_tokens).ok()?,
+            i64::try_from(usage.completion_tokens).ok()?,
+            &context.state.price_table().costs,
+            usage.estimated,
+            None,
+        )
+        .ok()
+    });
+    let baseline_cost = usage.and_then(|usage| {
+        turn_cost(
+            &context.baseline_route,
+            i64::try_from(usage.prompt_tokens).ok()?,
+            i64::try_from(usage.completion_tokens).ok()?,
+            &context.state.price_table().costs,
+            usage.estimated,
+            None,
+        )
+        .ok()
+    });
+    let observation = SharedCanaryObservation {
+        rollout_id: context.rollout_id.clone(),
+        request_id: context.request_id,
+        succeeded,
+        latency_ms: u64::try_from(context.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        realized_cost: cost.map(|cost| cost.realized),
+        baseline_cost: baseline_cost.map(|cost| cost.realized),
+        quality_loss: None,
+    };
+    let now = wall_clock_seconds();
+    let _ = backend
+        .record_canary(observation, context.state.canary_config().window, now)
+        .await;
+    let Ok(snapshot) = backend
+        .canary_snapshot(
+            &context.rollout_id,
+            context.state.canary_config().window,
+            now,
+        )
+        .await
+    else {
+        return;
+    };
+    if let Some(tripwire) = crate::canary::tripwire(context.state.canary_config(), snapshot) {
+        let reason = tripwire.as_str();
+        if backend
+            .trip_canary(
+                &context.rollout_id,
+                reason,
+                context.state.canary_config().rollback_hold,
+                now,
+            )
+            .await
+            .is_ok()
+        {
+            let _ = context
+                .state
+                .audit_log()
+                .record(
+                    "canary",
+                    "canary.rollback",
+                    None,
+                    Some(json!({
+                        "rollout_id": context.rollout_id,
+                        "reason": reason,
+                        "candidate_route": context.candidate_route,
+                    })),
+                )
+                .await;
+        }
+    }
 }
 
 fn cache_generation(
@@ -507,6 +749,7 @@ pub struct AppState {
     shadow_store: Arc<ShadowStore>,
     shadow_slots: Arc<tokio::sync::Semaphore>,
     evidence_labels: Arc<EvidenceStore>,
+    canary_config: Arc<CanaryConfig>,
     offline: bool,
     dry_run: bool,
     route_on: RouteOn,
@@ -587,6 +830,7 @@ impl AppState {
                     .unwrap_or(1),
             )),
             evidence_labels: Arc::new(EvidenceStore::default()),
+            canary_config: Arc::new(CanaryConfig::default()),
             offline,
             dry_run: false,
             route_on: RouteOn::Turn,
@@ -878,6 +1122,34 @@ impl AppState {
         Ok(self)
     }
 
+    /// Attach a bounded production canary. Enabled rollouts require Redis so
+    /// exposure, telemetry, and rollback are shared by every replica.
+    pub fn with_gateway_canary(
+        mut self,
+        config: &wayfinder_config::gateway::GatewayConfig,
+    ) -> Result<Self, String> {
+        let canary = config.canary.clone();
+        if canary.enabled {
+            if self
+                .shared_state_backend
+                .as_ref()
+                .is_none_or(|backend| backend.backend_name() != "redis")
+            {
+                return Err(
+                    "gateway.canary.enabled requires gateway.state.backend = redis".to_owned(),
+                );
+            }
+            if canary.fraction <= 0.0 || canary.candidate_route.is_empty() {
+                return Err(
+                    "gateway.canary.enabled requires a positive fraction and candidate route"
+                        .to_owned(),
+                );
+            }
+        }
+        self.canary_config = Arc::new(canary);
+        Ok(self)
+    }
+
     /// Attach an opt-in bounded exact-response cache and monotonic clock.
     pub fn with_cache_and_clock(
         mut self,
@@ -1035,6 +1307,12 @@ impl AppState {
     #[must_use]
     pub fn route_preset(&self, name: &str) -> Option<&RoutePreset> {
         self.route_presets.get(name)
+    }
+
+    /// Active bounded production canary policy.
+    #[must_use]
+    pub fn canary_config(&self) -> &CanaryConfig {
+        &self.canary_config
     }
 
     /// Return a deterministic weighted order of concrete targets for an alias.
@@ -1488,6 +1766,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/router/evidence", get(evidence_report_json))
         .route("/router/evidence.txt", get(evidence_report_text))
         .route("/router/evidence/labels", post(evidence_labels))
+        .route("/router/canary", get(canary_status))
         .route("/v1/savings", get(savings_report))
         .route("/savings", get(savings_report))
         .route("/v1/evidence", get(evidence_report_json))
@@ -1496,6 +1775,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/evidence.txt", get(evidence_report_text))
         .route("/v1/evidence/labels", post(evidence_labels))
         .route("/evidence/labels", post(evidence_labels))
+        .route("/v1/canary", get(canary_status))
+        .route("/canary", get(canary_status))
         .route("/router/config", post(router_config))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1929,6 +2210,67 @@ async fn evidence_report_text(
         .into_response()
 }
 
+async fn canary_status(
+    State(state): State<AppState>,
+    actor: Option<Extension<audit::AuditActor>>,
+) -> Response {
+    let config = state.canary_config();
+    let snapshot = if config.enabled {
+        let Some(backend) = state
+            .shared_state_backend()
+            .filter(|backend| backend.backend_name() == "redis")
+        else {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "wayfinder_router_canary_state_unavailable",
+                "enabled canary state requires the configured Redis fleet authority".to_owned(),
+                HeaderMap::new(),
+            );
+        };
+        match backend
+            .canary_snapshot(&config.rollout_id, config.window, wall_clock_seconds())
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                return error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "wayfinder_router_canary_state_unavailable",
+                    "canary fleet state is unavailable; rollout remains fail-closed".to_owned(),
+                    HeaderMap::new(),
+                );
+            }
+        }
+    } else {
+        SharedCanarySnapshot::default()
+    };
+    if let Err(error) = record_evidence_audit(&state, actor, "canary.status").await {
+        return error;
+    }
+    Json(json!({
+        "schema_version": "wf-canary-v1",
+        "enabled": config.enabled,
+        "rollout_id": config.rollout_id,
+        "candidate_route": config.candidate_route,
+        "fraction": config.fraction,
+        "scope": config.scope,
+        "max_requests": config.max_requests,
+        "window": config.window,
+        "rollback_hold": config.rollback_hold,
+        "requests": snapshot.requests,
+        "errors": snapshot.errors,
+        "latency_sum_ms": snapshot.latency_sum_ms,
+        "latency_samples": snapshot.latency_samples,
+        "realized_cost": snapshot.realized_cost,
+        "baseline_cost": snapshot.baseline_cost,
+        "cost_samples": snapshot.cost_samples,
+        "quality_loss": snapshot.quality_loss,
+        "quality_samples": snapshot.quality_samples,
+        "tripped_reason": snapshot.tripped_reason,
+    }))
+    .into_response()
+}
+
 async fn evidence_labels(
     State(state): State<AppState>,
     actor: Option<Extension<audit::AuditActor>>,
@@ -2234,6 +2576,12 @@ async fn chat_completions(
         Ok(grant) => grant,
         Err(response) => return *response,
     };
+    let key_id = state
+        .access_policy()
+        .and_then(|policy| access_grant.and_then(|grant| policy.key_id(grant)));
+    let workspace_id = state
+        .access_policy()
+        .and_then(|policy| access_grant.and_then(|grant| policy.workspace_id(grant)));
     let tuning = body.remove(TUNING_FIELD);
     let routing = match apply_scoring_overrides(state.routing(), tuning.as_ref()) {
         Ok(routing) => routing,
@@ -2450,12 +2798,6 @@ async fn chat_completions(
         }
     }
 
-    let key_id = state
-        .access_policy()
-        .and_then(|policy| access_grant.and_then(|grant| policy.key_id(grant)));
-    let workspace_id = state
-        .access_policy()
-        .and_then(|policy| access_grant.and_then(|grant| policy.workspace_id(grant)));
     let mut budget_state = None;
     if state.budget_policy().active() && state.price_table().priced {
         let today = match utc_today() {
@@ -2569,6 +2911,34 @@ async fn chat_completions(
             }
         }
     }
+    let canary_guard = if !state.dry_run() && !preset_route_active && mode == "scored" {
+        maybe_assign_canary(
+            &state,
+            CanaryRequest {
+                request_id: &request_id,
+                baseline_route: &chosen,
+                routing_request: &routing_request,
+                offline,
+                prompt_estimate,
+                workspace_id,
+                key_id,
+                access_grant,
+                headers: &headers,
+            },
+        )
+        .await
+    } else {
+        None
+    };
+    if let Some(candidate) = canary_guard.as_ref().and_then(|guard| {
+        guard
+            .context
+            .as_ref()
+            .map(|context| context.candidate_route.clone())
+    }) {
+        chosen = candidate;
+        mode = "canary";
+    }
     let mut routing_headers =
         match decision_headers(&chosen, decision.score, mode, &request_id, offline) {
             Ok(headers) => headers,
@@ -2595,6 +2965,20 @@ async fn chat_completions(
     }
     if let Some(budget_state) = budget_state {
         routing_headers.insert(ROUTER_BUDGET_HEADER, HeaderValue::from_static(budget_state));
+    }
+    if canary_guard.is_some() {
+        if let Err(message) = insert_header(
+            &mut routing_headers,
+            CANARY_RESPONSE_HEADER,
+            &state.canary_config().rollout_id,
+        ) {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "wayfinder_router_misconfigured",
+                message,
+                request_id_headers(&request_id),
+            );
+        }
     }
     if let Some(route_name) = preset_name.as_deref() {
         if let Err(message) = insert_header(
@@ -3043,6 +3427,7 @@ async fn chat_completions(
             admission_permit,
             token_reservation,
             shared_budget,
+            canary_guard,
         })
         .await;
     }
@@ -3126,6 +3511,11 @@ async fn chat_completions(
         },
     )
     .await;
+    if let Some(mut guard) = canary_guard {
+        guard
+            .finish(status.is_success(), &served_by, accounted)
+            .await;
+    }
     if let (Some("miss"), Some(usage)) = (cache_state, accounted) {
         let response_value = if !body.is_empty() && response_content_type.contains("json") {
             serde_json::from_slice(&body).unwrap_or(Value::Null)
@@ -3619,6 +4009,7 @@ struct StreamRelayContext {
     reliability_attempt: Option<CombinedReliabilityAttempt>,
     _admission_permit: ObservedAdmissionPermit,
     shared_budget: Option<SharedBudgetLease>,
+    canary_guard: Option<CanaryObservationGuard>,
 }
 
 struct StreamingChatInput {
@@ -3637,6 +4028,7 @@ struct StreamingChatInput {
     admission_permit: ObservedAdmissionPermit,
     token_reservation: Option<TokenReservation>,
     shared_budget: Option<SharedBudgetLease>,
+    canary_guard: Option<CanaryObservationGuard>,
 }
 
 #[cfg_attr(
@@ -3660,6 +4052,7 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
         admission_permit,
         token_reservation,
         shared_budget,
+        canary_guard,
     } = input;
     if state.streaming_delivery().is_none() {
         return error_response(
@@ -3918,6 +4311,7 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
         reliability_attempt: Some(reliability_attempt),
         _admission_permit: admission_permit,
         shared_budget,
+        canary_guard,
     };
     let body_stream = stream::unfold(
         Some((context, response.into_stream())),
@@ -4033,7 +4427,7 @@ async fn finish_stream_success(context: &mut StreamRelayContext) {
     if let Some(attempt) = context.reliability_attempt.take() {
         let _ = attempt.complete(true).await;
     }
-    let _ = account_stream_success(
+    let usage = account_stream_success(
         &context.state,
         StreamAccounting {
             route: &context.target_name,
@@ -4046,6 +4440,9 @@ async fn finish_stream_success(context: &mut StreamRelayContext) {
         },
     )
     .await;
+    if let Some(mut guard) = context.canary_guard.take() {
+        guard.finish(true, &context.target_name, usage).await;
+    }
 }
 
 fn stream_failure_type(error: &DeliveryError) -> &'static str {
@@ -7112,6 +7509,10 @@ mod tests {
         let text = String::from_utf8(to_bytes(text.into_body(), usize::MAX).await?.to_vec())?;
         assert!(text.contains("Wayfinder evidence report wf-evidence-v1"));
         assert!(!text.contains("must not be retained"));
+
+        let canary = get(&state, "/v1/canary").await?;
+        assert_eq!(canary.status(), StatusCode::OK);
+        assert_eq!(json_body(canary).await?["schema_version"], "wf-canary-v1");
         Ok(())
     }
 
