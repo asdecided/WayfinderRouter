@@ -22,17 +22,20 @@ Files in this directory:
 
 Drop both into your LibreChat checkout (as `./librechat.yaml` and
 `./docker-compose.override.yml`), put your routing config in
-`./wayfinder-data/wayfinder-router.toml`, then `docker compose up`. Pick "Wayfinder"
-as the endpoint; the model dropdown (`auto` / `prefer-local` / `prefer-hosted` / a
-pinned endpoint) sets the routing mode for that conversation.
+`./wayfinder-config/wayfinder-router.toml`, and export the plaintext virtual key
+as `WAYFINDER_VIRTUAL_KEY` before running `docker compose up`. Its SHA-256 hash
+must be configured under the matching `[gateway.keys.<id>]` entry. Pick
+"Wayfinder" as the endpoint; the model dropdown (`auto` / `prefer-local` /
+`prefer-hosted` / a pinned endpoint) sets the routing mode for that conversation.
 
 ## Open WebUI
 
 No file needed — it's all connection config:
 
 1. Settings → **Connections** → add an **OpenAI API** connection.
-2. **Base URL**: your gateway's `…:8088/v1`. **API Key**: any placeholder (the
-   gateway ignores it).
+2. **Base URL**: your gateway's `…:8088/v1`. **API Key**: the plaintext virtual
+   key minted with `wayfinder-router keys new --id <id>`. Store only its SHA-256
+   hash in the gateway TOML.
 3. Open WebUI fetches `/v1/models` and populates the selector with the routing
    options (`auto`, `prefer-local`, `prefer-hosted`, and your configured endpoints).
 

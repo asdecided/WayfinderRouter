@@ -70,7 +70,7 @@ redis:
   port: 6379
   url: ""
   persistence:
-    enabled: false
+    enabled: true
     size: 8Gi
     storageClass: ""
   resources: {}

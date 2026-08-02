@@ -57,6 +57,14 @@ wayfinder-router serve \
 The process refuses to start if the data plane has no virtual keys or no model
 destinations. A non-loopback bind without `--surface data-plane` also fails.
 
+The supported container layout keeps configuration read-only at
+`/etc/wayfinder/wayfinder-router.toml` and writes the local audit fallback and
+savings snapshot under `/var/lib/wayfinder`. The native CLI probes both
+persistence targets before it binds the listener and exits with an actionable
+path error when their directory or existing file is not writable. In
+Kubernetes, give every replica its own runtime-state volume; do not share one
+file-backed ledger across replicas.
+
 ## Concurrent users and overload
 
 One process admits 32 simultaneous upstream deliveries and up to 64 bounded

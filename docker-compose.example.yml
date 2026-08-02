@@ -1,10 +1,10 @@
-# Example deployment (WF-ADR-0008): the routing gateway plus a one-shot
-# recalibration service. Copy, adjust, and `docker compose up gateway`.
+# Example managed deployment. Copy config/wayfinder-router.toml, add at least
+# one virtual key and model, then run `docker compose up gateway`.
 #
 # Point your app's OpenAI-compatible client at http://localhost:8088/v1.
-# The ./data volume holds wayfinder-router.toml (the routing + [gateway.models] config)
-# and wayfinder-router-feedback.jsonl (the label log). Keys come from the environment,
-# referenced by name via each model's api_key_env — never stored in the image.
+# Configuration is mounted read-only. Audit and savings state use a separate
+# writable volume. Provider keys come from environment variables referenced by
+# name in the TOML and are never stored in the image.
 
 services:
   gateway:
@@ -12,18 +12,19 @@ services:
     ports:
       - "8088:8088"
     volumes:
-      - ./data:/data            # wayfinder-router.toml + wayfinder-router-feedback.jsonl
+      - ./config:/etc/wayfinder:ro
+      - wayfinder-state:/var/lib/wayfinder
     environment:
       # The names here must match the api_key_env values in wayfinder-router.toml.
       - EXAMPLE_API_KEY=${EXAMPLE_API_KEY:-}
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: unless-stopped
 
-  # Re-fit the routing config from the feedback log, then exit. Run on a schedule
-  # (host cron / k8s CronJob: `docker compose run --rm recalibrate`); the gateway
-  # hot-reloads the new wayfinder-router.toml without a restart.
-  recalibrate:
-    build: .
-    volumes:
-      - ./data:/data
-    profiles: ["tools"]
-    command: ["wayfinder-router", "recalibrate", "--mode", "threshold"]
+volumes:
+  wayfinder-state:

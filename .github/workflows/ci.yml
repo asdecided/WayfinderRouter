@@ -46,10 +46,54 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Build the gateway image
         run: docker build -t wayfinder-router:ci .
+      - name: Smoke the immutable non-root runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          config_dir="$RUNNER_TEMP/router-config"
+          mkdir -p "$config_dir"
+          key_hash="$(printf 'wf-ci' | sha256sum | cut -d ' ' -f 1)"
+          cat > "$config_dir/wayfinder-router.toml" <<EOF
+          [gateway.models.local]
+          base_url = "http://127.0.0.1:11434/v1"
+          model = "ci-local"
+
+          [gateway.keys.ci]
+          hash = "$key_hash"
+          EOF
+          docker volume create wayfinder-ci-state >/dev/null
+          trap 'docker rm -f wayfinder-router-ci >/dev/null 2>&1 || true; docker volume rm wayfinder-ci-state >/dev/null 2>&1 || true' EXIT
+          docker run --detach --name wayfinder-router-ci \
+            --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --mount "type=bind,src=$config_dir,dst=/etc/wayfinder,readonly" \
+            --mount type=volume,src=wayfinder-ci-state,dst=/var/lib/wayfinder \
+            --publish 18088:8088 wayfinder-router:ci >/dev/null
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:18088/readyz >/dev/null; then
+              break
+            fi
+            if (( attempt == 30 )); then
+              docker logs wayfinder-router-ci
+              exit 1
+            fi
+            sleep 1
+          done
+          test "$(docker inspect --format '{{.Config.User}}' wayfinder-router-ci)" = "10001:10001"
+          test "$(docker exec wayfinder-router-ci id -u)" = "10001"
+          test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' wayfinder-router-ci)" = "true"
+          docker inspect wayfinder-router-ci | jq -e \
+            '.[0].Mounts[] | select(.Destination == "/etc/wayfinder") | .RW == false' >/dev/null
+          docker inspect wayfinder-router-ci | jq -e \
+            '.[0].Mounts[] | select(.Destination == "/var/lib/wayfinder") | .RW == true' >/dev/null
+          docker exec wayfinder-router-ci test -f /var/lib/wayfinder/wayfinder-audit.jsonl
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:18088/v1/models)" = "401"
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --header 'Authorization: Bearer wf-ci' http://127.0.0.1:18088/v1/models)" = "200"
 
   client-contract:
     # The shared JS decision preview remains checked against the frozen migration

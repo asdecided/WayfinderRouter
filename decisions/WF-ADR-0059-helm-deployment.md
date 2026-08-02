@@ -27,6 +27,13 @@ The chart owns deployment wiring only:
 - a PodDisruptionBudget, security context, service account, and NetworkPolicy;
 - references to operator-owned configuration and credential Secrets.
 
+The runtime filesystem is split deliberately: projected configuration is a
+read-only directory at `/etc/wayfinder`, while each gateway Pod owns a writable
+`/var/lib/wayfinder` volume for its local audit fallback and savings snapshot.
+A shared file PVC is not mounted across replicas. The image and chart run as
+UID/GID `10001`, and the chart requires an explicit image tag or digest rather
+than silently deriving an image reference from `appVersion`.
+
 ## Boundaries
 
 The gateway remains the authority for virtual-key authentication, model
@@ -37,9 +44,11 @@ from an operator-supplied credentials Secret.
 
 TLS terminates at the Ingress/controller or an external load balancer. The Rust
 listener remains HTTP inside the cluster, matching the managed-surface and
-security documentation. The bundled Redis StatefulSet is an ephemeral
-development default; production installations should use a managed Redis
-endpoint or explicitly enable persistence.
+security documentation. The bundled Redis StatefulSet is a durable
+single-replica default with AOF, `appendfsync everysec`, and a `ReadWriteOnce`
+claim. Production installations should still prefer a managed Redis endpoint
+with an operator-owned availability, backup, TLS, and recovery policy.
+Disabling persistence is an explicit disposable-development choice.
 
 ## Consequences
 
@@ -47,9 +56,13 @@ endpoint or explicitly enable persistence.
   policy in the gateway binary.
 - Two gateway replicas can share the Redis policy backend without relying on
   process-local counters.
-- A default `helm install` renders successfully but intentionally cannot serve
-  traffic until the operator supplies a virtual key and model configuration;
-  this preserves the gateway's fail-closed data-plane contract.
+- Read-only-root containers fail at startup with an actionable path error when
+  audit or savings state is not writable, rather than appearing healthy and
+  losing persistence later.
+- A default `helm install` fails until the operator explicitly selects a
+  published image tag or digest, then the process still refuses traffic until
+  supplied with a virtual key and model configuration. Both boundaries fail
+  closed.
 - Helm is a packaging surface, not an operator control plane. Kubernetes secret
   rotation, TLS policy, ingress authentication, and Redis durability remain
   cluster/operator responsibilities.

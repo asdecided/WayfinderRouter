@@ -55,6 +55,10 @@ spec:
           env:
             - name: WAYFINDER_CONFIG
               value: /etc/wayfinder/wayfinder-router.toml
+            - name: WAYFINDER_ROUTER_AUDIT_FILE
+              value: /var/lib/wayfinder/wayfinder-audit.jsonl
+            - name: WAYFINDER_ROUTER_SAVINGS_FILE
+              value: /var/lib/wayfinder/wayfinder-savings.json
             {{- if .Values.otel.enabled }}
             - name: WAYFINDER_ROUTER_OTEL
               value: "1"
@@ -86,9 +90,10 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
             - name: config
-              mountPath: /etc/wayfinder/wayfinder-router.toml
-              subPath: wayfinder-router.toml
+              mountPath: /etc/wayfinder
               readOnly: true
+            - name: runtime-state
+              mountPath: /var/lib/wayfinder
             - name: tmp
               mountPath: /tmp
       volumes:
@@ -111,6 +116,8 @@ spec:
             name: {{ include "wayfinder-router.fullname" . }}-config
           {{- end }}
         - name: tmp
+          emptyDir: {}
+        - name: runtime-state
           emptyDir: {}
       {{- with .Values.nodeSelector }}
       nodeSelector:
