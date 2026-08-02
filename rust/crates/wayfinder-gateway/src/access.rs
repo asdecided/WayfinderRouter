@@ -301,18 +301,18 @@ impl AccessPolicy {
         &self,
         grant: AccessGrant,
     ) -> Result<bool, AccessPolicyError> {
-        if let Some(limiter) = &self.global_limiter
-            && limiter.tokens_active()?
-        {
-            return Ok(true);
+        if let Some(limiter) = &self.global_limiter {
+            if limiter.tokens_active()? {
+                return Ok(true);
+            }
         }
         let Some(key) = self.key(grant) else {
             return Ok(false);
         };
-        if let Some(limiter) = &key.workspace_limiter
-            && limiter.tokens_active()?
-        {
-            return Ok(true);
+        if let Some(limiter) = &key.workspace_limiter {
+            if limiter.tokens_active()? {
+                return Ok(true);
+            }
         }
         key.limiter
             .as_ref()
@@ -758,21 +758,21 @@ impl SharedAccessPolicy {
         now_seconds: f64,
     ) -> Result<TokenReservationDecision, SharedReservationError> {
         let mut limits = Vec::new();
-        if let Some(global) = &self.global
-            && global.config.tpm.is_some()
-        {
-            limits.push(global.clone());
+        if let Some(global) = &self.global {
+            if global.config.tpm.is_some() {
+                limits.push(global.clone());
+            }
         }
         if let Some(key) = grant.key_index.and_then(|index| self.keys.get(index)) {
-            if let Some(workspace) = &key.workspace
-                && workspace.config.tpm.is_some()
-            {
-                limits.push(workspace.clone());
+            if let Some(workspace) = &key.workspace {
+                if workspace.config.tpm.is_some() {
+                    limits.push(workspace.clone());
+                }
             }
-            if let Some(limiter) = &key.limiter
-                && limiter.config.tpm.is_some()
-            {
-                limits.push(limiter.clone());
+            if let Some(limiter) = &key.limiter {
+                if limiter.config.tpm.is_some() {
+                    limits.push(limiter.clone());
+                }
             }
         }
 
