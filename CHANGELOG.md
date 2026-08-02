@@ -8,6 +8,14 @@ details, release history over commit history.
 
 ### Added
 
+- **Bounded canary rollouts and tripwires** (WF-ADR-0065, issue #152). Automatic
+  routing can opt into stable request/workspace/key/cohort exposure for a named
+  candidate route. Redis-backed fixed-window exposure, prompt-free fleet
+  counters, error/latency/cost/quality tripwires, shared rollback state, and
+  operator audit records fail closed when identity, eligibility, telemetry, or
+  fleet state is unavailable. Explicit pins and the deterministic scored route
+  remain unchanged.
+
 - **Opt-in ChatGPT account routing for Desktop Chat** (WF-DESIGN-0018,
   WF-ROADMAP-0012, WF-ROADMAP-0015). The Rust gateway can now run an isolated, bounded Codex
   app-server provider and deliver text-only Chat through models available to an eligible signed-in

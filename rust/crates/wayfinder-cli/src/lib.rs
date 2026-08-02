@@ -807,6 +807,9 @@ async fn build_serve_state<W: Write>(
         .await
         .map_err(|error| error.to_string())?;
     state = state
+        .with_gateway_canary(&gateway)
+        .map_err(|error| error.to_string())?;
+    state = state
         .with_gateway_cache_async(&gateway)
         .await
         .map_err(|error| error.to_string())?;

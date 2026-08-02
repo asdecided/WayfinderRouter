@@ -23,6 +23,8 @@ use crate::rate_limit::{LimitKind, RateReservation, RateResult, RateSnapshot, Re
 
 const REDIS_KEY_ROOT: &str = "wayfinder:v1";
 const SHARED_COST_SCALE: f64 = 1_000_000.0;
+const SHARED_QUALITY_SCALE: f64 = 1_000_000.0;
+type CanaryRedisSnapshot = (i64, i64, i64, i64, i64, i64, i64, i64, i64, String);
 const SHARED_LEDGER_DAY_TTL_SECONDS: u64 = 400 * 24 * 60 * 60;
 const SHARED_LEDGER_MONTH_TTL_SECONDS: u64 = 5 * 365 * 24 * 60 * 60;
 const SHARED_LEDGER_IDEMPOTENCY_TTL_SECONDS: u64 = 5 * 365 * 24 * 60 * 60;
@@ -155,6 +157,50 @@ pub struct SharedCachePut {
     pub max_entries: usize,
     /// Maximum aggregate retained response-body bytes.
     pub max_bytes: usize,
+}
+
+/// One prompt-free canary outcome written to fleet state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharedCanaryObservation {
+    /// Stable rollout identifier.
+    pub rollout_id: String,
+    /// Request identity used for idempotent observation writes.
+    pub request_id: String,
+    /// Whether the canary response completed successfully.
+    pub succeeded: bool,
+    /// End-to-end provider latency in milliseconds.
+    pub latency_ms: u64,
+    /// Realized canary cost, when priced usage was available.
+    pub realized_cost: Option<f64>,
+    /// Counterfactual baseline cost, when priced usage was available.
+    pub baseline_cost: Option<f64>,
+    /// Quality loss relative to the approved baseline, when labelled.
+    pub quality_loss: Option<f64>,
+}
+
+/// Bounded fleet-wide canary counters for one fixed window.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SharedCanarySnapshot {
+    /// Number of unique canary observations in the active window.
+    pub requests: u64,
+    /// Number of failed observations in the active window.
+    pub errors: u64,
+    /// Sum of observed latency samples.
+    pub latency_sum_ms: u64,
+    /// Number of latency samples.
+    pub latency_samples: u64,
+    /// Sum of realized priced cost.
+    pub realized_cost: f64,
+    /// Sum of counterfactual baseline priced cost.
+    pub baseline_cost: f64,
+    /// Number of cost samples.
+    pub cost_samples: u64,
+    /// Sum of labelled quality loss.
+    pub quality_loss: f64,
+    /// Number of quality samples.
+    pub quality_samples: u64,
+    /// Rollout tripwire reason, if a replica has stopped the rollout.
+    pub tripped_reason: Option<String>,
 }
 
 impl StateLimitConfig {
@@ -350,6 +396,37 @@ pub trait StateBackend: Send + Sync {
         Box::pin(async { Err(StateBackendError::Unavailable) })
     }
 
+    /// Record one idempotent canary outcome in the active fleet window.
+    fn record_canary<'a>(
+        &'a self,
+        _observation: SharedCanaryObservation,
+        _window_seconds: f64,
+        _now_seconds: f64,
+    ) -> StateFuture<'a, bool> {
+        Box::pin(async { Err(StateBackendError::Unavailable) })
+    }
+
+    /// Read the bounded canary counters and current trip state.
+    fn canary_snapshot<'a>(
+        &'a self,
+        _rollout_id: &'a str,
+        _window_seconds: f64,
+        _now_seconds: f64,
+    ) -> StateFuture<'a, SharedCanarySnapshot> {
+        Box::pin(async { Err(StateBackendError::Unavailable) })
+    }
+
+    /// Stop a rollout for the bounded hold interval.
+    fn trip_canary<'a>(
+        &'a self,
+        _rollout_id: &'a str,
+        _reason: &'a str,
+        _hold_seconds: f64,
+        _now_seconds: f64,
+    ) -> StateFuture<'a, ()> {
+        Box::pin(async { Err(StateBackendError::Unavailable) })
+    }
+
     /// Read the current request-window snapshot.
     fn snapshot<'a>(
         &'a self,
@@ -378,6 +455,15 @@ pub trait StateBackend: Send + Sync {
 #[derive(Clone, Debug, Default)]
 pub struct MemoryStateBackend {
     limiters: Arc<Mutex<BTreeMap<String, crate::rate_limit::RateLimiter>>>,
+    canary: Arc<Mutex<BTreeMap<String, MemoryCanaryState>>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct MemoryCanaryState {
+    window: u64,
+    seen: BTreeSet<String>,
+    snapshot: SharedCanarySnapshot,
+    tripped_until: f64,
 }
 
 impl StateBackend for MemoryStateBackend {
@@ -521,9 +607,154 @@ impl StateBackend for MemoryStateBackend {
         })
     }
 
+    fn record_canary<'a>(
+        &'a self,
+        observation: SharedCanaryObservation,
+        window_seconds: f64,
+        now_seconds: f64,
+    ) -> StateFuture<'a, bool> {
+        Box::pin(async move {
+            validate_canary_inputs(&observation, window_seconds)?;
+            let window = canary_window(window_seconds, now_seconds)?;
+            let mut states = self
+                .canary
+                .lock()
+                .map_err(|_| StateBackendError::LockPoisoned)?;
+            let state = states.entry(observation.rollout_id).or_default();
+            rotate_memory_canary(state, window);
+            if !state.seen.insert(observation.request_id) {
+                return Ok(false);
+            }
+            state.snapshot.requests = state.snapshot.requests.saturating_add(1);
+            if !observation.succeeded {
+                state.snapshot.errors = state.snapshot.errors.saturating_add(1);
+            }
+            state.snapshot.latency_sum_ms = state
+                .snapshot
+                .latency_sum_ms
+                .saturating_add(observation.latency_ms);
+            state.snapshot.latency_samples = state.snapshot.latency_samples.saturating_add(1);
+            if let (Some(realized), Some(baseline)) =
+                (observation.realized_cost, observation.baseline_cost)
+            {
+                if realized.is_finite()
+                    && baseline.is_finite()
+                    && realized >= 0.0
+                    && baseline >= 0.0
+                {
+                    state.snapshot.realized_cost += realized;
+                    state.snapshot.baseline_cost += baseline;
+                    state.snapshot.cost_samples = state.snapshot.cost_samples.saturating_add(1);
+                }
+            }
+            if let Some(loss) = observation.quality_loss
+                && loss.is_finite()
+                && (0.0..=1.0).contains(&loss)
+            {
+                state.snapshot.quality_loss += loss;
+                state.snapshot.quality_samples = state.snapshot.quality_samples.saturating_add(1);
+            }
+            Ok(true)
+        })
+    }
+
+    fn canary_snapshot<'a>(
+        &'a self,
+        rollout_id: &'a str,
+        window_seconds: f64,
+        now_seconds: f64,
+    ) -> StateFuture<'a, SharedCanarySnapshot> {
+        Box::pin(async move {
+            if rollout_id.is_empty() || rollout_id.len() > 128 {
+                return Err(StateBackendError::Unavailable);
+            }
+            let window = canary_window(window_seconds, now_seconds)?;
+            let mut states = self
+                .canary
+                .lock()
+                .map_err(|_| StateBackendError::LockPoisoned)?;
+            let state = states.entry(rollout_id.to_owned()).or_default();
+            rotate_memory_canary(state, window);
+            if state.tripped_until <= now_seconds {
+                state.tripped_until = 0.0;
+                state.snapshot.tripped_reason = None;
+            }
+            Ok(state.snapshot.clone())
+        })
+    }
+
+    fn trip_canary<'a>(
+        &'a self,
+        rollout_id: &'a str,
+        reason: &'a str,
+        hold_seconds: f64,
+        now_seconds: f64,
+    ) -> StateFuture<'a, ()> {
+        Box::pin(async move {
+            if rollout_id.is_empty()
+                || rollout_id.len() > 128
+                || reason.is_empty()
+                || reason.len() > 128
+                || !hold_seconds.is_finite()
+                || hold_seconds <= 0.0
+            {
+                return Err(StateBackendError::Unavailable);
+            }
+            let mut states = self
+                .canary
+                .lock()
+                .map_err(|_| StateBackendError::LockPoisoned)?;
+            let state = states.entry(rollout_id.to_owned()).or_default();
+            state.tripped_until = state.tripped_until.max(now_seconds + hold_seconds);
+            state.snapshot.tripped_reason = Some(reason.to_owned());
+            Ok(())
+        })
+    }
+
     fn degraded(&self) -> bool {
         false
     }
+}
+
+fn validate_canary_inputs(
+    observation: &SharedCanaryObservation,
+    window_seconds: f64,
+) -> Result<(), StateBackendError> {
+    if observation.rollout_id.is_empty()
+        || observation.rollout_id.len() > 128
+        || observation.request_id.is_empty()
+        || observation.request_id.len() > 128
+        || !window_seconds.is_finite()
+        || window_seconds <= 0.0
+        || observation.latency_ms > 86_400_000
+    {
+        return Err(StateBackendError::Unavailable);
+    }
+    Ok(())
+}
+
+fn non_negative_u64(value: i64) -> Result<u64, StateBackendError> {
+    u64::try_from(value).map_err(|_| StateBackendError::Unavailable)
+}
+
+fn canary_window(window_seconds: f64, now_seconds: f64) -> Result<u64, StateBackendError> {
+    if !window_seconds.is_finite() || window_seconds <= 0.0 || !now_seconds.is_finite() {
+        return Err(StateBackendError::Unavailable);
+    }
+    Ok((now_seconds / window_seconds).floor().max(0.0) as u64)
+}
+
+fn rotate_memory_canary(state: &mut MemoryCanaryState, window: u64) {
+    if state.window == window {
+        return;
+    }
+    let tripped_reason = state.snapshot.tripped_reason.take();
+    state.window = window;
+    state.seen.clear();
+    state.snapshot = SharedCanarySnapshot {
+        tripped_reason,
+        ..SharedCanarySnapshot::default()
+    };
 }
 
 fn limiter_for<'a>(
@@ -906,6 +1137,73 @@ redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])
 return 1
 "#;
 
+const CANARY_RECORD_SCRIPT: &str = r#"
+local time = redis.call('TIME')
+local now_ms = (tonumber(time[1]) * 1000) + math.floor(tonumber(time[2]) / 1000)
+local window_ms = tonumber(ARGV[2])
+local window_id = math.floor(now_ms / window_ms)
+local current = redis.call('HGET', KEYS[1], 'window')
+if current == false or tonumber(current) ~= window_id then
+  redis.call('HSET', KEYS[1], 'window', window_id, 'requests', 0, 'errors', 0,
+    'latency_sum_ms', 0, 'latency_samples', 0, 'realized_micros', 0,
+    'baseline_micros', 0, 'cost_samples', 0, 'quality_scaled', 0,
+    'quality_samples', 0)
+  redis.call('DEL', KEYS[2])
+end
+if redis.call('SADD', KEYS[2], ARGV[1]) == 0 then return 0 end
+redis.call('PEXPIRE', KEYS[1], math.max(window_ms * 2, 1000))
+redis.call('PEXPIRE', KEYS[2], math.max(window_ms * 2, 1000))
+redis.call('HINCRBY', KEYS[1], 'requests', 1)
+if ARGV[3] == '0' then redis.call('HINCRBY', KEYS[1], 'errors', 1) end
+redis.call('HINCRBY', KEYS[1], 'latency_sum_ms', tonumber(ARGV[4]))
+redis.call('HINCRBY', KEYS[1], 'latency_samples', 1)
+if tonumber(ARGV[5]) >= 0 and tonumber(ARGV[6]) >= 0 then
+  redis.call('HINCRBY', KEYS[1], 'realized_micros', tonumber(ARGV[5]))
+  redis.call('HINCRBY', KEYS[1], 'baseline_micros', tonumber(ARGV[6]))
+  redis.call('HINCRBY', KEYS[1], 'cost_samples', 1)
+end
+if tonumber(ARGV[7]) >= 0 then
+  redis.call('HINCRBY', KEYS[1], 'quality_scaled', tonumber(ARGV[7]))
+  redis.call('HINCRBY', KEYS[1], 'quality_samples', 1)
+end
+return 1
+"#;
+
+const CANARY_SNAPSHOT_SCRIPT: &str = r#"
+local time = redis.call('TIME')
+local now_ms = (tonumber(time[1]) * 1000) + math.floor(tonumber(time[2]) / 1000)
+local window_ms = tonumber(ARGV[1])
+local window_id = math.floor(now_ms / window_ms)
+local current = redis.call('HGET', KEYS[1], 'window')
+if current == false or tonumber(current) ~= window_id then
+  redis.call('HSET', KEYS[1], 'window', window_id, 'requests', 0, 'errors', 0,
+    'latency_sum_ms', 0, 'latency_samples', 0, 'realized_micros', 0,
+    'baseline_micros', 0, 'cost_samples', 0, 'quality_scaled', 0,
+    'quality_samples', 0)
+  redis.call('DEL', KEYS[2])
+end
+return {
+  tonumber(redis.call('HGET', KEYS[1], 'requests') or '0'),
+  tonumber(redis.call('HGET', KEYS[1], 'errors') or '0'),
+  tonumber(redis.call('HGET', KEYS[1], 'latency_sum_ms') or '0'),
+  tonumber(redis.call('HGET', KEYS[1], 'latency_samples') or '0'),
+  tonumber(redis.call('HGET', KEYS[1], 'realized_micros') or '0'),
+  tonumber(redis.call('HGET', KEYS[1], 'baseline_micros') or '0'),
+  tonumber(redis.call('HGET', KEYS[1], 'cost_samples') or '0'),
+  tonumber(redis.call('HGET', KEYS[1], 'quality_scaled') or '0'),
+  tonumber(redis.call('HGET', KEYS[1], 'quality_samples') or '0'),
+  redis.call('HGET', KEYS[1], 'tripped_reason') or ''
+}
+"#;
+
+const CANARY_TRIP_SCRIPT: &str = r#"
+local hold_ms = tonumber(ARGV[3])
+if hold_ms == nil or hold_ms <= 0 then return 0 end
+redis.call('HSET', KEYS[1], 'tripped_reason', ARGV[2])
+redis.call('PEXPIRE', KEYS[1], math.max(hold_ms, 1000))
+return 1
+"#;
+
 /// Redis-backed fixed-window counters using server time and Lua atomicity.
 #[derive(Clone)]
 pub struct RedisStateBackend {
@@ -1003,6 +1301,22 @@ impl RedisKeyNamespace {
 
     fn cache_index(&self) -> String {
         format!("{REDIS_KEY_ROOT}:{}:cache:index", self.encoded_namespace)
+    }
+
+    fn canary(&self, rollout_id: &str) -> String {
+        format!(
+            "{REDIS_KEY_ROOT}:{}:canary:{}",
+            self.encoded_namespace,
+            encode_redis_component(rollout_id)
+        )
+    }
+
+    fn canary_seen(&self, rollout_id: &str) -> String {
+        format!(
+            "{REDIS_KEY_ROOT}:{}:canary-seen:{}",
+            self.encoded_namespace,
+            encode_redis_component(rollout_id)
+        )
     }
 }
 
@@ -1328,6 +1642,123 @@ impl StateBackend for RedisStateBackend {
                     .map(|value| value == 1)
                     .map_err(|_| StateBackendError::Unavailable),
             )
+        })
+    }
+
+    fn record_canary<'a>(
+        &'a self,
+        observation: SharedCanaryObservation,
+        window_seconds: f64,
+        _now_seconds: f64,
+    ) -> StateFuture<'a, bool> {
+        Box::pin(async move {
+            validate_canary_inputs(&observation, window_seconds)?;
+            let window_ms = (window_seconds * 1_000.0).ceil().max(1.0) as u64;
+            let realized = observation.realized_cost.map(scaled_cost).transpose()?;
+            let baseline = observation.baseline_cost.map(scaled_cost).transpose()?;
+            let quality = observation
+                .quality_loss
+                .map(|value| {
+                    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                        return Err(StateBackendError::Unavailable);
+                    }
+                    Ok((value * SHARED_QUALITY_SCALE).round() as i64)
+                })
+                .transpose()?;
+            let mut connection = self.connection.clone();
+            let result: Result<i64, _> = Script::new(CANARY_RECORD_SCRIPT)
+                .key(self.keys.canary(&observation.rollout_id))
+                .key(self.keys.canary_seen(&observation.rollout_id))
+                .arg(observation.request_id)
+                .arg(window_ms)
+                .arg(i64::from(observation.succeeded))
+                .arg(observation.latency_ms)
+                .arg(realized.unwrap_or(-1))
+                .arg(baseline.unwrap_or(-1))
+                .arg(quality.unwrap_or(-1))
+                .invoke_async(&mut connection)
+                .await;
+            self.mark(
+                result
+                    .map(|value| value == 1)
+                    .map_err(|_| StateBackendError::Unavailable),
+            )
+        })
+    }
+
+    fn canary_snapshot<'a>(
+        &'a self,
+        rollout_id: &'a str,
+        window_seconds: f64,
+        _now_seconds: f64,
+    ) -> StateFuture<'a, SharedCanarySnapshot> {
+        Box::pin(async move {
+            if rollout_id.is_empty() || rollout_id.len() > 128 {
+                return Err(StateBackendError::Unavailable);
+            }
+            if !window_seconds.is_finite() || window_seconds <= 0.0 {
+                return Err(StateBackendError::Unavailable);
+            }
+            let window_ms = (window_seconds * 1_000.0).ceil().max(1.0) as u64;
+            let mut connection = self.connection.clone();
+            let result: Result<CanaryRedisSnapshot, _> = Script::new(CANARY_SNAPSHOT_SCRIPT)
+                .key(self.keys.canary(rollout_id))
+                .key(self.keys.canary_seen(rollout_id))
+                .arg(window_ms)
+                .invoke_async(&mut connection)
+                .await;
+            let value = result.map_err(|_| StateBackendError::Unavailable)?;
+            self.mark(Ok(SharedCanarySnapshot {
+                requests: non_negative_u64(value.0)?,
+                errors: non_negative_u64(value.1)?,
+                latency_sum_ms: non_negative_u64(value.2)?,
+                latency_samples: non_negative_u64(value.3)?,
+                realized_cost: value.4.max(0) as f64 / SHARED_COST_SCALE,
+                baseline_cost: value.5.max(0) as f64 / SHARED_COST_SCALE,
+                cost_samples: non_negative_u64(value.6)?,
+                quality_loss: value.7.max(0) as f64 / SHARED_QUALITY_SCALE,
+                quality_samples: non_negative_u64(value.8)?,
+                tripped_reason: (!value.9.is_empty()).then_some(value.9),
+            }))
+        })
+    }
+
+    fn trip_canary<'a>(
+        &'a self,
+        rollout_id: &'a str,
+        reason: &'a str,
+        hold_seconds: f64,
+        _now_seconds: f64,
+    ) -> StateFuture<'a, ()> {
+        Box::pin(async move {
+            if rollout_id.is_empty()
+                || rollout_id.len() > 128
+                || reason.is_empty()
+                || reason.len() > 128
+                || !hold_seconds.is_finite()
+                || hold_seconds <= 0.0
+            {
+                return Err(StateBackendError::Unavailable);
+            }
+            let hold_ms = (hold_seconds * 1_000.0).ceil().max(1.0) as u64;
+            let mut connection = self.connection.clone();
+            let result: Result<i64, _> = Script::new(CANARY_TRIP_SCRIPT)
+                .key(self.keys.canary(rollout_id))
+                .arg(rollout_id)
+                .arg(reason)
+                .arg(hold_ms)
+                .invoke_async(&mut connection)
+                .await;
+            let result = result
+                .map_err(|_| StateBackendError::Unavailable)
+                .and_then(|value| {
+                    if value == 1 {
+                        Ok(())
+                    } else {
+                        Err(StateBackendError::Unavailable)
+                    }
+                });
+            self.mark(result)
         })
     }
 
@@ -1867,6 +2298,42 @@ mod tests {
                 .await?
         );
         assert!(backend.rollback("prod", config, next, 61.0).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn memory_backend_canary_counters_are_idempotent_and_trippable()
+    -> Result<(), StateBackendError> {
+        let backend = MemoryStateBackend::default();
+        let observation = SharedCanaryObservation {
+            rollout_id: "release".to_owned(),
+            request_id: "request-1".to_owned(),
+            succeeded: false,
+            latency_ms: 25,
+            realized_cost: Some(2.0),
+            baseline_cost: Some(1.0),
+            quality_loss: Some(0.2),
+        };
+        assert!(
+            backend
+                .record_canary(observation.clone(), 60.0, 1.0)
+                .await?
+        );
+        assert!(!backend.record_canary(observation, 60.0, 1.0).await?);
+        let snapshot = backend.canary_snapshot("release", 60.0, 1.0).await?;
+        assert_eq!(snapshot.requests, 1);
+        assert_eq!(snapshot.errors, 1);
+        backend
+            .trip_canary("release", "error-rate", 300.0, 1.0)
+            .await?;
+        assert_eq!(
+            backend
+                .canary_snapshot("release", 60.0, 1.0)
+                .await?
+                .tripped_reason
+                .as_deref(),
+            Some("error-rate")
+        );
         Ok(())
     }
 

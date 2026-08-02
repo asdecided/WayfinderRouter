@@ -84,6 +84,30 @@ pub const MAX_SHADOW_CANDIDATE_ROUTES: usize = 32;
 pub const MAX_SHADOW_SAMPLE_RATE: f64 = 1.0;
 /// Maximum shadow provider budget window in seconds.
 pub const MAX_SHADOW_PROVIDER_WINDOW: f64 = 86_400.0;
+/// Default canary exposure fraction. Canary rollout is opt-in.
+pub const DEFAULT_CANARY_FRACTION: f64 = 0.0;
+/// Default canary exposure window in seconds.
+pub const DEFAULT_CANARY_WINDOW: f64 = 300.0;
+/// Default minimum observations before tripwire evaluation.
+pub const DEFAULT_CANARY_MIN_SAMPLES: u64 = 30;
+/// Default maximum canary requests per fleet window.
+pub const DEFAULT_CANARY_MAX_REQUESTS: u64 = 1_000;
+/// Default maximum canary error rate.
+pub const DEFAULT_CANARY_MAX_ERROR_RATE: f64 = 0.20;
+/// Default maximum mean canary latency in milliseconds.
+pub const DEFAULT_CANARY_MAX_LATENCY_MS: f64 = 30_000.0;
+/// Default maximum priced canary-to-baseline cost multiplier.
+pub const DEFAULT_CANARY_MAX_COST_MULTIPLIER: f64 = 2.0;
+/// Default maximum labelled quality loss.
+pub const DEFAULT_CANARY_MAX_QUALITY_LOSS: f64 = 0.10;
+/// Default rollback hold interval in seconds.
+pub const DEFAULT_CANARY_ROLLBACK_HOLD: f64 = 900.0;
+/// Maximum canary fraction accepted by configuration.
+pub const MAX_CANARY_FRACTION: f64 = 1.0;
+/// Maximum canary window accepted by configuration.
+pub const MAX_CANARY_WINDOW: f64 = 86_400.0;
+/// Supported stable canary assignment scopes.
+pub const CANARY_SCOPES: [&str; 4] = ["request", "workspace", "key", "cohort"];
 
 /// Authentication policy for local operator surfaces.
 ///
@@ -253,6 +277,68 @@ pub struct ShadowConfig {
     pub provider_max_requests: u64,
     /// Provider-comparison budget window in seconds.
     pub provider_window: f64,
+}
+
+/// Bounded, opt-in production canary rollout and tripwire policy.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanaryConfig {
+    /// Whether this rollout is eligible for automatic assignment.
+    pub enabled: bool,
+    /// Stable rollout identifier used for fleet state and audit records.
+    pub rollout_id: String,
+    /// Existing named route or model alias used as the canary destination.
+    pub candidate_route: String,
+    /// Fraction of stable identities eligible for canary assignment.
+    pub fraction: f64,
+    /// Identity scope used for deterministic cohort assignment.
+    pub scope: String,
+    /// Approved cohort identity when `scope = "cohort"`.
+    pub cohort: Option<String>,
+    /// Fleet-wide maximum canary requests in one exposure window.
+    pub max_requests: u64,
+    /// Exposure and tripwire evaluation window in seconds.
+    pub window: f64,
+    /// Minimum observations before tripwire evaluation.
+    pub min_samples: u64,
+    /// Maximum canary error rate before automatic stop.
+    pub max_error_rate: f64,
+    /// Maximum mean canary latency in milliseconds before stop.
+    pub max_latency_ms: f64,
+    /// Maximum canary/baseline cost multiplier before stop.
+    pub max_cost_multiplier: f64,
+    /// Maximum labelled quality loss before stop.
+    pub max_quality_loss: f64,
+    /// Time for which a tripped rollout remains stopped.
+    pub rollback_hold: f64,
+}
+
+impl Default for CanaryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            rollout_id: "default".to_owned(),
+            candidate_route: String::new(),
+            fraction: DEFAULT_CANARY_FRACTION,
+            scope: "request".to_owned(),
+            cohort: None,
+            max_requests: DEFAULT_CANARY_MAX_REQUESTS,
+            window: DEFAULT_CANARY_WINDOW,
+            min_samples: DEFAULT_CANARY_MIN_SAMPLES,
+            max_error_rate: DEFAULT_CANARY_MAX_ERROR_RATE,
+            max_latency_ms: DEFAULT_CANARY_MAX_LATENCY_MS,
+            max_cost_multiplier: DEFAULT_CANARY_MAX_COST_MULTIPLIER,
+            max_quality_loss: DEFAULT_CANARY_MAX_QUALITY_LOSS,
+            rollback_hold: DEFAULT_CANARY_ROLLBACK_HOLD,
+        }
+    }
+}
+
+impl CanaryConfig {
+    /// Whether this policy is the compatibility-preserving default.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 impl Default for ShadowConfig {
@@ -509,6 +595,8 @@ pub struct GatewayConfig {
     pub auth: GatewayAuthConfig,
     /// Opt-in off-path shadow routing and provider comparison policy.
     pub shadow: ShadowConfig,
+    /// Opt-in bounded production canary and tripwire policy.
+    pub canary: CanaryConfig,
     /// Workspace policy namespaces keyed by operator-selected identifier.
     pub workspaces: IndexMap<String, Workspace>,
     /// Named ordered routing presets keyed by operator-selected identifier.
@@ -537,6 +625,7 @@ impl Default for GatewayConfig {
             state: StateConfig::default(),
             auth: GatewayAuthConfig::default(),
             shadow: ShadowConfig::default(),
+            canary: CanaryConfig::default(),
             workspaces: IndexMap::new(),
             routes: IndexMap::new(),
             keys: IndexMap::new(),
@@ -623,6 +712,7 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
     let models = parse_models(gateway.get("models"), where_)?;
     let routes = parse_routes(gateway.get("routes"), where_)?;
     let shadow = parse_shadow(gateway.get("shadow"), where_, &routes)?;
+    let canary = parse_canary(gateway.get("canary"), where_, &routes)?;
 
     validate_model_fallbacks(&models, where_)?;
     validate_workspace_models(&workspaces, &models, where_)?;
@@ -647,6 +737,7 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
         state,
         auth,
         shadow,
+        canary,
         workspaces,
         routes,
         keys,
@@ -853,6 +944,75 @@ fn render_gateway_toml(gateway: &GatewayConfig) -> String {
             lines.push(format!(
                 "provider_window = {}",
                 format_number(gateway.shadow.provider_window)
+            ));
+        }
+        blocks.push(lines.join("\n"));
+    }
+
+    if !gateway.canary.is_default() {
+        let canary = &gateway.canary;
+        let mut lines = vec!["[gateway.canary]".to_owned()];
+        if canary.enabled {
+            lines.push("enabled = true".to_owned());
+        }
+        if canary.rollout_id != "default" {
+            lines.push(format!(
+                "rollout_id = {}",
+                quote_toml_string(&canary.rollout_id)
+            ));
+        }
+        if !canary.candidate_route.is_empty() {
+            lines.push(format!(
+                "candidate_route = {}",
+                quote_toml_string(&canary.candidate_route)
+            ));
+        }
+        if canary.fraction != DEFAULT_CANARY_FRACTION {
+            lines.push(format!("fraction = {}", format_number(canary.fraction)));
+        }
+        if canary.scope != "request" {
+            lines.push(format!("scope = {}", quote_toml_string(&canary.scope)));
+        }
+        if let Some(cohort) = &canary.cohort {
+            lines.push(format!("cohort = {}", quote_toml_string(cohort)));
+        }
+        if canary.max_requests != DEFAULT_CANARY_MAX_REQUESTS {
+            lines.push(format!("max_requests = {}", canary.max_requests));
+        }
+        if canary.window != DEFAULT_CANARY_WINDOW {
+            lines.push(format!("window = {}", format_number(canary.window)));
+        }
+        if canary.min_samples != DEFAULT_CANARY_MIN_SAMPLES {
+            lines.push(format!("min_samples = {}", canary.min_samples));
+        }
+        if canary.max_error_rate != DEFAULT_CANARY_MAX_ERROR_RATE {
+            lines.push(format!(
+                "max_error_rate = {}",
+                format_number(canary.max_error_rate)
+            ));
+        }
+        if canary.max_latency_ms != DEFAULT_CANARY_MAX_LATENCY_MS {
+            lines.push(format!(
+                "max_latency_ms = {}",
+                format_number(canary.max_latency_ms)
+            ));
+        }
+        if canary.max_cost_multiplier != DEFAULT_CANARY_MAX_COST_MULTIPLIER {
+            lines.push(format!(
+                "max_cost_multiplier = {}",
+                format_number(canary.max_cost_multiplier)
+            ));
+        }
+        if canary.max_quality_loss != DEFAULT_CANARY_MAX_QUALITY_LOSS {
+            lines.push(format!(
+                "max_quality_loss = {}",
+                format_number(canary.max_quality_loss)
+            ));
+        }
+        if canary.rollback_hold != DEFAULT_CANARY_ROLLBACK_HOLD {
+            lines.push(format!(
+                "rollback_hold = {}",
+                format_number(canary.rollback_hold)
             ));
         }
         blocks.push(lines.join("\n"));
@@ -1606,6 +1766,171 @@ fn parse_shadow(
         provider_sample_rate,
         provider_max_requests,
         provider_window,
+    })
+}
+
+fn parse_canary(
+    value: Option<&Value>,
+    where_: &str,
+    routes: &IndexMap<String, RoutePreset>,
+) -> Result<CanaryConfig, ConfigError> {
+    let Some(value) = value else {
+        return Ok(CanaryConfig::default());
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| invalid(where_, "'[gateway.canary]' must be a table"))?;
+    let enabled = optional_bool(
+        table.get("enabled"),
+        false,
+        where_,
+        "gateway.canary.enabled",
+    )?;
+    let rollout_id = table
+        .get("rollout_id")
+        .and_then(Value::as_str)
+        .unwrap_or("default")
+        .to_owned();
+    let candidate_route = table
+        .get("candidate_route")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let fraction = optional_non_negative_number(
+        table.get("fraction"),
+        DEFAULT_CANARY_FRACTION,
+        where_,
+        "gateway.canary.fraction",
+    )?;
+    if fraction > MAX_CANARY_FRACTION {
+        return Err(invalid(
+            where_,
+            "'gateway.canary.fraction' must be at most 1",
+        ));
+    }
+    let scope = optional_allowed_string(
+        table.get("scope"),
+        "request",
+        &CANARY_SCOPES,
+        where_,
+        "gateway.canary.scope",
+    )?;
+    let cohort = table
+        .get("cohort")
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| !value.is_empty() && valid_policy_id(value))
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    invalid(
+                        where_,
+                        "'gateway.canary.cohort' must be a bounded non-empty string",
+                    )
+                })
+        })
+        .transpose()?;
+    if rollout_id.is_empty() || !valid_policy_id(&rollout_id) {
+        return Err(invalid(
+            where_,
+            "'gateway.canary.rollout_id' must be a bounded non-empty string",
+        ));
+    }
+    if !candidate_route.is_empty() && !routes.contains_key(&candidate_route) {
+        return Err(invalid(
+            where_,
+            format!(
+                "'gateway.canary.candidate_route' references unknown route '{candidate_route}'"
+            ),
+        ));
+    }
+    if enabled && candidate_route.is_empty() {
+        return Err(invalid(
+            where_,
+            "'gateway.canary.candidate_route' must be set when canary rollout is enabled",
+        ));
+    }
+    if scope == "cohort" && cohort.is_none() {
+        return Err(invalid(
+            where_,
+            "'gateway.canary.cohort' is required when scope is 'cohort'",
+        ));
+    }
+    let max_requests = optional_positive_integer(
+        table.get("max_requests"),
+        DEFAULT_CANARY_MAX_REQUESTS,
+        where_,
+        "gateway.canary.max_requests",
+    )?;
+    let window = optional_positive_number(
+        table.get("window"),
+        DEFAULT_CANARY_WINDOW,
+        where_,
+        "gateway.canary.window",
+    )?;
+    if window > MAX_CANARY_WINDOW {
+        return Err(invalid(
+            where_,
+            format!("'gateway.canary.window' must be at most {MAX_CANARY_WINDOW}"),
+        ));
+    }
+    let min_samples = optional_positive_integer(
+        table.get("min_samples"),
+        DEFAULT_CANARY_MIN_SAMPLES,
+        where_,
+        "gateway.canary.min_samples",
+    )?;
+    let max_error_rate = optional_non_negative_number(
+        table.get("max_error_rate"),
+        DEFAULT_CANARY_MAX_ERROR_RATE,
+        where_,
+        "gateway.canary.max_error_rate",
+    )?;
+    let max_latency_ms = optional_positive_number(
+        table.get("max_latency_ms"),
+        DEFAULT_CANARY_MAX_LATENCY_MS,
+        where_,
+        "gateway.canary.max_latency_ms",
+    )?;
+    let max_cost_multiplier = optional_positive_number(
+        table.get("max_cost_multiplier"),
+        DEFAULT_CANARY_MAX_COST_MULTIPLIER,
+        where_,
+        "gateway.canary.max_cost_multiplier",
+    )?;
+    let max_quality_loss = optional_non_negative_number(
+        table.get("max_quality_loss"),
+        DEFAULT_CANARY_MAX_QUALITY_LOSS,
+        where_,
+        "gateway.canary.max_quality_loss",
+    )?;
+    let rollback_hold = optional_positive_number(
+        table.get("rollback_hold"),
+        DEFAULT_CANARY_ROLLBACK_HOLD,
+        where_,
+        "gateway.canary.rollback_hold",
+    )?;
+    if max_error_rate > 1.0 || max_quality_loss > 1.0 {
+        return Err(invalid(
+            where_,
+            "canary error-rate and quality-loss tripwires must be at most 1",
+        ));
+    }
+    Ok(CanaryConfig {
+        enabled,
+        rollout_id,
+        candidate_route,
+        fraction,
+        scope,
+        cohort,
+        max_requests,
+        window,
+        min_samples,
+        max_error_rate,
+        max_latency_ms,
+        max_cost_multiplier,
+        max_quality_loss,
+        rollback_hold,
     })
 }
 
@@ -2651,6 +2976,58 @@ provider_window = 120
             assert!(
                 gateway_config_from_toml(text, "shadow-invalid").is_err(),
                 "accepted: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn canary_policy_is_bounded_and_round_trips() -> Result<(), ConfigError> {
+        let text = r#"
+[gateway]
+[gateway.models.local]
+base_url = "http://127.0.0.1:9000/v1"
+model = "local"
+[gateway.routes.candidate]
+models = ["local"]
+[gateway.canary]
+enabled = true
+rollout_id = "release-2026-08"
+candidate_route = "candidate"
+fraction = 0.25
+scope = "workspace"
+max_requests = 50
+window = 120
+min_samples = 10
+max_error_rate = 0.1
+max_latency_ms = 1000
+max_cost_multiplier = 1.5
+max_quality_loss = 0.05
+rollback_hold = 600
+"#;
+        let config = gateway_config_from_toml(text, "canary-test")?;
+        assert!(config.canary.enabled);
+        assert_eq!(config.canary.candidate_route, "candidate");
+        assert_eq!(config.canary.scope, "workspace");
+        assert_eq!(config.canary.fraction, 0.25);
+        let dumped = dump_gateway_toml(&config)?;
+        let reparsed = gateway_config_from_toml(&dumped, "canary-round-trip")?;
+        assert_eq!(reparsed.canary, config.canary);
+        Ok(())
+    }
+
+    #[test]
+    fn canary_policy_rejects_missing_cohort_and_unbounded_fraction() {
+        for text in [
+            "[gateway.canary]\nenabled = true\ncandidate_route = \"candidate\"\n",
+            "[gateway.canary]\nfraction = 1.1\n",
+            "[gateway.canary]\nscope = \"cohort\"\n",
+        ] {
+            assert!(
+                gateway_config_from_toml(
+                    &format!("[gateway.routes.candidate]\nmodels = [\"local\"]\n{text}"),
+                    "canary-invalid"
+                )
+                .is_err()
             );
         }
     }
