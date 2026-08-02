@@ -60,6 +60,16 @@ details, release history over commit history.
   divergence, error, and comparison-cost events. Disabling the policy at a
   hot-reload boundary stops queued and in-flight shadow work cooperatively.
 
+- **Versioned evidence reports** (WF-ADR-0064, issue #151). Operator-authenticated
+  JSON and self-contained text endpoints now turn bounded shadow records into a
+  reproducible `wf-evidence-v1` artifact. Human and explicitly versioned
+  automated labels are stored by request/candidate identity, while unknown or
+  prompt/response fields are rejected. Reports separate observed provider
+  outcomes from quality labels, expose missingness, Wilson intervals, evaluator
+  agreement, and currency/relative/unknown cost classes, and return
+  `enforce`, `keep-shadowing`, or `do-not-enforce` without claiming significance
+  below the minimum decisive sample or across conflicting provenance.
+
 - **Bounded deployment-signal selection** (WF-ADR-0062, issue #148). Interchangeable
   OpenAI-compatible deployments can opt into deterministic latency, throughput, availability,
   cost, or capacity ordering after hard eligibility checks. Runtime observations are prompt-free
