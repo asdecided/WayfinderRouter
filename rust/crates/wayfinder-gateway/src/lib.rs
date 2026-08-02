@@ -2770,15 +2770,15 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                     Ok(response) => {
                         let status = response.status();
                         let succeeded = !is_auth_failure(Some(status.as_u16()));
-                        if let Some(attempt) = reliability_attempt.take()
-                            && let Err(error) = attempt.complete(succeeded)
-                        {
-                            return error_response(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "wayfinder_router_state_error",
-                                error.to_string(),
-                                request_id_headers(&request_id),
-                            );
+                        if let Some(attempt) = reliability_attempt.take() {
+                            if let Err(error) = attempt.complete(succeeded) {
+                                return error_response(
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "wayfinder_router_state_error",
+                                    error.to_string(),
+                                    request_id_headers(&request_id),
+                                );
+                            }
                         }
                         let content_type = HeaderValue::from_str(response.content_type())
                             .unwrap_or_else(|_| {
@@ -2803,16 +2803,17 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                         last_failure = fatal_delivery_status(&error);
                         let _ = state.metrics().observe_upstream_error(&target_id);
                         if !matches!(error, DeliveryError::Provider(ProviderError::Transport)) {
-                            if stream_failure_affects_reliability(&error)
-                                && let Some(attempt) = reliability_attempt.take()
-                                && let Err(error) = attempt.complete(false)
-                            {
-                                return error_response(
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    "wayfinder_router_state_error",
-                                    error.to_string(),
-                                    request_id_headers(&request_id),
-                                );
+                            if stream_failure_affects_reliability(&error) {
+                                if let Some(attempt) = reliability_attempt.take() {
+                                    if let Err(error) = attempt.complete(false) {
+                                        return error_response(
+                                            StatusCode::INTERNAL_SERVER_ERROR,
+                                            "wayfinder_router_state_error",
+                                            error.to_string(),
+                                            request_id_headers(&request_id),
+                                        );
+                                    }
+                                }
                             }
                             return error_response(
                                 last_failure.0,
@@ -2827,15 +2828,15 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                     if let Some(delay) = delays.get(attempt_index) {
                         sleep_retry(*delay).await;
                     }
-                } else if let Some(attempt) = reliability_attempt.take()
-                    && let Err(error) = attempt.complete(false)
-                {
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "wayfinder_router_state_error",
-                        error.to_string(),
-                        request_id_headers(&request_id),
-                    );
+                } else if let Some(attempt) = reliability_attempt.take() {
+                    if let Err(error) = attempt.complete(false) {
+                        return error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "wayfinder_router_state_error",
+                            error.to_string(),
+                            request_id_headers(&request_id),
+                        );
+                    }
                 }
             }
         }
