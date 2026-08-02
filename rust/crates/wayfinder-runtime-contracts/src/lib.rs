@@ -94,6 +94,43 @@ pub enum BillingClass {
     Unknown,
 }
 
+/// A normalized execution surface.  Surface selection is a provider
+/// capability, not part of the deterministic complexity score.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InferenceSurface {
+    /// Text generation (Chat Completions, Messages, or bounded Responses).
+    #[default]
+    Text,
+    /// Vector embeddings.
+    Embeddings,
+    /// Image generation.
+    ImageGeneration,
+    /// Audio input or output.
+    Audio,
+    /// Asynchronous batch execution.
+    Batch,
+}
+
+/// Explicit provider support for non-text execution surfaces.
+///
+/// These flags are deliberately separate from the existing text/image/tool
+/// fields. A provider must opt into each surface only after its adapter,
+/// bounds, accounting, and parity fixtures are complete.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ModalityCapabilities {
+    /// Vector embeddings are supported.
+    pub embeddings: bool,
+    /// Image generation is supported.
+    pub image_generation: bool,
+    /// Audio input is supported.
+    pub audio_input: bool,
+    /// Audio output is supported.
+    pub audio_output: bool,
+    /// Durable batch execution is supported.
+    pub batch: bool,
+}
+
 /// Capabilities that can make a destination ineligible before scoring.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DestinationCapabilities {
@@ -105,6 +142,9 @@ pub struct DestinationCapabilities {
     pub image_input: bool,
     /// Reviewed tool calls are supported.
     pub tools: bool,
+    /// Explicit non-text surface capabilities.
+    #[serde(default)]
+    pub modalities: ModalityCapabilities,
 }
 
 /// A host-provided, secret-free snapshot of one concrete destination.
@@ -145,6 +185,9 @@ pub struct RoutingRequirements {
     pub tools: bool,
     /// The caller requires incremental output.
     pub streaming: bool,
+    /// Surface requested by the caller; defaults to text for compatibility.
+    #[serde(default)]
+    pub surface: InferenceSurface,
 }
 
 /// Platform-neutral input to the authoritative routing engine.
@@ -182,6 +225,14 @@ pub enum ExclusionReason {
     ToolsUnsupported,
     /// Streaming is required but unsupported.
     StreamingUnsupported,
+    /// Embeddings are required but unsupported.
+    EmbeddingsUnsupported,
+    /// Image generation is required but unsupported.
+    ImageGenerationUnsupported,
+    /// Audio is required but unsupported.
+    AudioUnsupported,
+    /// Batch execution is required but unsupported.
+    BatchUnsupported,
     /// The user has excluded this destination from Automatic.
     AutomaticNotAllowed,
 }

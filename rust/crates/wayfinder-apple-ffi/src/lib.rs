@@ -118,6 +118,11 @@ pub struct DestinationCapabilities {
     pub streaming: bool,
     pub image_input: bool,
     pub tools: bool,
+    pub embeddings: bool,
+    pub image_generation: bool,
+    pub audio_input: bool,
+    pub audio_output: bool,
+    pub batch: bool,
 }
 
 /// Requirements that must be satisfied before complexity scoring.
@@ -127,6 +132,17 @@ pub struct RoutingRequirements {
     pub image_input: bool,
     pub tools: bool,
     pub streaming: bool,
+    pub surface: InferenceSurface,
+}
+
+/// Provider execution surface required by a mobile request.
+#[derive(Clone, Copy, Debug, uniffi::Enum)]
+pub enum InferenceSurface {
+    Text,
+    Embeddings,
+    ImageGeneration,
+    Audio,
+    Batch,
 }
 
 /// Bounded request supplied by an Apple host.
@@ -166,6 +182,10 @@ pub enum ExclusionReason {
     ImageInputUnsupported,
     ToolsUnsupported,
     StreamingUnsupported,
+    EmbeddingsUnsupported,
+    ImageGenerationUnsupported,
+    AudioUnsupported,
+    BatchUnsupported,
     AutomaticNotAllowed,
 }
 
@@ -461,6 +481,19 @@ impl From<RoutingRequirements> for CoreRoutingRequirements {
             image_input: value.image_input,
             tools: value.tools,
             streaming: value.streaming,
+            surface: value.surface.into(),
+        }
+    }
+}
+
+impl From<InferenceSurface> for wayfinder_routing_core::InferenceSurface {
+    fn from(value: InferenceSurface) -> Self {
+        match value {
+            InferenceSurface::Text => Self::Text,
+            InferenceSurface::Embeddings => Self::Embeddings,
+            InferenceSurface::ImageGeneration => Self::ImageGeneration,
+            InferenceSurface::Audio => Self::Audio,
+            InferenceSurface::Batch => Self::Batch,
         }
     }
 }
@@ -484,6 +517,13 @@ impl From<DestinationCapabilities> for CoreDestinationCapabilities {
             streaming: value.streaming,
             image_input: value.image_input,
             tools: value.tools,
+            modalities: wayfinder_routing_core::ModalityCapabilities {
+                embeddings: value.embeddings,
+                image_generation: value.image_generation,
+                audio_input: value.audio_input,
+                audio_output: value.audio_output,
+                batch: value.batch,
+            },
         }
     }
 }
@@ -556,6 +596,10 @@ impl From<CoreExclusionReason> for ExclusionReason {
             CoreExclusionReason::ImageInputUnsupported => Self::ImageInputUnsupported,
             CoreExclusionReason::ToolsUnsupported => Self::ToolsUnsupported,
             CoreExclusionReason::StreamingUnsupported => Self::StreamingUnsupported,
+            CoreExclusionReason::EmbeddingsUnsupported => Self::EmbeddingsUnsupported,
+            CoreExclusionReason::ImageGenerationUnsupported => Self::ImageGenerationUnsupported,
+            CoreExclusionReason::AudioUnsupported => Self::AudioUnsupported,
+            CoreExclusionReason::BatchUnsupported => Self::BatchUnsupported,
             CoreExclusionReason::AutomaticNotAllowed => Self::AutomaticNotAllowed,
         }
     }
@@ -622,6 +666,11 @@ mod tests {
                 streaming: true,
                 image_input: false,
                 tools: false,
+                embeddings: false,
+                image_generation: false,
+                audio_input: false,
+                audio_output: false,
+                batch: false,
             },
             automatic_eligible: true,
         }
@@ -638,6 +687,7 @@ mod tests {
                 image_input: false,
                 tools: false,
                 streaming: true,
+                surface: InferenceSurface::Text,
             },
         }
     }

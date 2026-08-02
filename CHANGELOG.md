@@ -8,6 +8,12 @@ details, release history over commit history.
 
 ### Added
 
+- **Bounded modality capability contracts** (WF-ADR-0067, issue #154). The shared Rust routing
+  contract now carries explicit embeddings, image-generation, audio, and batch capabilities and
+  applies them as hard pre-score eligibility filters. The current gateway remains text-only and
+  rejects known modality payloads before provider delivery; each non-text surface will be enabled
+  independently only after its adapter, bounds, accounting, and parity fixtures pass.
+
 - **Bounded OpenAI Responses API compatibility** (WF-ADR-0066, issue #153). The Rust gateway now
   exposes authenticated `/v1/responses` and `/responses` aliases with strict text/multi-turn input,
   normalized usage, bounded SSE streaming, one terminal event, and explicit unsupported-field

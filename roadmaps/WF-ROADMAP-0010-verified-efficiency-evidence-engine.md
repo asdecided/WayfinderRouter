@@ -75,6 +75,14 @@ usage and streaming events, and fail closed on unsupported fields. Input,
 output, event, response, and accounting bounds are explicit; duplicate terminal
 events or a second route decision are not permitted. See WF-ADR-0066.
 
+Issue #154 begins the modality compatibility sequence. The shared runtime and
+Apple bridge now carry explicit embeddings, image-generation, audio, and batch
+capabilities, and the gateway rejects known non-text payloads before delivery
+while every flag remains disabled by default. Each surface will ship through a
+separate provider adapter and parity/bounds/accounting gate; batch persistence
+and reconciliation are intentionally not present in this foundation slice.
+See WF-ADR-0067.
+
 WF-ADR-0052 adds bounded workspace policy above virtual keys: shared
 process-local RPM/TPM, inherited model allowlists, stable public model aliases,
 and explicit workspace response attribution. It also fixes the enterprise

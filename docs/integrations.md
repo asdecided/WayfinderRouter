@@ -168,8 +168,14 @@ thinking are not translated yet (WF-DESIGN-0011).
   `model`, `input`, `instructions`, `stream`, `max_output_tokens`, and `temperature` contract.
   Unsupported fields fail specifically instead of being dropped; see
   [WF-ADR-0066](../decisions/WF-ADR-0066-bounded-responses-api.md).
-- **Tool calling / vision** depend on the *upstream* model you route to, not on Wayfinder —
-  the gateway forwards your request body unchanged (plus the resolved model id).
+- **Non-text surfaces** are currently fail-closed. Embeddings, image, audio, and batch payloads
+  are not advertised or forwarded until their provider adapter, request/response bounds, usage
+  accounting, and parity fixtures are enabled; known modality fields sent to the text endpoint
+  return `wayfinder_router_unsupported_modality` before provider delivery. See
+  [WF-ADR-0067](../decisions/WF-ADR-0067-bounded-modality-contracts.md).
+- **Tool calling** depends on the *upstream* model you route to, while vision/audio/image
+  surfaces remain disabled until their reviewed adapters are enabled; known non-text payloads
+  are rejected by the modality gate rather than forwarded unchanged.
 - **Per-request overrides** travel as headers (e.g. `X-Wayfinder-Threshold`), so you can
   tune routing without changing client config.
 

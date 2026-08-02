@@ -269,8 +269,8 @@ may select a privacy boundary with `x-wayfinder-privacy-posture`:
 The body also contributes hard requirements: estimated prompt plus requested
 output context, image content, tool/function declarations, and streaming.
 Apple Foundation Models and the bounded ChatGPT adapter are text-only and are
-excluded for image/tool requests; OpenAI-compatible adapters retain their
-existing pass-through contract. Missing credentials, declared windows that are
+excluded for image/tool requests; the gateway's explicit modality gate also
+rejects non-text payloads before any OpenAI-compatible delivery. Missing credentials, declared windows that are
 too small, unsupported capabilities, and denied privacy boundaries are
 excluded before reliability retries or failover. Models that omit
 `context_window` retain the legacy prompt-precheck behavior. Every concrete
@@ -279,6 +279,12 @@ inheriting eligibility from its public alias. A pinned destination or named
 preset with no eligible member returns
 `422 wayfinder_router_destination_ineligible` with stable reason names rather
 than silently switching privacy boundary (WF-ADR-0056).
+
+Non-text execution surfaces are separately capability-gated. The shared
+contract names embeddings, image generation, audio, and batch support, but the
+current gateway defaults every one to unsupported. Known non-text payloads fail
+before provider delivery rather than being forwarded through a text adapter;
+see WF-ADR-0067 for the independent enablement sequence.
 
 OpenAI- and Anthropic-compatible chat endpoints preserve the same bounded
 Wayfinder control-header allowlist. In particular, privacy and offline controls
