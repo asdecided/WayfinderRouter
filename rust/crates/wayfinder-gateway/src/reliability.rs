@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use wayfinder_config::gateway::GatewayConfig;
 use wayfinder_providers::reliability::{
-    CircuitBreaker, FailoverPolicy, delivery_plan, retry_delays_with,
+    CircuitAttempt, CircuitBreaker, FailoverPolicy, delivery_plan, retry_delays_with,
 };
 
 /// Python-compatible initial full-jitter backoff slot.
@@ -43,9 +43,58 @@ pub enum ReliabilityError {
 pub struct ReliabilityPolicy {
     retries: usize,
     failover: FailoverPolicy,
-    breaker: Mutex<CircuitBreaker>,
+    breaker: Arc<Mutex<CircuitBreaker>>,
     clock: Clock,
     jitter: Jitter,
+}
+
+/// Owned permission for one concrete target attempt sequence.
+///
+/// Dropping an unfinished half-open attempt conservatively fails the probe and
+/// restarts its cooldown. Closed attempts retain the historical cancellation
+/// behavior and do not count client abandonment as an upstream failure.
+pub struct ReliabilityAttempt {
+    breaker: Arc<Mutex<CircuitBreaker>>,
+    clock: Clock,
+    target: String,
+    state: CircuitAttempt,
+    completed: bool,
+}
+
+impl ReliabilityAttempt {
+    /// Whether this lease owns the target's sole half-open probe.
+    #[must_use]
+    pub const fn is_half_open(&self) -> bool {
+        matches!(self.state, CircuitAttempt::HalfOpen)
+    }
+
+    /// Finish the target-level attempt sequence and release circuit ownership.
+    pub fn complete(mut self, succeeded: bool) -> Result<(), ReliabilityError> {
+        let now = validated_now(&self.clock)?;
+        let mut breaker = self
+            .breaker
+            .lock()
+            .map_err(|_| ReliabilityError::LockPoisoned)?;
+        breaker.record_at(&self.target, succeeded, now);
+        self.completed = true;
+        Ok(())
+    }
+}
+
+impl Drop for ReliabilityAttempt {
+    fn drop(&mut self) {
+        if self.completed || !self.is_half_open() {
+            return;
+        }
+        let Ok(now) = validated_now(&self.clock) else {
+            return;
+        };
+        let Ok(mut breaker) = self.breaker.lock() else {
+            return;
+        };
+        breaker.abandon_at(&self.target, self.state, now);
+        self.completed = true;
+    }
 }
 
 impl ReliabilityPolicy {
@@ -73,7 +122,10 @@ impl ReliabilityPolicy {
         Ok(Self {
             retries,
             failover,
-            breaker: Mutex::new(CircuitBreaker::new(threshold, config.breaker_cooldown)),
+            breaker: Arc::new(Mutex::new(CircuitBreaker::new(
+                threshold,
+                config.breaker_cooldown,
+            ))),
             clock: Arc::new(clock),
             jitter: Arc::new(jitter),
         })
@@ -124,6 +176,29 @@ impl ReliabilityPolicy {
         Ok(!self.delivery_plan(target, &[], |_| true)?.is_empty())
     }
 
+    /// Acquire one target-level lease, including single-flight half-open state.
+    pub fn begin_attempt(
+        &self,
+        target: &str,
+    ) -> Result<Option<ReliabilityAttempt>, ReliabilityError> {
+        let now = self.now()?;
+        let mut breaker = self
+            .breaker
+            .lock()
+            .map_err(|_| ReliabilityError::LockPoisoned)?;
+        let Some(state) = breaker.begin_at(target, now) else {
+            return Ok(None);
+        };
+        drop(breaker);
+        Ok(Some(ReliabilityAttempt {
+            breaker: Arc::clone(&self.breaker),
+            clock: Arc::clone(&self.clock),
+            target: target.to_owned(),
+            state,
+            completed: false,
+        }))
+    }
+
     /// Fold one target-level outcome into the shared breaker.
     pub fn record(&self, target: &str, succeeded: bool) -> Result<(), ReliabilityError> {
         let mut breaker = self
@@ -136,10 +211,7 @@ impl ReliabilityPolicy {
     }
 
     fn now(&self) -> Result<f64, ReliabilityError> {
-        let now = (self.clock)();
-        (now.is_finite() && now >= 0.0)
-            .then_some(now)
-            .ok_or(ReliabilityError::InvalidTime)
+        validated_now(&self.clock)
     }
 }
 
@@ -162,11 +234,18 @@ impl Default for ReliabilityPolicy {
         Self {
             retries: 2,
             failover: FailoverPolicy::SameTier,
-            breaker: Mutex::new(CircuitBreaker::default()),
+            breaker: Arc::new(Mutex::new(CircuitBreaker::default())),
             clock: Arc::new(move || started.elapsed().as_secs_f64()),
             jitter: Arc::new(system_jitter),
         }
     }
+}
+
+fn validated_now(clock: &Clock) -> Result<f64, ReliabilityError> {
+    let now = clock();
+    (now.is_finite() && now >= 0.0)
+        .then_some(now)
+        .ok_or(ReliabilityError::InvalidTime)
 }
 
 /// Sleep for a validated retry delay without blocking an executor worker.
@@ -200,6 +279,9 @@ fn system_jitter() -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use tokio::sync::Barrier;
+
     use super::*;
 
     #[test]
@@ -249,6 +331,96 @@ mod tests {
             policy.record("local", true),
             Err(ReliabilityError::InvalidTime)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn half_open_probe_success_failure_and_drop_are_conservative() -> Result<(), ReliabilityError> {
+        let now = Arc::new(AtomicU64::new(0));
+        let clock = Arc::clone(&now);
+        let config = GatewayConfig {
+            breaker_threshold: 1,
+            breaker_cooldown: 10.0,
+            ..GatewayConfig::default()
+        };
+        let policy = ReliabilityPolicy::from_gateway_config_with_sources(
+            &config,
+            move || clock.load(Ordering::SeqCst) as f64,
+            || 0.0,
+        )?;
+
+        policy.record("cloud", false)?;
+        now.store(10, Ordering::SeqCst);
+        let probe = policy
+            .begin_attempt("cloud")?
+            .ok_or(ReliabilityError::InvalidTime)?;
+        assert!(probe.is_half_open());
+        assert!(policy.begin_attempt("cloud")?.is_none());
+        probe.complete(true)?;
+        let closed = policy
+            .begin_attempt("cloud")?
+            .ok_or(ReliabilityError::InvalidTime)?;
+        assert!(!closed.is_half_open());
+        drop(closed);
+
+        policy.record("cloud", false)?;
+        now.store(20, Ordering::SeqCst);
+        policy
+            .begin_attempt("cloud")?
+            .ok_or(ReliabilityError::InvalidTime)?
+            .complete(false)?;
+        assert!(policy.begin_attempt("cloud")?.is_none());
+
+        now.store(30, Ordering::SeqCst);
+        let abandoned = policy
+            .begin_attempt("cloud")?
+            .ok_or(ReliabilityError::InvalidTime)?;
+        drop(abandoned);
+        assert!(policy.begin_attempt("cloud")?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_half_open_callers_receive_one_probe() -> Result<(), ReliabilityError> {
+        let config = GatewayConfig {
+            breaker_threshold: 1,
+            breaker_cooldown: 10.0,
+            ..GatewayConfig::default()
+        };
+        let now = Arc::new(AtomicU64::new(0));
+        let clock = Arc::clone(&now);
+        let policy = Arc::new(ReliabilityPolicy::from_gateway_config_with_sources(
+            &config,
+            move || clock.load(Ordering::SeqCst) as f64,
+            || 0.0,
+        )?);
+        policy.record("cloud", false)?;
+        now.store(10, Ordering::SeqCst);
+        let start = Arc::new(Barrier::new(3));
+        let finish = Arc::new(Barrier::new(3));
+        let admitted = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..2 {
+            let policy = Arc::clone(&policy);
+            let start = Arc::clone(&start);
+            let finish = Arc::clone(&finish);
+            let admitted = Arc::clone(&admitted);
+            tasks.push(tokio::spawn(async move {
+                start.wait().await;
+                let lease = policy.begin_attempt("cloud");
+                if lease.as_ref().is_ok_and(Option::is_some) {
+                    admitted.fetch_add(1, Ordering::SeqCst);
+                }
+                finish.wait().await;
+                lease
+            }));
+        }
+        start.wait().await;
+        finish.wait().await;
+        for task in tasks {
+            let _ = task.await.map_err(|_| ReliabilityError::LockPoisoned)??;
+        }
+        assert_eq!(admitted.load(Ordering::SeqCst), 1);
         Ok(())
     }
 }

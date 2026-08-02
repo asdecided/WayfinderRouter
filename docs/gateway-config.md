@@ -133,7 +133,7 @@ unchanged). See [WF-ADR-0058](../decisions/WF-ADR-0058-opentelemetry-observabili
 
 | setting | effect |
 | --- | --- |
-| `[gateway] retries` / `breaker_threshold` / `breaker_cooldown` | reliability: bounded retries on transport/`429`/`5xx`, and a per-target circuit breaker (WF-ADR-0031) |
+| `[gateway] retries` / `breaker_threshold` / `breaker_cooldown` | reliability: bounded retries on transport/`429`/`5xx`, including before a streaming response is established, and a per-target circuit breaker with one single-flight half-open probe. No retry starts after a stream is established (WF-ADR-0031) |
 | `[gateway] failover = same-tier\|degrade\|escalate` | on exhaustion, stay on the tier (default), fall to a cheaper one (never raises cost), or a dearer one (opt-in); per-request `X-Wayfinder-Failover` |
 | `[gateway.models.<name>] fallbacks = [...]` / `deployments = [...]` / `context_window` | same-tier endpoints to try on failure; weighted concrete deployments behind one alias for healthy throughput; skip a target whose window can't fit the prompt. Responses carry `x-wayfinder-router-served-by` |
 
@@ -159,7 +159,7 @@ unchanged). See [WF-ADR-0058](../decisions/WF-ADR-0058-opentelemetry-observabili
 
 | setting | effect |
 | --- | --- |
-| `[gateway.rate_limit] rpm` / `tpm` / `window` | cap requests-per-minute and/or upstream-tokens-per-minute over a fixed `window` (default 60s); on breach returns `429` with `Retry-After`. The outermost guardrail (checked before scoring); gateway-wide. Successful responses carry `X-RateLimit-Limit`/`-Remaining`/`-Reset` so clients can self-pace; surfaced via `x-wayfinder-router-rate-limit` and `wayfinder_router_rate_limited_total` (WF-ADR-0034) |
+| `[gateway.rate_limit] rpm` / `tpm` / `window` | cap requests and/or upstream tokens over a fixed `window` (default 60s). RPM is admitted before scoring. Immediately before provider delivery, TPM reserves the complete sanitized request's encoded byte length plus explicit `max_tokens` or `max_completion_tokens` multiplied by `n`; requests without a positive output bound return `422 wayfinder_router_token_bound_required`. Exact provider usage reconciles the same window; missing/estimated usage, cancellation, or disconnect retains the conservative charge. A breach returns `429` with `Retry-After`; successful responses carry `X-RateLimit-Limit`/`-Remaining`/`-Reset` (WF-ADR-0034) |
 | `[gateway.state] backend = memory\|redis` / `url` / `namespace` | choose the shared policy-counter backend. `memory` is the zero-configuration default; `redis` uses atomic server-time fixed windows for global, workspace, and virtual-key RPM/TPM across replicas and requires a Redis URL. A Redis outage falls back to bounded process-local counters and sets `wayfinder_state_degraded 1`; it does not drop requests. The savings ledger and response cache remain process-local until their own migrations (WF-ADR-0053) |
 
 ## Virtual API keys

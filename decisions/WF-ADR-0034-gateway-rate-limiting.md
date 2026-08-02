@@ -46,18 +46,29 @@ Two constraints frame the decision, as with the other guardrails:
    OpenAI-shaped `wayfinder_router_rate_limited` error. Degrading wouldn't help: the concern is
    request/token *volume*, and the cheaper tier is just as floodable. A hard stop is the point.
 
-3. **The outermost guardrail.** The admission check runs first — before scoring, budget, cache,
-   and delivery — so a flood is rejected with minimal work. A request that is admitted counts
-   immediately against RPM; a served turn's upstream tokens are added to the window after delivery
-   (non-streaming and streaming alike).
+3. **RPM admission is outermost; TPM is reserved before delivery.** The request check runs before
+   scoring, budget, cache, and delivery, so a flood is rejected with minimal work. A request that
+   is admitted counts immediately against RPM. After cache lookup and immediately before a real
+   provider call, every applicable TPM scope atomically reserves a conservative upper bound: the
+   complete sanitized request's encoded byte length plus the caller's explicit `max_tokens` or
+   `max_completion_tokens`, multiplied by `n`. A TPM-limited request without a positive output
+   bound (or with an invalid `n`) fails with HTTP 422 before provider delivery.
+
+   Exact provider-reported usage reconciles the reservation in its original fixed window.
+   Estimated or missing usage, cancellation, downstream disconnect, and window rollover retain
+   the conservative charge; they never refund a new window. A provider that exceeds the caller's
+   declared output cap may push the completed window over its ceiling, but subsequent admissions
+   remain blocked and the gateway never admits concurrent work against unreserved capacity.
 
 4. **A cache hit counts toward RPM but not TPM.** A hit is still a request (it consumes a request
    slot — request-volume protection holds regardless of caching), but it makes no upstream call,
    so it contributes no tokens to the TPM window. TPM measures upstream throughput.
 
-5. **Gateway-wide in v1; one long-lived limiter.** Its window counters survive config hot-reloads
-   (like the circuit breaker), and the limits track reloaded config. Per-key / per-session limits
-   ride on virtual keys (WF-ROADMAP-0006 #5).
+5. **Gateway, workspace, and virtual-key scopes.** Every applicable scope must accept the TPM
+   reservation before delivery. A later-scope rejection rolls earlier reservations back in the
+   same window. Redis provides fleet-wide fixed-window counters; memory counters remain
+   process-local. Shared-state failures degrade locally only when prior shared reservations were
+   confirmed rolled back; ambiguous partial state fails closed.
 
 6. **Configured under `[gateway.rate_limit]`** (`rpm`, `tpm`, `window`); absent means no limit.
    `rpm`/`tpm` are positive integers; `window` is a positive number; the block round-trips through
@@ -76,9 +87,8 @@ Two constraints frame the decision, as with the other guardrails:
 - **Risk — a fixed window allows a 2× burst at the boundary** (the classic fixed-window edge). A
   sliding window or token bucket is a deliberate later refinement; fixed-window is the simplest
   deterministic counter and matches the savings ledger's bucket style.
-- **Limitation — per process.** The limiter is in-memory per worker; a multi-process deployment
-  caps per worker, not globally (consistent with the breaker, budget, and cache).
-- **Limitation — gateway-wide only** until virtual keys add the per-key boundary.
+- **Limitation — memory is per process.** Multi-replica enforcement requires the Redis state
+  backend. Breakers, budgets, and cache retain their separately documented state boundaries.
 
 ## Alternatives Considered
 
@@ -96,7 +106,8 @@ Two constraints frame the decision, as with the other guardrails:
 - With `[gateway.rate_limit] rpm = N`, the (N+1)th request in a window gets a 429 with a
   `Retry-After`, and the window rolls cleanly afterward — with an **identical scored decision** for
   admitted requests.
-- With `tpm = N`, requests are admitted until the window's served tokens reach N, then 429.
+- With `tpm = N`, concurrent requests whose conservative reservations would exceed N are rejected
+  before provider delivery; exact usage may reconcile unused capacity in the same window.
 - A cache hit consumes a request slot but adds no tokens to the TPM window.
 - No `[gateway.rate_limit]` block ⇒ unlimited (no behavior change).
 

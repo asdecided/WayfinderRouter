@@ -16,7 +16,7 @@ use thiserror::Error;
 use wayfinder_config::gateway::{GatewayConfig, RateLimit as ConfigRateLimit};
 
 use crate::auth;
-use crate::rate_limit::{RateLimitError, RateLimiter, RateResult, RateSnapshot};
+use crate::rate_limit::{RateLimitError, RateLimiter, RateReservation, RateResult, RateSnapshot};
 use crate::state::{StateBackend, StateBackendError, StateLimitConfig};
 
 /// Bound compare work and dynamic key-attribution cardinality.
@@ -296,6 +296,109 @@ impl AccessPolicy {
         Ok(())
     }
 
+    /// Whether any applicable policy scope requires a bounded token promise.
+    pub(crate) fn token_limits_active(
+        &self,
+        grant: AccessGrant,
+    ) -> Result<bool, AccessPolicyError> {
+        if let Some(limiter) = &self.global_limiter
+            && limiter.tokens_active()?
+        {
+            return Ok(true);
+        }
+        let Some(key) = self.key(grant) else {
+            return Ok(false);
+        };
+        if let Some(limiter) = &key.workspace_limiter
+            && limiter.tokens_active()?
+        {
+            return Ok(true);
+        }
+        key.limiter
+            .as_ref()
+            .map(|limiter| limiter.tokens_active())
+            .transpose()
+            .map(|active| active.unwrap_or(false))
+            .map_err(Into::into)
+    }
+
+    /// Reserve a conservative token budget in every applicable policy scope.
+    ///
+    /// A later-scope rejection rolls prior scopes back in their original
+    /// windows. Shared-state failure preserves the existing bounded local
+    /// degradation contract.
+    pub(crate) async fn reserve_tokens(
+        &self,
+        grant: AccessGrant,
+        tokens: u64,
+    ) -> Result<TokenReservationDecision, AccessPolicyError> {
+        let now = (self.clock)();
+        if let Some(shared) = &self.shared {
+            match shared.reserve_tokens(grant, tokens, now).await {
+                Ok(decision) => return Ok(decision),
+                Err(SharedReservationError::Clean) => {
+                    shared.degraded.store(true, Ordering::Relaxed);
+                }
+                Err(SharedReservationError::Unsafe(error)) => {
+                    shared.degraded.store(true, Ordering::Relaxed);
+                    return Err(AccessPolicyError::StateBackend(error));
+                }
+            }
+        }
+        self.reserve_local_tokens(grant, tokens, now)
+    }
+
+    /// Reconcile a completed reservation using this policy's clock domain.
+    pub(crate) async fn reconcile_tokens(
+        &self,
+        reservation: TokenReservation,
+        actual_tokens: u64,
+    ) -> Result<(), AccessPolicyError> {
+        reservation.reconcile(actual_tokens, (self.clock)()).await
+    }
+
+    fn reserve_local_tokens(
+        &self,
+        grant: AccessGrant,
+        tokens: u64,
+        now: f64,
+    ) -> Result<TokenReservationDecision, AccessPolicyError> {
+        let mut entries: Vec<LocalTokenReservation> = Vec::new();
+        let mut limiters = Vec::new();
+        if let Some(limiter) = &self.global_limiter {
+            limiters.push(Arc::clone(limiter));
+        }
+        if let Some(key) = self.key(grant) {
+            if let Some(limiter) = &key.workspace_limiter {
+                limiters.push(Arc::clone(limiter));
+            }
+            if let Some(limiter) = &key.limiter {
+                limiters.push(Arc::clone(limiter));
+            }
+        }
+        for limiter in limiters {
+            let result = limiter.reserve_tokens_at(tokens, now)?;
+            if !result.rate.allowed() {
+                for entry in entries.iter().rev() {
+                    let _ = entry.limiter.rollback_at(entry.reservation, now);
+                }
+                return Ok(TokenReservationDecision::Rejected(result.rate));
+            }
+            if let Some(reservation) = result.reservation {
+                entries.push(LocalTokenReservation {
+                    limiter,
+                    reservation,
+                });
+            }
+        }
+        Ok(TokenReservationDecision::Reserved(TokenReservation {
+            entries: entries
+                .into_iter()
+                .map(TokenReservationEntry::Local)
+                .collect(),
+        }))
+    }
+
     /// Reserve shared global state, degrading to local counters on outage.
     pub(crate) async fn admit_shared_global(
         &self,
@@ -412,6 +515,63 @@ pub(crate) struct AccessGrant {
     key_index: Option<usize>,
 }
 
+pub(crate) enum TokenReservationDecision {
+    Reserved(TokenReservation),
+    Rejected(RateResult),
+}
+
+struct LocalTokenReservation {
+    limiter: Arc<RateLimiter>,
+    reservation: RateReservation,
+}
+
+struct SharedTokenReservation {
+    backend: Arc<dyn StateBackend>,
+    limit: SharedLimit,
+    reservation: RateReservation,
+}
+
+enum TokenReservationEntry {
+    Local(LocalTokenReservation),
+    Shared(SharedTokenReservation),
+}
+
+pub(crate) struct TokenReservation {
+    entries: Vec<TokenReservationEntry>,
+}
+
+impl TokenReservation {
+    /// Reconcile every successful scope before returning the terminal response.
+    pub(crate) async fn reconcile(
+        self,
+        actual_tokens: u64,
+        now_seconds: f64,
+    ) -> Result<(), AccessPolicyError> {
+        for entry in self.entries {
+            match entry {
+                TokenReservationEntry::Local(entry) => {
+                    entry
+                        .limiter
+                        .reconcile_at(entry.reservation, actual_tokens, now_seconds)?;
+                }
+                TokenReservationEntry::Shared(entry) => {
+                    entry
+                        .backend
+                        .reconcile(
+                            &entry.limit.key,
+                            entry.limit.config,
+                            entry.reservation,
+                            actual_tokens,
+                            now_seconds,
+                        )
+                        .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 struct SharedLimit {
     key: Arc<str>,
@@ -428,6 +588,11 @@ struct SharedAccessPolicy {
     global: Option<SharedLimit>,
     keys: Arc<[SharedKeyPolicy]>,
     degraded: AtomicBool,
+}
+
+enum SharedReservationError {
+    Clean,
+    Unsafe(StateBackendError),
 }
 
 impl SharedAccessPolicy {
@@ -584,6 +749,98 @@ impl SharedAccessPolicy {
             }
         }
         Ok(())
+    }
+
+    async fn reserve_tokens(
+        &self,
+        grant: AccessGrant,
+        tokens: u64,
+        now_seconds: f64,
+    ) -> Result<TokenReservationDecision, SharedReservationError> {
+        let mut limits = Vec::new();
+        if let Some(global) = &self.global
+            && global.config.tpm.is_some()
+        {
+            limits.push(global.clone());
+        }
+        if let Some(key) = grant.key_index.and_then(|index| self.keys.get(index)) {
+            if let Some(workspace) = &key.workspace
+                && workspace.config.tpm.is_some()
+            {
+                limits.push(workspace.clone());
+            }
+            if let Some(limiter) = &key.limiter
+                && limiter.config.tpm.is_some()
+            {
+                limits.push(limiter.clone());
+            }
+        }
+
+        let mut entries: Vec<SharedTokenReservation> = Vec::new();
+        for limit in limits {
+            let result = match self
+                .backend
+                .reserve_tokens(&limit.key, limit.config, tokens, now_seconds)
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    let mut rollback_failed = false;
+                    for entry in entries.iter().rev() {
+                        if self
+                            .backend
+                            .rollback(
+                                &entry.limit.key,
+                                entry.limit.config,
+                                entry.reservation,
+                                now_seconds,
+                            )
+                            .await
+                            .is_err()
+                        {
+                            rollback_failed = true;
+                        }
+                    }
+                    return Err(if rollback_failed {
+                        SharedReservationError::Unsafe(error)
+                    } else {
+                        SharedReservationError::Clean
+                    });
+                }
+            };
+            if !result.rate.allowed() {
+                for entry in entries.iter().rev() {
+                    if self
+                        .backend
+                        .rollback(
+                            &entry.limit.key,
+                            entry.limit.config,
+                            entry.reservation,
+                            now_seconds,
+                        )
+                        .await
+                        .is_err()
+                    {
+                        self.degraded.store(true, Ordering::Relaxed);
+                    }
+                }
+                return Ok(TokenReservationDecision::Rejected(result.rate));
+            }
+            if let Some(reservation) = result.reservation {
+                entries.push(SharedTokenReservation {
+                    backend: Arc::clone(&self.backend),
+                    limit,
+                    reservation,
+                });
+            }
+        }
+        self.degraded.store(false, Ordering::Relaxed);
+        Ok(TokenReservationDecision::Reserved(TokenReservation {
+            entries: entries
+                .into_iter()
+                .map(TokenReservationEntry::Shared)
+                .collect(),
+        }))
     }
 }
 
@@ -772,6 +1029,109 @@ mod tests {
                 .and_then(|result| result.limited_by),
             Some(crate::rate_limit::LimitKind::Requests)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_reservation_rolls_back_earlier_scopes_on_later_rejection()
+    -> Result<(), AccessPolicyError> {
+        let mut config = GatewayConfig {
+            rate_limit: Some(RateLimit {
+                rpm: None,
+                tpm: Some(100),
+                window: 60.0,
+            }),
+            ..GatewayConfig::default()
+        };
+        config.workspaces.insert(
+            "production".to_owned(),
+            Workspace {
+                models: Vec::new(),
+                rate_limit: Some(RateLimit {
+                    rpm: None,
+                    tpm: Some(70),
+                    window: 60.0,
+                }),
+            },
+        );
+        let mut key = virtual_key("wf-secret");
+        key.workspace = Some("production".to_owned());
+        key.rate_limit = Some(RateLimit {
+            rpm: None,
+            tpm: Some(50),
+            window: 60.0,
+        });
+        config.keys.insert("team-a".to_owned(), key);
+        let policy = AccessPolicy::from_gateway_config_with_clock(&config, || 1.0)?;
+        let grant = policy
+            .authenticate(Some("Bearer wf-secret"))
+            .ok_or(AccessPolicyError::InvalidKeyId)?;
+
+        let first = match policy.reserve_tokens(grant, 40).await? {
+            TokenReservationDecision::Reserved(reservation) => reservation,
+            TokenReservationDecision::Rejected(_) => return Err(AccessPolicyError::InvalidKeyId),
+        };
+        assert!(matches!(
+            policy.reserve_tokens(grant, 20).await?,
+            TokenReservationDecision::Rejected(_)
+        ));
+        policy.reconcile_tokens(first, 10).await?;
+        assert!(matches!(
+            policy.reserve_tokens(grant, 40).await?,
+            TokenReservationDecision::Reserved(_)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shared_token_rejection_rolls_back_all_earlier_scopes() -> Result<(), AccessPolicyError>
+    {
+        let mut config = GatewayConfig {
+            rate_limit: Some(RateLimit {
+                rpm: None,
+                tpm: Some(100),
+                window: 60.0,
+            }),
+            ..GatewayConfig::default()
+        };
+        config.workspaces.insert(
+            "production".to_owned(),
+            Workspace {
+                models: Vec::new(),
+                rate_limit: Some(RateLimit {
+                    rpm: None,
+                    tpm: Some(70),
+                    window: 60.0,
+                }),
+            },
+        );
+        let mut key = virtual_key("wf-secret");
+        key.workspace = Some("production".to_owned());
+        key.rate_limit = Some(RateLimit {
+            rpm: None,
+            tpm: Some(50),
+            window: 60.0,
+        });
+        config.keys.insert("team-a".to_owned(), key);
+        let backend: Arc<dyn StateBackend> = Arc::new(crate::state::MemoryStateBackend::default());
+        let policy = AccessPolicy::from_gateway_config_with_backend(&config, || 1.0, backend)?;
+        let grant = policy
+            .authenticate(Some("Bearer wf-secret"))
+            .ok_or(AccessPolicyError::InvalidKeyId)?;
+
+        let first = match policy.reserve_tokens(grant, 40).await? {
+            TokenReservationDecision::Reserved(reservation) => reservation,
+            TokenReservationDecision::Rejected(_) => return Err(AccessPolicyError::InvalidKeyId),
+        };
+        assert!(matches!(
+            policy.reserve_tokens(grant, 20).await?,
+            TokenReservationDecision::Rejected(_)
+        ));
+        policy.reconcile_tokens(first, 10).await?;
+        assert!(matches!(
+            policy.reserve_tokens(grant, 40).await?,
+            TokenReservationDecision::Reserved(_)
+        ));
         Ok(())
     }
 }

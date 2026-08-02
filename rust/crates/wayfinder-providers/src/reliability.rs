@@ -78,6 +78,16 @@ pub struct CircuitBreaker {
     cooldown_seconds: f64,
     failures: HashMap<String, usize>,
     opened_at: HashMap<String, f64>,
+    half_open: HashSet<String>,
+}
+
+/// State owned by one admitted target attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CircuitAttempt {
+    /// The target was closed when the attempt began.
+    Closed,
+    /// This is the target's sole probe after cooldown.
+    HalfOpen,
 }
 
 impl CircuitBreaker {
@@ -94,15 +104,32 @@ impl CircuitBreaker {
             },
             failures: HashMap::new(),
             opened_at: HashMap::new(),
+            half_open: HashSet::new(),
         }
     }
 
     /// Whether `target` may be tried now (closed or ready for a half-open probe).
     #[must_use]
     pub fn allow_at(&self, target: &str, now_seconds: f64) -> bool {
+        if self.half_open.contains(target) {
+            return false;
+        }
         self.opened_at
             .get(target)
             .is_none_or(|opened| now_seconds - *opened >= self.cooldown_seconds)
+    }
+
+    /// Begin one target attempt, granting at most one half-open probe.
+    pub fn begin_at(&mut self, target: &str, now_seconds: f64) -> Option<CircuitAttempt> {
+        let Some(opened) = self.opened_at.get(target) else {
+            return Some(CircuitAttempt::Closed);
+        };
+        if now_seconds - *opened < self.cooldown_seconds
+            || !self.half_open.insert(target.to_owned())
+        {
+            return None;
+        }
+        Some(CircuitAttempt::HalfOpen)
     }
 
     /// Whether the breaker is still cooling down for `target`.
@@ -116,6 +143,7 @@ impl CircuitBreaker {
     /// Success closes the breaker. Every failure at or above the threshold
     /// restarts the cooldown, matching the Python oracle's failed-probe rule.
     pub fn record_at(&mut self, target: &str, succeeded: bool, now_seconds: f64) {
+        self.half_open.remove(target);
         if succeeded {
             self.failures.remove(target);
             self.opened_at.remove(target);
@@ -126,6 +154,13 @@ impl CircuitBreaker {
         *count = count.saturating_add(1);
         if *count >= self.threshold {
             self.opened_at.insert(target.to_owned(), now_seconds);
+        }
+    }
+
+    /// Conservatively fail an aborted half-open probe and restart cooldown.
+    pub fn abandon_at(&mut self, target: &str, attempt: CircuitAttempt, now_seconds: f64) {
+        if attempt == CircuitAttempt::HalfOpen {
+            self.record_at(target, false, now_seconds);
         }
     }
 }
@@ -248,6 +283,21 @@ mod tests {
         assert!(breaker.allow_at("x", 20.0));
         breaker.record_at("x", true, 20.0);
         assert!(breaker.allow_at("x", 20.0));
+    }
+
+    #[test]
+    fn half_open_probe_is_single_flight_and_abandon_restarts_cooldown() {
+        let mut breaker = CircuitBreaker::new(1, 10.0);
+        breaker.record_at("x", false, 0.0);
+        assert_eq!(breaker.begin_at("x", 10.0), Some(CircuitAttempt::HalfOpen));
+        assert_eq!(breaker.begin_at("x", 10.0), None);
+        assert!(!breaker.allow_at("x", 10.0));
+
+        breaker.abandon_at("x", CircuitAttempt::HalfOpen, 10.0);
+        assert!(breaker.is_open_at("x", 19.0));
+        assert_eq!(breaker.begin_at("x", 20.0), Some(CircuitAttempt::HalfOpen));
+        breaker.record_at("x", true, 20.0);
+        assert_eq!(breaker.begin_at("x", 20.0), Some(CircuitAttempt::Closed));
     }
 
     #[test]
