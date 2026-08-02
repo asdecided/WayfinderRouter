@@ -79,6 +79,7 @@ minimal `/livez`/`/readyz` probes only. See
 The gateway exposes:
 
 - OpenAI-compatible: `http://127.0.0.1:8088/v1`
+- OpenAI Responses compatibility: `POST /v1/responses` (bounded text and multi-turn contract)
 - Anthropic-compatible: `http://127.0.0.1:8088`
 - Health: `http://127.0.0.1:8088/healthz`
 

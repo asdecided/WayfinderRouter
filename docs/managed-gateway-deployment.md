@@ -111,6 +111,7 @@ The managed listener exposes only:
 | `GET /readyz` | none | content-free delivery readiness |
 | `GET /v1/models`, `GET /models` | virtual key | models permitted to that key |
 | `POST /v1/chat/completions`, `POST /chat/completions` | virtual key | OpenAI-compatible inference |
+| `POST /v1/responses`, `POST /responses` | virtual key | bounded OpenAI Responses compatibility |
 | `POST /v1/messages`, `POST /messages` | virtual key | Anthropic-compatible inference |
 
 Requests authenticate with `Authorization: Bearer <virtual-key>`. Model listing
@@ -118,6 +119,15 @@ respects the effective workspace/key `models` allowlist. Inference retains the
 existing per-key attribution and budget behavior. Workspace and key rate
 limits both apply, and successful responses identify the bounded policy scope
 through `x-wayfinder-router-workspace`.
+
+Responses accepts `model`, `input`, `instructions`, `stream`,
+`max_output_tokens`, and `temperature`. It supports text input and bounded
+multi-turn message history. Unknown fields, tools, stored conversations,
+background jobs, multimodal parts, and previous-response references fail with
+`wayfinder_router_unsupported_request`; they are not silently ignored. Streaming
+uses `response.created`, `response.output_text.delta`, and one terminal
+`response.completed` or `response.failed` event. See
+[WF-ADR-0066](../decisions/WF-ADR-0066-bounded-responses-api.md).
 
 When exact-response caching is enabled, entries are partitioned by the
 authenticated virtual-key identifier, effective privacy posture, selected

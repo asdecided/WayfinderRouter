@@ -8,6 +8,12 @@ details, release history over commit history.
 
 ### Added
 
+- **Bounded OpenAI Responses API compatibility** (WF-ADR-0066, issue #153). The Rust gateway now
+  exposes authenticated `/v1/responses` and `/responses` aliases with strict text/multi-turn input,
+  normalized usage, bounded SSE streaming, one terminal event, and explicit unsupported-field
+  errors. Existing Chat Completions routing, credentials, privacy, budgets, and accounting remain
+  the authoritative execution path.
+
 - **Bounded canary rollouts and tripwires** (WF-ADR-0065, issue #152). Automatic
   routing can opt into stable request/workspace/key/cohort exposure for a named
   candidate route. Redis-backed fixed-window exposure, prompt-free fleet

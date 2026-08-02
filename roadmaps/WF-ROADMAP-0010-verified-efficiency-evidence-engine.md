@@ -68,6 +68,13 @@ quality tripwires with shared rollback and audit state. An unavailable or
 degraded telemetry/state authority suppresses new canary exposure rather than
 expanding it. The deterministic scorer remains the sole routing authority.
 
+Issue #153 adds the bounded Rust Responses compatibility surface. Authenticated
+`/v1/responses` and `/responses` accept only the documented text and multi-turn
+fields, reuse the existing Chat Completions delivery path, normalize buffered
+usage and streaming events, and fail closed on unsupported fields. Input,
+output, event, response, and accounting bounds are explicit; duplicate terminal
+events or a second route decision are not permitted. See WF-ADR-0066.
+
 WF-ADR-0052 adds bounded workspace policy above virtual keys: shared
 process-local RPM/TPM, inherited model allowlists, stable public model aliases,
 and explicit workspace response attribution. It also fixes the enterprise
