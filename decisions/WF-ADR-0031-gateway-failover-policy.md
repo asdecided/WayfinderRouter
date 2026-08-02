@@ -48,9 +48,11 @@ Two constraints frame the decision:
      request only wastes time).
    - Bounded retries with exponential backoff + jitter; bounds are configurable.
    - A **per-target circuit breaker** (`CLOSED → OPEN` after N consecutive failures →
-     `HALF-OPEN` probe → `CLOSED`) with a cooldown, so a known-dead provider is skipped
-     instead of hammered. State is in-memory, per process. All of it is computed from
-     observed transport outcomes — no model call.
+     one single-flight `HALF-OPEN` probe → `CLOSED`) with a cooldown, so a known-dead
+     provider is skipped instead of hammered. An abandoned half-open probe fails closed
+     and restarts the cooldown. State is in-memory, per process and shared by buffered and
+     streaming delivery. All of it is computed from observed transport outcomes — no model
+     call.
 
 3. **Failover across endpoints is governed by an explicit `failover` policy, default
    `same-tier`:**
@@ -77,9 +79,12 @@ Two constraints frame the decision:
    `x-wayfinder-router-failover`), so a `degrade` is observable rather than a silent quality
    drop. Cost and savings accounting (WF-DESIGN-0007) bill the target that *actually* served.
 
-6. **Streaming fails over only before the first byte reaches the client.** Once SSE chunks
-   are flowing, switching upstreams would corrupt the response, so a mid-stream failure
-   stays a terminal SSE error (the current behavior).
+6. **Streaming retries and fails over only before the response is established.** Transport
+   failures while opening the stream and retryable upstream statuses receive the same
+   bounded retry policy as buffered requests. Once an upstream response has been accepted,
+   the target lease travels with that stream and no second request is started: switching
+   upstreams after response commitment would risk duplicate work or corrupt the response.
+   A mid-stream failure therefore stays a terminal SSE error.
 
 7. **`degrade`-to-local is the same primitive a budget breach will reuse** (WF-ROADMAP-0006
    item 6): "out of headroom → serve from the cheaper tier." Building it here means the

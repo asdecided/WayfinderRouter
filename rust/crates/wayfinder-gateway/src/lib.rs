@@ -71,7 +71,9 @@ use wayfinder_service::pricing::{
     table_version, turn_cost, usage_tokens,
 };
 
-use crate::access::{AccessGrant, AccessPolicy, AccessPolicyError};
+use crate::access::{
+    AccessGrant, AccessPolicy, AccessPolicyError, TokenReservation, TokenReservationDecision,
+};
 use crate::admission::{AdmissionError, AdmissionPermit, AdmissionPolicy};
 use crate::budget::{BudgetDecision, BudgetPolicy, format_limit};
 use crate::cache::{
@@ -90,7 +92,7 @@ use crate::delivery::{
 use crate::metrics::{DEFAULT_MAX_LABEL_SERIES, GatewayMetrics};
 use crate::rate_limit::{RateResult, RateSnapshot};
 use crate::recent::{RecentCost, RecentEntry, RecentRoutes};
-use crate::reliability::{ReliabilityError, ReliabilityPolicy, sleep_retry};
+use crate::reliability::{ReliabilityAttempt, ReliabilityError, ReliabilityPolicy, sleep_retry};
 use crate::reload::LastGood;
 
 /// Default maximum request body accepted by body-buffering extractors (1 MiB).
@@ -779,12 +781,17 @@ impl AppState {
             .map_or(Ok(()), |path| self.savings_ledger.save(path))
     }
 
-    /// Preserve process-lifetime observability across a config snapshot swap.
+    /// Preserve process-lifetime runtime authorities across a config snapshot swap.
     ///
-    /// Configuration-derived policies remain owned by the new snapshot while
-    /// recent metadata, metrics, and realized accounting retain continuity.
+    /// Recent metadata, metrics, realized accounting, and delivery admission
+    /// retain continuity. Admission is deliberately one process-lifetime
+    /// authority: replacing its semaphores while requests from the previous
+    /// snapshot are still in flight would let each generation admit up to its
+    /// own limit. Concurrency-limit changes therefore take effect on process
+    /// restart rather than weakening the active bound during hot reload.
     #[must_use]
     pub fn with_runtime_state_from(mut self, previous: &Self) -> Self {
+        self.admission_policy = Arc::clone(&previous.admission_policy);
         self.recent = Arc::clone(&previous.recent);
         self.metrics = Arc::clone(&previous.metrics);
         self.deployment_cursors = Arc::clone(&previous.deployment_cursors);
@@ -969,10 +976,6 @@ impl AppState {
     #[must_use]
     pub fn audit_log(&self) -> &audit::AuditLog {
         &self.audit_log
-    }
-
-    pub(crate) fn access_policy_arc(&self) -> Option<Arc<AccessPolicy>> {
-        self.access_policy.as_ref().map(Arc::clone)
     }
 
     /// Configured spend-budget policy.
@@ -2378,6 +2381,36 @@ async fn chat_completions(
         Err(error) => return admission_error_response(&state, error, routing_headers),
     };
 
+    let token_reservation =
+        if let (Some(policy), Some(grant)) = (state.access_policy(), access_grant) {
+            match policy.token_limits_active(grant) {
+                Ok(false) => None,
+                Ok(true) => {
+                    let reserved_tokens = match conservative_token_reservation(&request_body) {
+                        Ok(tokens) => tokens,
+                        Err(message) => {
+                            return error_response(
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                "wayfinder_router_token_bound_required",
+                                message.to_owned(),
+                                routing_headers,
+                            );
+                        }
+                    };
+                    match policy.reserve_tokens(grant, reserved_tokens).await {
+                        Ok(TokenReservationDecision::Reserved(reservation)) => Some(reservation),
+                        Ok(TokenReservationDecision::Rejected(result)) => {
+                            return rate_limited_response(&state, result, &request_id);
+                        }
+                        Err(error) => return access_state_error(&request_id, &error),
+                    }
+                }
+                Err(error) => return access_state_error(&request_id, &error),
+            }
+        } else {
+            None
+        };
+
     if request_body.get("stream").and_then(Value::as_bool) == Some(true) {
         let initial_event = debug.then(|| {
             let envelope = DecisionEnvelope {
@@ -2412,6 +2445,7 @@ async fn chat_completions(
             access_grant,
             initial_event,
             admission_permit,
+            token_reservation,
         })
         .await;
     }
@@ -2485,8 +2519,10 @@ async fn chat_completions(
             status,
             content_type: &response_content_type,
             body: &body,
+            token_reservation,
         },
-    );
+    )
+    .await;
     if let (Some("miss"), Some(usage)) = (cache_state, accounted) {
         let response_value = if !body.is_empty() && response_content_type.contains("json") {
             serde_json::from_slice(&body).unwrap_or(Value::Null)
@@ -2610,6 +2646,8 @@ struct StreamRelayContext {
     completion_chars: u64,
     started: Option<Instant>,
     initial_event: Option<Bytes>,
+    token_reservation: Option<TokenReservation>,
+    reliability_attempt: Option<ReliabilityAttempt>,
     _admission_permit: ObservedAdmissionPermit,
 }
 
@@ -2627,6 +2665,7 @@ struct StreamingChatInput {
     access_grant: Option<AccessGrant>,
     initial_event: Option<Bytes>,
     admission_permit: ObservedAdmissionPermit,
+    token_reservation: Option<TokenReservation>,
 }
 
 #[cfg_attr(
@@ -2648,6 +2687,7 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
         access_grant,
         initial_event,
         admission_permit,
+        token_reservation,
     } = input;
     if state.streaming_delivery().is_none() {
         return error_response(
@@ -2691,9 +2731,9 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                 last_error = format!("deployment '{target_id}' credential is unavailable");
                 continue;
             }
-            match state.reliability_policy().target_available(&target_id) {
-                Ok(true) => {}
-                Ok(false) => continue,
+            let reliability_attempt = match state.reliability_policy().begin_attempt(&target_id) {
+                Ok(Some(attempt)) => attempt,
+                Ok(None) => continue,
                 Err(error) => {
                     return error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -2702,45 +2742,100 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                         request_id_headers(&request_id),
                     );
                 }
-            }
-            match delivery.send_stream(&target, request_body.clone()).await {
-                Ok(response) if response.status().is_success() => {
-                    established = Some((target_name.clone(), target_id, response));
-                    break;
-                }
-                Ok(response) if is_retryable(Some(response.status().as_u16())) => {
-                    last_error = format!("upstream returned {}", response.status().as_u16());
-                    let _ = state.reliability_policy().record(&target_id, false);
-                    let _ = state.metrics().observe_upstream_error(&target_id);
-                }
-                Ok(response) => {
-                    let status = response.status();
-                    let content_type = HeaderValue::from_str(response.content_type())
-                        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
-                    headers.insert(header::CONTENT_TYPE, content_type);
-                    if let Err(message) =
-                        insert_header(&mut headers, "x-wayfinder-router-served-by", target_name)
-                    {
-                        return error_response(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "wayfinder_router_misconfigured",
-                            message,
-                            request_id_headers(&request_id),
-                        );
+            };
+            let mut reliability_attempt = Some(reliability_attempt);
+            let delays = state.reliability_policy().retry_delays();
+            for attempt_index in 0..=state.reliability_policy().retries() {
+                match delivery.send_stream(&target, request_body.clone()).await {
+                    Ok(response) if response.status().is_success() => {
+                        let attempt = match reliability_attempt.take() {
+                            Some(attempt) => attempt,
+                            None => {
+                                return error_response(
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "wayfinder_router_state_error",
+                                    "gateway reliability attempt state is unavailable".to_owned(),
+                                    request_id_headers(&request_id),
+                                );
+                            }
+                        };
+                        established =
+                            Some((target_name.clone(), target_id.clone(), response, attempt));
+                        break;
                     }
-                    return (status, headers, Body::from_stream(response.into_stream()))
-                        .into_response();
+                    Ok(response) if is_retryable(Some(response.status().as_u16())) => {
+                        last_error = format!("upstream returned {}", response.status().as_u16());
+                        let _ = state.metrics().observe_upstream_error(&target_id);
+                    }
+                    Ok(response) => {
+                        let status = response.status();
+                        let succeeded = !is_auth_failure(Some(status.as_u16()));
+                        if let Some(attempt) = reliability_attempt.take()
+                            && let Err(error) = attempt.complete(succeeded)
+                        {
+                            return error_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "wayfinder_router_state_error",
+                                error.to_string(),
+                                request_id_headers(&request_id),
+                            );
+                        }
+                        let content_type = HeaderValue::from_str(response.content_type())
+                            .unwrap_or_else(|_| {
+                                HeaderValue::from_static("application/octet-stream")
+                            });
+                        headers.insert(header::CONTENT_TYPE, content_type);
+                        if let Err(message) =
+                            insert_header(&mut headers, "x-wayfinder-router-served-by", target_name)
+                        {
+                            return error_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "wayfinder_router_misconfigured",
+                                message,
+                                request_id_headers(&request_id),
+                            );
+                        }
+                        return (status, headers, Body::from_stream(response.into_stream()))
+                            .into_response();
+                    }
+                    Err(error) => {
+                        last_error = error.to_string();
+                        last_failure = fatal_delivery_status(&error);
+                        let _ = state.metrics().observe_upstream_error(&target_id);
+                        if !matches!(error, DeliveryError::Provider(ProviderError::Transport)) {
+                            if stream_failure_affects_reliability(&error)
+                                && let Some(attempt) = reliability_attempt.take()
+                                && let Err(error) = attempt.complete(false)
+                            {
+                                return error_response(
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "wayfinder_router_state_error",
+                                    error.to_string(),
+                                    request_id_headers(&request_id),
+                                );
+                            }
+                            return error_response(
+                                last_failure.0,
+                                last_failure.1,
+                                last_error,
+                                headers,
+                            );
+                        }
+                    }
                 }
-                Err(error) => {
-                    last_error = error.to_string();
-                    last_failure = fatal_delivery_status(&error);
-                    if stream_failure_affects_reliability(&error) {
-                        let _ = state.reliability_policy().record(&target_id, false);
+                if attempt_index < state.reliability_policy().retries() {
+                    if let Some(delay) = delays.get(attempt_index) {
+                        sleep_retry(*delay).await;
                     }
-                    let _ = state.metrics().observe_upstream_error(&target_id);
-                    if !matches!(error, DeliveryError::Provider(ProviderError::Transport)) {
-                        return error_response(last_failure.0, last_failure.1, last_error, headers);
-                    }
+                } else if let Some(attempt) = reliability_attempt.take()
+                    && let Err(error) = attempt.complete(false)
+                {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "wayfinder_router_state_error",
+                        error.to_string(),
+                        request_id_headers(&request_id),
+                    );
                 }
             }
         }
@@ -2748,7 +2843,7 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
             break;
         }
     }
-    let Some((served_by, served_by_id, response)) = established else {
+    let Some((served_by, served_by_id, response, reliability_attempt)) = established else {
         return error_response(last_failure.0, last_failure.1, last_error, headers);
     };
     if let Err(message) = insert_header(&mut headers, "x-wayfinder-router-served-by", &served_by) {
@@ -2777,6 +2872,8 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
         completion_chars: 0,
         started: Some(started),
         initial_event,
+        token_reservation,
+        reliability_attempt: Some(reliability_attempt),
         _admission_permit: admission_permit,
     };
     let body_stream = stream::unfold(
@@ -2794,7 +2891,7 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                     }
                     Err(error) => {
                         let chunk = stream_failure_chunk(
-                            &context,
+                            &mut context,
                             &error.to_string(),
                             "wayfinder_router_upstream_error",
                             true,
@@ -2804,7 +2901,7 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                 },
                 Some(Err(error)) => {
                     let chunk = stream_failure_chunk(
-                        &context,
+                        &mut context,
                         &error.to_string(),
                         stream_failure_type(&error),
                         stream_failure_affects_reliability(&error),
@@ -2814,12 +2911,12 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                 None => match context.decoder.finish() {
                     Ok(events) => {
                         observe_stream_events(&events, &mut context.completion_chars);
-                        finish_stream_success(&context);
+                        finish_stream_success(&mut context).await;
                         None
                     }
                     Err(error) => {
                         let chunk = stream_failure_chunk(
-                            &context,
+                            &mut context,
                             &error.to_string(),
                             "wayfinder_router_upstream_error",
                             true,
@@ -2857,7 +2954,7 @@ fn observe_stream_events(events: &[SseEvent], completion_chars: &mut u64) {
     }
 }
 
-fn finish_stream_success(context: &StreamRelayContext) {
+async fn finish_stream_success(context: &mut StreamRelayContext) {
     let elapsed = context
         .started
         .map_or(0.0, |started| started.elapsed().as_secs_f64());
@@ -2865,10 +2962,9 @@ fn finish_stream_success(context: &StreamRelayContext) {
         .state
         .metrics()
         .observe_upstream(&context.target_id, elapsed);
-    let _ = context
-        .state
-        .reliability_policy()
-        .record(&context.target_id, true);
+    if let Some(attempt) = context.reliability_attempt.take() {
+        let _ = attempt.complete(true);
+    }
     let _ = account_stream_success(
         &context.state,
         &context.target_name,
@@ -2876,7 +2972,9 @@ fn finish_stream_success(context: &StreamRelayContext) {
         &context.messages,
         context.access_grant,
         context.completion_chars,
-    );
+        context.token_reservation.take(),
+    )
+    .await;
 }
 
 fn stream_failure_type(error: &DeliveryError) -> &'static str {
@@ -2918,7 +3016,7 @@ fn stream_failure_affects_reliability(error: &DeliveryError) -> bool {
 }
 
 fn stream_failure_chunk(
-    context: &StreamRelayContext,
+    context: &mut StreamRelayContext,
     message: &str,
     error_type: &str,
     affects_reliability: bool,
@@ -2928,10 +3026,9 @@ fn stream_failure_chunk(
         .metrics()
         .observe_upstream_error(&context.target_id);
     if affects_reliability {
-        let _ = context
-            .state
-            .reliability_policy()
-            .record(&context.target_id, false);
+        if let Some(attempt) = context.reliability_attempt.take() {
+            let _ = attempt.complete(false);
+        }
     }
     let payload = serde_json::to_string(&json!({
         "error": {
@@ -3190,13 +3287,14 @@ async fn deliver_with_reliability(
                 last_error = format!("deployment '{target_id}' credential is unavailable");
                 continue;
             }
-            if !state
+            let Some(reliability_attempt) = state
                 .reliability_policy()
-                .target_available(&target_id)
+                .begin_attempt(&target_id)
                 .map_err(ReliableDeliveryFailure::State)?
-            {
+            else {
                 continue;
-            }
+            };
+            let mut reliability_attempt = Some(reliability_attempt);
             let delays = state.reliability_policy().retry_delays();
             for attempt in 0..=state.reliability_policy().retries() {
                 let started = Instant::now();
@@ -3206,17 +3304,23 @@ async fn deliver_with_reliability(
                         if !is_retryable(Some(status)) {
                             if is_auth_failure(Some(status)) {
                                 let _ = state.metrics().observe_upstream_error(&target_id);
-                                state
-                                    .reliability_policy()
-                                    .record(&target_id, false)
+                                reliability_attempt
+                                    .take()
+                                    .ok_or(ReliableDeliveryFailure::State(
+                                        ReliabilityError::LockPoisoned,
+                                    ))?
+                                    .complete(false)
                                     .map_err(ReliableDeliveryFailure::State)?;
                             } else {
                                 let _ = state
                                     .metrics()
                                     .observe_upstream(&target_id, started.elapsed().as_secs_f64());
-                                state
-                                    .reliability_policy()
-                                    .record(&target_id, true)
+                                reliability_attempt
+                                    .take()
+                                    .ok_or(ReliableDeliveryFailure::State(
+                                        ReliabilityError::LockPoisoned,
+                                    ))?
+                                    .complete(true)
                                     .map_err(ReliableDeliveryFailure::State)?;
                             }
                             return Ok((target_name.clone(), response));
@@ -3238,9 +3342,12 @@ async fn deliver_with_reliability(
                     }
                 }
             }
-            state
-                .reliability_policy()
-                .record(&target_id, false)
+            reliability_attempt
+                .take()
+                .ok_or(ReliableDeliveryFailure::State(
+                    ReliabilityError::LockPoisoned,
+                ))?
+                .complete(false)
                 .map_err(ReliableDeliveryFailure::State)?;
         }
     }
@@ -3476,11 +3583,7 @@ fn request_requirements(
     messages: &Value,
     prompt_estimate: u64,
 ) -> RoutingRequirements {
-    let requested_output = ["max_tokens", "max_completion_tokens"]
-        .iter()
-        .filter_map(|field| body.get(*field).and_then(Value::as_u64))
-        .max()
-        .unwrap_or(0);
+    let requested_output = requested_output_tokens_from_map(body);
     RoutingRequirements {
         // Existing gateway model entries may intentionally omit a context
         // window. Preserve that compatibility when the caller did not make an
@@ -3492,6 +3595,36 @@ fn request_requirements(
         tools: request_requires_tools(body),
         streaming: body.get("stream").and_then(Value::as_bool) == Some(true),
     }
+}
+
+fn requested_output_tokens(body: &Value) -> u64 {
+    body.as_object().map_or(0, requested_output_tokens_from_map)
+}
+
+fn requested_output_tokens_from_map(body: &serde_json::Map<String, Value>) -> u64 {
+    ["max_tokens", "max_completion_tokens"]
+        .iter()
+        .filter_map(|field| body.get(*field).and_then(Value::as_u64))
+        .max()
+        .unwrap_or(0)
+}
+
+fn conservative_token_reservation(body: &Value) -> Result<u64, &'static str> {
+    let requested_output = requested_output_tokens(body);
+    if requested_output == 0 {
+        return Err("TPM-limited requests must set max_tokens or max_completion_tokens");
+    }
+    let completions = match body.get("n") {
+        None => 1,
+        Some(value) => value
+            .as_u64()
+            .filter(|count| *count > 0)
+            .ok_or("TPM-limited requests require n to be a positive integer")?,
+    };
+    let request_bytes = serde_json::to_vec(body)
+        .map(|encoded| u64::try_from(encoded.len()).unwrap_or(u64::MAX))
+        .map_err(|_| "TPM-limited request could not be bounded")?;
+    Ok(request_bytes.saturating_add(requested_output.saturating_mul(completions)))
 }
 
 fn exclusion_reason_name(reason: ExclusionReason) -> &'static str {
@@ -3905,6 +4038,7 @@ struct BufferedAccounting<'a> {
     status: StatusCode,
     content_type: &'a str,
     body: &'a Bytes,
+    token_reservation: Option<TokenReservation>,
 }
 
 #[derive(Clone, Copy)]
@@ -3914,7 +4048,17 @@ struct AccountedUsage {
     estimated: bool,
 }
 
-fn account_buffered_success(
+struct UsageAccounting<'a> {
+    route: &'a str,
+    request_id: &'a str,
+    access_grant: Option<AccessGrant>,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    estimated: bool,
+    token_reservation: Option<TokenReservation>,
+}
+
+async fn account_buffered_success(
     state: &AppState,
     context: BufferedAccounting<'_>,
 ) -> Option<AccountedUsage> {
@@ -3926,6 +4070,7 @@ fn account_buffered_success(
         status,
         content_type,
         body,
+        token_reservation,
     } = context;
     if status.as_u16() >= 400 {
         return None;
@@ -3939,22 +4084,27 @@ fn account_buffered_success(
     let usage = usage_tokens(&response, &prompt, first_choice_text(&response));
     record_accounted_usage(
         state,
-        route,
-        request_id,
-        access_grant,
-        usage.prompt,
-        usage.completion,
-        usage.estimated,
+        UsageAccounting {
+            route,
+            request_id,
+            access_grant,
+            prompt_tokens: usage.prompt,
+            completion_tokens: usage.completion,
+            estimated: usage.estimated,
+            token_reservation,
+        },
     )
+    .await
 }
 
-fn account_stream_success(
+async fn account_stream_success(
     state: &AppState,
     route: &str,
     request_id: &str,
     messages: &Value,
     access_grant: Option<AccessGrant>,
     completion_chars: u64,
+    token_reservation: Option<TokenReservation>,
 ) -> Option<AccountedUsage> {
     let prompt_tokens = estimate_tokens(&extract_prompt(messages, RouteOn::All));
     let completion_tokens = if completion_chars == 0 {
@@ -3964,24 +4114,32 @@ fn account_stream_success(
     };
     record_accounted_usage(
         state,
+        UsageAccounting {
+            route,
+            request_id,
+            access_grant,
+            prompt_tokens: i64::try_from(prompt_tokens).unwrap_or(i64::MAX),
+            completion_tokens: i64::try_from(completion_tokens).unwrap_or(i64::MAX),
+            estimated: true,
+            token_reservation,
+        },
+    )
+    .await
+}
+
+async fn record_accounted_usage(
+    state: &AppState,
+    accounting: UsageAccounting<'_>,
+) -> Option<AccountedUsage> {
+    let UsageAccounting {
         route,
         request_id,
         access_grant,
-        i64::try_from(prompt_tokens).unwrap_or(i64::MAX),
-        i64::try_from(completion_tokens).unwrap_or(i64::MAX),
-        true,
-    )
-}
-
-fn record_accounted_usage(
-    state: &AppState,
-    route: &str,
-    request_id: &str,
-    access_grant: Option<AccessGrant>,
-    prompt_tokens: i64,
-    completion_tokens: i64,
-    estimated: bool,
-) -> Option<AccountedUsage> {
+        prompt_tokens,
+        completion_tokens,
+        estimated,
+        token_reservation,
+    } = accounting;
     let Ok(cost) = turn_cost(
         route,
         prompt_tokens,
@@ -4003,15 +4161,16 @@ fn record_accounted_usage(
         .and_then(|policy| access_grant.and_then(|grant| policy.key_id(grant)));
     let _ = state.savings_ledger().record(&cost, today, key_id);
     let _ = state.persist_savings();
-    if let (Some(policy), Some(grant)) = (state.access_policy(), access_grant) {
-        let tokens = cost.prompt_tokens.saturating_add(cost.completion_tokens);
+    let tokens = cost.prompt_tokens.saturating_add(cost.completion_tokens);
+    if let Some(reservation) = token_reservation {
+        if !estimated {
+            let policy = state.access_policy()?;
+            policy.reconcile_tokens(reservation, tokens).await.ok()?;
+        }
+    } else if let (Some(policy), Some(grant)) = (state.access_policy(), access_grant) {
         let _ = policy.add_tokens(grant, tokens);
         if policy.uses_shared_state() {
-            if let Some(policy) = state.access_policy_arc() {
-                tokio::spawn(async move {
-                    let _ = policy.add_shared_tokens(grant, tokens).await;
-                });
-            }
+            let _ = policy.add_shared_tokens(grant, tokens).await;
         }
     }
     let _ = state.metrics().observe_cost(cost.realized, cost.baseline);
@@ -4316,7 +4475,7 @@ mod tests {
     };
     use crate::{
         access::AccessPolicy,
-        admission::AdmissionPolicy,
+        admission::{AdmissionError, AdmissionPolicy},
         auth,
         cache::{CacheSettings, CachedResponse, cache_key},
         server::serve_with_shutdown,
@@ -5375,6 +5534,36 @@ mod tests {
 
         release.add_permits(1);
         assert_eq!(first.await??.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hot_reload_snapshots_share_one_admission_authority() -> TestResult {
+        let previous = AppState::new(RoutingConfig::default(), Vec::new(), false, "before")
+            .with_admission_policy(AdmissionPolicy::new(1, 0, Duration::from_secs(1))?);
+        let old_generation = previous.admission_policy().acquire().await?;
+
+        // A freshly parsed snapshot owns fresh semaphores and may even carry a
+        // different configured limit. Runtime adoption must retain the one
+        // process-lifetime authority while old-generation requests can exist.
+        let current = AppState::new(RoutingConfig::default(), Vec::new(), false, "after")
+            .with_admission_policy(AdmissionPolicy::new(8, 0, Duration::from_secs(1))?)
+            .with_runtime_state_from(&previous);
+        assert_eq!(current.admission_policy().max_in_flight(), 1);
+        assert!(matches!(
+            current.admission_policy().acquire().await,
+            Err(AdmissionError::QueueFull)
+        ));
+
+        drop(old_generation);
+        let new_generation = current.admission_policy().acquire().await?;
+        assert!(matches!(
+            previous.admission_policy().acquire().await,
+            Err(AdmissionError::QueueFull)
+        ));
+        drop(new_generation);
+        assert_eq!(previous.admission_policy().in_flight(), 0);
+        assert_eq!(current.admission_policy().in_flight(), 0);
         Ok(())
     }
 
@@ -8262,11 +8451,50 @@ mod tests {
             seen.lock()
                 .map_err(|_| std::io::Error::other("stream delivery lock poisoned"))?
                 .as_slice(),
-            ["local"]
+            ["local", "local", "local"]
         );
         assert_eq!(
             json_body(get(&state, "/v1/savings").await?).await?["requests"],
             0
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streaming_retryable_status_recovers_before_response_establishment() -> TestResult {
+        let config = GatewayConfig {
+            retries: 1,
+            ..GatewayConfig::default()
+        };
+        let (state, seen) = streaming_live_state(
+            &config,
+            BTreeMap::from([(
+                "local".to_owned(),
+                VecDeque::from([
+                    ScriptedStreamOutcome::Response(StatusCode::SERVICE_UNAVAILABLE, vec![]),
+                    ScriptedStreamOutcome::Chunks(vec![Ok(Bytes::from_static(
+                        b"data: [DONE]\n\n",
+                    ))]),
+                ]),
+            )]),
+        )?;
+        let payload = json!({
+            "model": "auto",
+            "stream": true,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+
+        let response = post_json(&state, "/v1/chat/completions", &payload, &[]).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(response.into_body(), 1024).await?,
+            Bytes::from_static(b"data: [DONE]\n\n")
+        );
+        assert_eq!(
+            seen.lock()
+                .map_err(|_| std::io::Error::other("stream delivery lock poisoned"))?
+                .as_slice(),
+            ["local", "local"]
         );
         Ok(())
     }
@@ -8350,7 +8578,7 @@ mod tests {
             seen.lock()
                 .map_err(|_| std::io::Error::other("stream delivery lock poisoned"))?
                 .as_slice(),
-            ["local", "cloud"]
+            ["local", "local", "local", "cloud"]
         );
         Ok(())
     }
@@ -8394,7 +8622,7 @@ mod tests {
             seen.lock()
                 .map_err(|_| std::io::Error::other("stream delivery lock poisoned"))?
                 .as_slice(),
-            ["local"]
+            ["local", "local", "local"]
         );
         Ok(())
     }
@@ -8503,6 +8731,58 @@ mod tests {
         let second = post_json(&state, "/v1/chat/completions", &payload, &[]).await?;
         assert_eq!(second.status(), StatusCode::OK);
         drop(second);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn downstream_stream_cancellation_retains_conservative_tpm_reservation() -> TestResult {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut config = GatewayConfig {
+            rate_limit: Some(RateLimit {
+                rpm: None,
+                tpm: Some(150),
+                window: 60.0,
+            }),
+            ..GatewayConfig::default()
+        };
+        config
+            .keys
+            .insert("team-a".to_owned(), access_key("wf-secret"));
+        let (state, seen) = streaming_live_state(
+            &config,
+            BTreeMap::from([(
+                "local".to_owned(),
+                VecDeque::from([ScriptedStreamOutcome::Cancellable(Arc::clone(&dropped))]),
+            )]),
+        )?;
+        let policy = AccessPolicy::from_gateway_config_with_clock(&config, || 1_000.0)?;
+        let state = state.with_access_policy(policy);
+        let payload = json!({
+            "model": "auto", "stream": true, "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let headers = [("authorization", "Bearer wf-secret")];
+
+        let response = post_json(&state, "/v1/chat/completions", &payload, &headers).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(response);
+        assert!(dropped.load(Ordering::SeqCst));
+
+        let limited = post_json(&state, "/v1/chat/completions", &payload, &headers).await?;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            limited
+                .headers()
+                .get("x-wayfinder-router-rate-limit")
+                .and_then(|value| value.to_str().ok()),
+            Some("tpm")
+        );
+        assert_eq!(
+            seen.lock()
+                .map_err(|_| std::io::Error::other("stream delivery lock poisoned"))?
+                .len(),
+            1
+        );
         Ok(())
     }
 
@@ -8751,7 +9031,10 @@ mod tests {
             .insert("team-a".to_owned(), access_key("wf-secret"));
         let policy = AccessPolicy::from_gateway_config_with_clock(&config, || 1_000.0)?;
         let state = configured_state().with_access_policy(policy);
-        let payload = json!({"messages": [{"role": "user", "content": "hi"}]});
+        let payload = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1
+        });
 
         let unauthorized = post_json(&state, "/v1/chat/completions", &payload, &[]).await?;
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
@@ -8789,7 +9072,7 @@ mod tests {
         let mut config = GatewayConfig {
             rate_limit: Some(RateLimit {
                 rpm: Some(100),
-                tpm: Some(10),
+                tpm: Some(200),
                 window: 60.0,
             }),
             ..GatewayConfig::default()
@@ -8797,7 +9080,7 @@ mod tests {
         let mut key = access_key("wf-secret");
         key.models = vec!["cloud".to_owned()];
         key.rate_limit = Some(RateLimit {
-            rpm: Some(2),
+            rpm: Some(3),
             tpm: None,
             window: 60.0,
         });
@@ -8828,8 +9111,19 @@ mod tests {
         )
         .with_access_policy(policy)
         .with_delivery(Arc::new(ExactUsageDelivery));
-        let payload = json!({"messages": [{"role": "user", "content": "hi"}]});
+        let payload = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1
+        });
         let headers = [("authorization", "Bearer wf-secret")];
+
+        let missing_bound = json!({"messages": [{"role": "user", "content": "hi"}]});
+        let rejected = post_json(&state, "/v1/chat/completions", &missing_bound, &headers).await?;
+        assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(rejected).await?["error"]["type"],
+            "wayfinder_router_token_bound_required"
+        );
 
         let response = post_json(&state, "/v1/chat/completions", &payload, &headers).await?;
         assert_eq!(response.status(), StatusCode::OK);
@@ -8852,7 +9146,7 @@ mod tests {
                 .headers()
                 .get("x-ratelimit-limit")
                 .and_then(|value| value.to_str().ok()),
-            Some("2")
+            Some("3")
         );
         assert_eq!(
             response
@@ -8869,7 +9163,7 @@ mod tests {
         let metrics = to_bytes(get(&state, "/metrics").await?.into_body(), usize::MAX).await?;
         assert!(
             String::from_utf8(metrics.to_vec())?
-                .contains("wayfinder_router_key_requests_total{key=\"team-a\"} 1")
+                .contains("wayfinder_router_key_requests_total{key=\"team-a\"} 2")
         );
 
         let tpm_limited = post_json(&state, "/v1/chat/completions", &payload, &headers).await?;

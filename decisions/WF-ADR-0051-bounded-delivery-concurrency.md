@@ -35,7 +35,10 @@ Every process owns one bounded delivery admission policy:
 
 Operators may override those values under `[gateway.concurrency]`. At least one
 in-flight slot is required. The waiting count may be zero. Queue timeouts must
-be positive.
+be positive. The admission authority is process-lifetime state shared by every
+hot-reloaded configuration snapshot, including requests that began under the
+previous snapshot. Changing `[gateway.concurrency]` therefore requires a
+process restart; a reload never creates a second set of permits.
 
 Admission occurs after authentication, validation, deterministic routing, and
 cache lookup, immediately before a real provider delivery. Decision-only
@@ -67,6 +70,8 @@ release, and streaming-body lifetime behavior.
   instead of unbounded process growth.
 - The configured limit is process-local. It is not an organization-wide quota
   and does not make a multi-replica deployment consistent.
+- Concurrency-limit edits require restart so a hot reload cannot temporarily
+  multiply capacity while old-generation streams remain alive.
 - Provider capacity remains an independent constraint. The current
   ChatGPT/Codex managed runtime serves one turn at a time, and local-model
   throughput depends on the device and provider adapter.

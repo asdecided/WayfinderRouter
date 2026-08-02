@@ -16,7 +16,7 @@ use redis::Script;
 use redis::aio::ConnectionManager;
 use thiserror::Error;
 
-use crate::rate_limit::{LimitKind, RateResult, RateSnapshot};
+use crate::rate_limit::{LimitKind, RateReservation, RateResult, RateSnapshot, ReservationResult};
 
 /// One fixed-window policy copied into a backend operation.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -66,6 +66,43 @@ pub trait StateBackend: Send + Sync {
         config: StateLimitConfig,
         now_seconds: f64,
     ) -> StateFuture<'a, RateResult>;
+
+    /// Atomically reserve one request and a conservative token budget.
+    fn reserve<'a>(
+        &'a self,
+        key: &'a str,
+        config: StateLimitConfig,
+        tokens: u64,
+        now_seconds: f64,
+    ) -> StateFuture<'a, ReservationResult>;
+
+    /// Reserve only tokens after the request dimension was admitted earlier.
+    fn reserve_tokens<'a>(
+        &'a self,
+        key: &'a str,
+        config: StateLimitConfig,
+        tokens: u64,
+        now_seconds: f64,
+    ) -> StateFuture<'a, ReservationResult>;
+
+    /// Reconcile observed tokens only in the reservation's original window.
+    fn reconcile<'a>(
+        &'a self,
+        key: &'a str,
+        config: StateLimitConfig,
+        reservation: RateReservation,
+        actual_tokens: u64,
+        now_seconds: f64,
+    ) -> StateFuture<'a, bool>;
+
+    /// Roll back one previously accepted scope after a later scope rejects.
+    fn rollback<'a>(
+        &'a self,
+        key: &'a str,
+        config: StateLimitConfig,
+        reservation: RateReservation,
+        now_seconds: f64,
+    ) -> StateFuture<'a, bool>;
 
     /// Add observed upstream tokens to one policy dimension.
     fn add_tokens<'a>(
@@ -121,6 +158,83 @@ impl StateBackend for MemoryStateBackend {
             let limiter = limiter_for(&mut limiters, key, config)?;
             limiter
                 .admit_at(now_seconds)
+                .map_err(|_| StateBackendError::Unavailable)
+        })
+    }
+
+    fn reserve<'a>(
+        &'a self,
+        key: &'a str,
+        config: StateLimitConfig,
+        tokens: u64,
+        now_seconds: f64,
+    ) -> StateFuture<'a, ReservationResult> {
+        Box::pin(async move {
+            let config = config.validate()?;
+            let mut limiters = self
+                .limiters
+                .lock()
+                .map_err(|_| StateBackendError::LockPoisoned)?;
+            limiter_for(&mut limiters, key, config)?
+                .reserve_at(tokens, now_seconds)
+                .map_err(|_| StateBackendError::Unavailable)
+        })
+    }
+
+    fn reserve_tokens<'a>(
+        &'a self,
+        key: &'a str,
+        config: StateLimitConfig,
+        tokens: u64,
+        now_seconds: f64,
+    ) -> StateFuture<'a, ReservationResult> {
+        Box::pin(async move {
+            let config = config.validate()?;
+            let mut limiters = self
+                .limiters
+                .lock()
+                .map_err(|_| StateBackendError::LockPoisoned)?;
+            limiter_for(&mut limiters, key, config)?
+                .reserve_tokens_at(tokens, now_seconds)
+                .map_err(|_| StateBackendError::Unavailable)
+        })
+    }
+
+    fn reconcile<'a>(
+        &'a self,
+        key: &'a str,
+        config: StateLimitConfig,
+        reservation: RateReservation,
+        actual_tokens: u64,
+        now_seconds: f64,
+    ) -> StateFuture<'a, bool> {
+        Box::pin(async move {
+            let config = config.validate()?;
+            let mut limiters = self
+                .limiters
+                .lock()
+                .map_err(|_| StateBackendError::LockPoisoned)?;
+            limiter_for_mut(&mut limiters, key, config)?
+                .reconcile_at(reservation, actual_tokens, now_seconds)
+                .map_err(|_| StateBackendError::Unavailable)
+        })
+    }
+
+    fn rollback<'a>(
+        &'a self,
+        key: &'a str,
+        config: StateLimitConfig,
+        reservation: RateReservation,
+        now_seconds: f64,
+    ) -> StateFuture<'a, bool> {
+        Box::pin(async move {
+            let config = config.validate()?;
+            let mut limiters = self
+                .limiters
+                .lock()
+                .map_err(|_| StateBackendError::LockPoisoned)?;
+            limiter_for_mut(&mut limiters, key, config)?
+                .rollback_at(reservation, now_seconds)
                 .map_err(|_| StateBackendError::Unavailable)
         })
     }
@@ -219,6 +333,51 @@ if rpm > 0 and requests >= rpm then return {0, 1, retry} end
 if tpm > 0 and tokens >= tpm then return {0, 2, retry} end
 redis.call('HINCRBY', KEYS[1], 'requests', 1)
 return {1, 0, 0}
+"#;
+
+const RESERVE_SCRIPT: &str = r#"
+local time = redis.call('TIME')
+local now_ms = (tonumber(time[1]) * 1000) + math.floor(tonumber(time[2]) / 1000)
+local window_ms = tonumber(ARGV[1])
+local window_id = math.floor(now_ms / window_ms)
+local current = redis.call('HGET', KEYS[1], 'window')
+if current == false or tonumber(current) ~= window_id then
+  redis.call('HSET', KEYS[1], 'window', window_id, 'requests', 0, 'tokens', 0)
+  redis.call('PEXPIRE', KEYS[1], math.max(window_ms * 2, 1000))
+end
+local requests = tonumber(redis.call('HGET', KEYS[1], 'requests') or '0')
+local tokens = tonumber(redis.call('HGET', KEYS[1], 'tokens') or '0')
+local rpm = tonumber(ARGV[2])
+local tpm = tonumber(ARGV[3])
+local reservation = tonumber(ARGV[4])
+local reserve_request = tonumber(ARGV[5])
+local retry = math.max(0, math.ceil((((window_id + 1) * window_ms) - now_ms) / 1000))
+if reserve_request == 1 and rpm > 0 and requests >= rpm then return {0, 1, retry, window_id} end
+if tpm > 0 and tokens + reservation > tpm then return {0, 2, retry, window_id} end
+if reserve_request == 1 then redis.call('HINCRBY', KEYS[1], 'requests', 1) end
+redis.call('HINCRBY', KEYS[1], 'tokens', reservation)
+return {1, 0, 0, window_id}
+"#;
+
+const RECONCILE_SCRIPT: &str = r#"
+local current = redis.call('HGET', KEYS[1], 'window')
+if current == false or tonumber(current) ~= tonumber(ARGV[1]) then return 0 end
+local reserved = tonumber(ARGV[2])
+local actual = tonumber(ARGV[3])
+redis.call('HINCRBY', KEYS[1], 'tokens', actual - reserved)
+return 1
+"#;
+
+const ROLLBACK_SCRIPT: &str = r#"
+local current = redis.call('HGET', KEYS[1], 'window')
+if current == false or tonumber(current) ~= tonumber(ARGV[1]) then return 0 end
+local requests = tonumber(redis.call('HGET', KEYS[1], 'requests') or '0')
+local tokens = tonumber(redis.call('HGET', KEYS[1], 'tokens') or '0')
+if tonumber(ARGV[3]) == 1 then
+  redis.call('HSET', KEYS[1], 'requests', math.max(0, requests - 1))
+end
+redis.call('HSET', KEYS[1], 'tokens', math.max(0, tokens - tonumber(ARGV[2])))
+return 1
 "#;
 
 const ADD_TOKENS_SCRIPT: &str = r#"
@@ -329,6 +488,116 @@ impl StateBackend for RedisStateBackend {
         })
     }
 
+    fn reserve<'a>(
+        &'a self,
+        key: &'a str,
+        config: StateLimitConfig,
+        tokens: u64,
+        _now_seconds: f64,
+    ) -> StateFuture<'a, ReservationResult> {
+        Box::pin(async move {
+            let config = config.validate()?;
+            let window_ms = (config.window_seconds * 1_000.0).ceil().max(1.0) as u64;
+            let mut connection = self.connection.clone();
+            let value: (i64, i64, i64, i64) = Script::new(RESERVE_SCRIPT)
+                .key(self.key(key))
+                .arg(window_ms)
+                .arg(config.rpm.unwrap_or(0))
+                .arg(config.tpm.unwrap_or(0))
+                .arg(tokens)
+                .arg(1)
+                .invoke_async(&mut connection)
+                .await
+                .map_err(|_| StateBackendError::Unavailable)?;
+            self.mark(redis_reservation_result(value, tokens, true))
+        })
+    }
+
+    fn reserve_tokens<'a>(
+        &'a self,
+        key: &'a str,
+        config: StateLimitConfig,
+        tokens: u64,
+        _now_seconds: f64,
+    ) -> StateFuture<'a, ReservationResult> {
+        Box::pin(async move {
+            let config = config.validate()?;
+            if config.tpm.is_none() {
+                return Ok(ReservationResult {
+                    rate: RateResult {
+                        limited_by: None,
+                        retry_after_seconds: 0,
+                    },
+                    reservation: None,
+                });
+            }
+            let window_ms = (config.window_seconds * 1_000.0).ceil().max(1.0) as u64;
+            let mut connection = self.connection.clone();
+            let value: (i64, i64, i64, i64) = Script::new(RESERVE_SCRIPT)
+                .key(self.key(key))
+                .arg(window_ms)
+                .arg(config.rpm.unwrap_or(0))
+                .arg(config.tpm.unwrap_or(0))
+                .arg(tokens)
+                .arg(0)
+                .invoke_async(&mut connection)
+                .await
+                .map_err(|_| StateBackendError::Unavailable)?;
+            self.mark(redis_reservation_result(value, tokens, false))
+        })
+    }
+
+    fn reconcile<'a>(
+        &'a self,
+        key: &'a str,
+        config: StateLimitConfig,
+        reservation: RateReservation,
+        actual_tokens: u64,
+        _now_seconds: f64,
+    ) -> StateFuture<'a, bool> {
+        Box::pin(async move {
+            config.validate()?;
+            let mut connection = self.connection.clone();
+            let result: Result<i64, _> = Script::new(RECONCILE_SCRIPT)
+                .key(self.key(key))
+                .arg(reservation.window_id())
+                .arg(reservation.reserved_tokens())
+                .arg(actual_tokens)
+                .invoke_async(&mut connection)
+                .await;
+            self.mark(
+                result
+                    .map(|value| value == 1)
+                    .map_err(|_| StateBackendError::Unavailable),
+            )
+        })
+    }
+
+    fn rollback<'a>(
+        &'a self,
+        key: &'a str,
+        config: StateLimitConfig,
+        reservation: RateReservation,
+        _now_seconds: f64,
+    ) -> StateFuture<'a, bool> {
+        Box::pin(async move {
+            config.validate()?;
+            let mut connection = self.connection.clone();
+            let result: Result<i64, _> = Script::new(ROLLBACK_SCRIPT)
+                .key(self.key(key))
+                .arg(reservation.window_id())
+                .arg(reservation.reserved_tokens())
+                .arg(if reservation.reserved_request() { 1 } else { 0 })
+                .invoke_async(&mut connection)
+                .await;
+            self.mark(
+                result
+                    .map(|value| value == 1)
+                    .map_err(|_| StateBackendError::Unavailable),
+            )
+        })
+    }
+
     fn add_tokens<'a>(
         &'a self,
         key: &'a str,
@@ -428,6 +697,24 @@ fn redis_result(value: (i64, i64, i64)) -> Result<RateResult, StateBackendError>
     })
 }
 
+fn redis_reservation_result(
+    value: (i64, i64, i64, i64),
+    reserved_tokens: u64,
+    reserved_request: bool,
+) -> Result<ReservationResult, StateBackendError> {
+    let rate = redis_result((value.0, value.1, value.2))?;
+    let reservation = if rate.allowed() {
+        Some(RateReservation {
+            window_id: u64::try_from(value.3).map_err(|_| StateBackendError::Unavailable)?,
+            reserved_tokens,
+            reserved_request,
+        })
+    } else {
+        None
+    };
+    Ok(ReservationResult { rate, reservation })
+}
+
 /// Build the configured backend before the listener starts.
 pub async fn from_config(
     config: &wayfinder_config::gateway::StateConfig,
@@ -491,10 +778,59 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn memory_backend_reserves_reconciles_and_ignores_late_completion()
+    -> Result<(), StateBackendError> {
+        let backend = MemoryStateBackend::default();
+        let config = StateLimitConfig {
+            rpm: Some(2),
+            tpm: Some(100),
+            window_seconds: 60.0,
+        };
+        let reservation = backend
+            .reserve("prod", config, 80, 1.0)
+            .await?
+            .reservation
+            .ok_or(StateBackendError::Unavailable)?;
+        assert_eq!(
+            backend
+                .reserve("prod", config, 21, 2.0)
+                .await?
+                .rate
+                .limited_by,
+            Some(LimitKind::Tokens)
+        );
+        assert!(
+            backend
+                .reconcile("prod", config, reservation, 20, 3.0)
+                .await?
+        );
+        let next = backend
+            .reserve("prod", config, 80, 60.0)
+            .await?
+            .reservation
+            .ok_or(StateBackendError::Unavailable)?;
+        assert!(
+            !backend
+                .reconcile("prod", config, reservation, 90, 61.0)
+                .await?
+        );
+        assert!(backend.rollback("prod", config, next, 61.0).await?);
+        Ok(())
+    }
+
     #[test]
     fn redis_result_rejects_malformed_script_values() {
         assert!(redis_result((1, 1, 0)).is_err());
         assert!(redis_result((0, 9, 0)).is_err());
         assert!(redis_result((0, 1, -1)).is_err());
+        assert!(redis_reservation_result((1, 0, 0, -1), 10, true).is_err());
+        assert_eq!(
+            redis_reservation_result((1, 0, 0, 7), 10, true)
+                .ok()
+                .and_then(|result| result.reservation)
+                .map(RateReservation::window_id),
+            Some(7)
+        );
     }
 }

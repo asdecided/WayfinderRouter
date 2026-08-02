@@ -1,8 +1,9 @@
 //! Deterministic fixed-window RPM/TPM limiting.
 //!
-//! Admission reserves one request. Token usage is added only after a served
-//! response, matching the Python gateway's deliberate one-request TPM
-//! overshoot. The caller supplies monotonic seconds so tests never sleep.
+//! Admission reserves one request and, when supplied, a conservative token
+//! budget before provider delivery. Completed requests reconcile the budget
+//! against observed usage in the same fixed window. The caller supplies
+//! monotonic seconds so tests never sleep.
 
 use std::sync::Mutex;
 
@@ -38,6 +39,43 @@ pub struct RateResult {
     pub limited_by: Option<LimitKind>,
     /// Whole seconds until the current window rolls; zero when admitted.
     pub retry_after_seconds: u64,
+}
+
+/// Exact fixed-window reservation returned by a successful admission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RateReservation {
+    pub(crate) window_id: u64,
+    pub(crate) reserved_tokens: u64,
+    pub(crate) reserved_request: bool,
+}
+
+impl RateReservation {
+    /// Fixed-window identifier captured at admission.
+    #[must_use]
+    pub const fn window_id(self) -> u64 {
+        self.window_id
+    }
+
+    /// Conservative token budget charged at admission.
+    #[must_use]
+    pub const fn reserved_tokens(self) -> u64 {
+        self.reserved_tokens
+    }
+
+    /// Whether this reservation also owns one request slot.
+    #[must_use]
+    pub const fn reserved_request(self) -> bool {
+        self.reserved_request
+    }
+}
+
+/// Admission result plus the reservation needed for later reconciliation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReservationResult {
+    /// Rate-limit decision.
+    pub rate: RateResult,
+    /// Present only when the request and token budget were reserved.
+    pub reservation: Option<RateReservation>,
 }
 
 impl RateResult {
@@ -130,39 +168,152 @@ impl RateLimiter {
         Ok(state.configuration.rpm.is_some() || state.configuration.tpm.is_some())
     }
 
+    /// Whether this limiter enforces a token ceiling.
+    pub fn tokens_active(&self) -> Result<bool, RateLimitError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| RateLimitError::LockPoisoned)?;
+        Ok(state.configuration.tpm.is_some())
+    }
+
     /// Admit and reserve one request at the supplied monotonic time.
     pub fn admit_at(&self, now_seconds: f64) -> Result<RateResult, RateLimitError> {
+        Ok(self.reserve_at(0, now_seconds)?.rate)
+    }
+
+    /// Atomically reserve one request and a conservative token budget.
+    pub fn reserve_at(
+        &self,
+        tokens: u64,
+        now_seconds: f64,
+    ) -> Result<ReservationResult, RateLimitError> {
+        self.reserve_inner(tokens, true, now_seconds)
+    }
+
+    /// Reserve only a token budget after RPM admission already succeeded.
+    pub fn reserve_tokens_at(
+        &self,
+        tokens: u64,
+        now_seconds: f64,
+    ) -> Result<ReservationResult, RateLimitError> {
+        self.reserve_inner(tokens, false, now_seconds)
+    }
+
+    fn reserve_inner(
+        &self,
+        tokens: u64,
+        reserve_request: bool,
+        now_seconds: f64,
+    ) -> Result<ReservationResult, RateLimitError> {
         validate_time(now_seconds)?;
         let mut state = self
             .state
             .lock()
             .map_err(|_| RateLimitError::LockPoisoned)?;
-        if state.configuration.rpm.is_none() && state.configuration.tpm.is_none() {
-            return Ok(RateResult {
-                limited_by: None,
-                retry_after_seconds: 0,
+        if (!reserve_request || state.configuration.rpm.is_none())
+            && state.configuration.tpm.is_none()
+        {
+            return Ok(ReservationResult {
+                rate: RateResult {
+                    limited_by: None,
+                    retry_after_seconds: 0,
+                },
+                reservation: None,
             });
         }
         roll(&mut state, now_seconds)?;
-        if state
-            .configuration
-            .rpm
-            .is_some_and(|limit| state.requests >= limit)
+        if reserve_request
+            && state
+                .configuration
+                .rpm
+                .is_some_and(|limit| state.requests >= limit)
         {
-            return Ok(rejected(LimitKind::Requests, &state, now_seconds));
+            return Ok(ReservationResult {
+                rate: rejected(LimitKind::Requests, &state, now_seconds),
+                reservation: None,
+            });
         }
-        if state
-            .configuration
-            .tpm
-            .is_some_and(|limit| state.tokens >= limit)
-        {
-            return Ok(rejected(LimitKind::Tokens, &state, now_seconds));
+        if state.configuration.tpm.is_some_and(|limit| {
+            if tokens == 0 {
+                state.tokens >= limit
+            } else {
+                state.tokens.saturating_add(tokens) > limit
+            }
+        }) {
+            return Ok(ReservationResult {
+                rate: rejected(LimitKind::Tokens, &state, now_seconds),
+                reservation: None,
+            });
         }
-        state.requests = state.requests.saturating_add(1);
-        Ok(RateResult {
-            limited_by: None,
-            retry_after_seconds: 0,
+        if reserve_request {
+            state.requests = state.requests.saturating_add(1);
+        }
+        state.tokens = state.tokens.saturating_add(tokens);
+        let window_id = state.window_id.ok_or(RateLimitError::InvalidTime)?;
+        Ok(ReservationResult {
+            rate: RateResult {
+                limited_by: None,
+                retry_after_seconds: 0,
+            },
+            reservation: Some(RateReservation {
+                window_id,
+                reserved_tokens: tokens,
+                reserved_request: reserve_request,
+            }),
         })
+    }
+
+    /// Reconcile observed usage only when the original fixed window is active.
+    ///
+    /// Returns `false` after rollover so a late completion cannot charge a new
+    /// window. Callers retain the original conservative reservation in that
+    /// case.
+    pub fn reconcile_at(
+        &self,
+        reservation: RateReservation,
+        actual_tokens: u64,
+        now_seconds: f64,
+    ) -> Result<bool, RateLimitError> {
+        validate_time(now_seconds)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RateLimitError::LockPoisoned)?;
+        if state.window_id != Some(reservation.window_id) {
+            return Ok(false);
+        }
+        if actual_tokens >= reservation.reserved_tokens {
+            state.tokens = state
+                .tokens
+                .saturating_add(actual_tokens - reservation.reserved_tokens);
+        } else {
+            state.tokens = state
+                .tokens
+                .saturating_sub(reservation.reserved_tokens - actual_tokens);
+        }
+        Ok(true)
+    }
+
+    /// Roll back a failed multi-scope admission in the original fixed window.
+    pub fn rollback_at(
+        &self,
+        reservation: RateReservation,
+        now_seconds: f64,
+    ) -> Result<bool, RateLimitError> {
+        validate_time(now_seconds)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RateLimitError::LockPoisoned)?;
+        if state.window_id != Some(reservation.window_id) {
+            return Ok(false);
+        }
+        if reservation.reserved_request {
+            state.requests = state.requests.saturating_sub(1);
+        }
+        state.tokens = state.tokens.saturating_sub(reservation.reserved_tokens);
+        Ok(true)
     }
 
     /// Add non-negative upstream token usage to the active window.
@@ -350,6 +501,65 @@ mod tests {
         let rejected = limiter.admit_at(2.0)?;
         assert_eq!(rejected.limited_by, Some(LimitKind::Tokens));
         assert_eq!(limiter.stats()?.tokens, 150);
+        Ok(())
+    }
+
+    #[test]
+    fn token_reservation_rejects_before_mutation() -> Result<(), RateLimitError> {
+        let limiter = RateLimiter::new(Some(2), Some(100), 60.0)?;
+        let admitted = limiter.reserve_at(80, 1.0)?;
+        assert!(admitted.rate.allowed());
+        assert_eq!(limiter.stats()?.tokens, 80);
+
+        let rejected = limiter.reserve_at(21, 2.0)?;
+        assert_eq!(rejected.rate.limited_by, Some(LimitKind::Tokens));
+        assert!(rejected.reservation.is_none());
+        assert_eq!(
+            limiter.stats()?,
+            RateStats {
+                requests: 1,
+                tokens: 80,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn token_reservation_reconciles_and_rolls_back_in_original_window() -> Result<(), RateLimitError>
+    {
+        let limiter = RateLimiter::new(Some(2), Some(100), 60.0)?;
+        let first = limiter
+            .reserve_at(80, 1.0)?
+            .reservation
+            .ok_or(RateLimitError::InvalidTime)?;
+        assert!(limiter.reconcile_at(first, 20, 2.0)?);
+        assert_eq!(limiter.stats()?.tokens, 20);
+
+        let second = limiter
+            .reserve_at(50, 3.0)?
+            .reservation
+            .ok_or(RateLimitError::InvalidTime)?;
+        assert!(limiter.rollback_at(second, 4.0)?);
+        assert_eq!(
+            limiter.stats()?,
+            RateStats {
+                requests: 1,
+                tokens: 20,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn late_reconciliation_never_charges_a_new_window() -> Result<(), RateLimitError> {
+        let limiter = RateLimiter::new(None, Some(100), 60.0)?;
+        let reservation = limiter
+            .reserve_at(80, 59.0)?
+            .reservation
+            .ok_or(RateLimitError::InvalidTime)?;
+        assert!(limiter.reserve_at(10, 60.0)?.rate.allowed());
+        assert!(!limiter.reconcile_at(reservation, 100, 61.0)?);
+        assert_eq!(limiter.stats()?.tokens, 10);
         Ok(())
     }
 
