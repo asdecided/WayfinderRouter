@@ -25,6 +25,7 @@ pub mod rate_limit;
 pub mod recent;
 pub mod reliability;
 pub mod reload;
+pub mod responses;
 pub mod server;
 pub mod shadow;
 pub mod state;
@@ -1788,6 +1789,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/models", get(openai_models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/chat/completions", post(chat_completions))
+        .route("/v1/responses", post(responses::responses))
+        .route("/responses", post(responses::responses))
         .route("/v1/messages", post(anthropic_messages))
         .route("/messages", post(anthropic_messages))
         .merge(operator_routes);
@@ -1838,6 +1841,8 @@ pub fn build_data_plane_router(state: AppState) -> Result<Router, DataPlaneError
         .route("/models", get(authenticated_openai_models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/chat/completions", post(chat_completions))
+        .route("/v1/responses", post(responses::responses))
+        .route("/responses", post(responses::responses))
         .route("/v1/messages", post(anthropic_messages))
         .route("/messages", post(anthropic_messages))
         .fallback(not_found)
@@ -2558,7 +2563,7 @@ struct CostResponse {
     feature = "otel",
     tracing::instrument(skip_all, name = "wayfinder.chat")
 )]
-async fn chat_completions(
+pub(crate) async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
@@ -5277,7 +5282,7 @@ fn parse_chat_body(bytes: &[u8]) -> Result<serde_json::Map<String, Value>, Box<R
     }
 }
 
-fn body_rejection_response(state: &AppState, rejection: BytesRejection) -> Response {
+pub(crate) fn body_rejection_response(state: &AppState, rejection: BytesRejection) -> Response {
     if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
         return error_response(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -5576,7 +5581,7 @@ fn offline_override(headers: &HeaderMap) -> bool {
         .is_some_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true" | "yes"))
 }
 
-fn new_request_id() -> String {
+pub(crate) fn new_request_id() -> String {
     Uuid::new_v4()
         .simple()
         .to_string()
@@ -6016,6 +6021,8 @@ async fn method_not_allowed(uri: Uri) -> Response {
         uri.path(),
         "/v1/chat/completions"
             | "/chat/completions"
+            | "/v1/responses"
+            | "/responses"
             | "/v1/messages"
             | "/messages"
             | "/router/config"
@@ -6070,6 +6077,7 @@ mod tests {
         BufferedDelivery, BufferedDeliveryResponse, DeliveryError, DeliveryFuture,
         StreamingDelivery, StreamingDeliveryFuture, StreamingDeliveryResponse,
     };
+    use crate::responses;
     use crate::{
         access::AccessPolicy,
         admission::{AdmissionError, AdmissionPolicy},
@@ -7626,6 +7634,138 @@ mod tests {
                 "relative units / 1k words"
             );
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn responses_aliases_normalize_buffered_chat_results_and_usage() -> TestResult {
+        let state = cached_live_state(Arc::new(AtomicUsize::new(0)))?;
+        for path in ["/v1/responses", "/responses"] {
+            let response = post_json(
+                &state,
+                path,
+                &json!({"model": "local", "input": "hello"}),
+                &[],
+            )
+            .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|value| value.to_str().ok()),
+                Some("application/json")
+            );
+            let body = json_body(response).await?;
+            assert_eq!(body["object"], "response");
+            assert_eq!(body["status"], "completed");
+            assert_eq!(body["output"][0]["type"], "message");
+            assert_eq!(body["output"][0]["content"][0]["text"], "ok");
+            assert_eq!(
+                body["usage"],
+                json!({"input_tokens": 1000, "output_tokens": 25, "total_tokens": 1025})
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn responses_preserve_the_existing_decision_only_contract() -> TestResult {
+        let state = configured_state();
+        for stream in [false, true] {
+            let response = post_json(
+                &state,
+                "/v1/responses",
+                &json!({"model": "auto", "input": "route only", "stream": stream}),
+                &[],
+            )
+            .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await?;
+            assert!(body.get("wayfinder").is_some());
+            assert!(body.get("output").is_none());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn responses_stream_has_one_terminal_event_and_bounded_translation() -> TestResult {
+        let chunks = vec![
+            Ok(Bytes::from_static(
+                br#"data: {"choices":[{"delta":{"content":"Hel"}}]}"#,
+            )),
+            Ok(Bytes::from_static(
+                b"\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n",
+            )),
+            Ok(Bytes::from_static(b"data: [DONE]\n\ndata: [DONE]\n\n")),
+        ];
+        let (state, _) = streaming_live_state(
+            &GatewayConfig::default(),
+            BTreeMap::from([(
+                "local".to_owned(),
+                VecDeque::from([ScriptedStreamOutcome::Chunks(chunks)]),
+            )]),
+        )?;
+        let response = post_json(
+            &state,
+            "/v1/responses",
+            &json!({"model": "local", "input": "hello", "stream": true}),
+            &[],
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let stream_text =
+            String::from_utf8(to_bytes(response.into_body(), usize::MAX).await?.to_vec())?;
+        assert!(stream_text.contains("event: response.created"));
+        assert!(stream_text.contains("\"delta\":\"Hel\""));
+        assert!(stream_text.contains("\"delta\":\"lo\""));
+        assert_eq!(stream_text.matches("event: response.completed").count(), 1);
+        assert_eq!(stream_text.matches("event: response.failed").count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn responses_reject_unknown_fields_and_oversized_history_specifically() -> TestResult {
+        let state = configured_state();
+        let unknown = post_json(
+            &state,
+            "/v1/responses",
+            &json!({"model": "auto", "input": "hello", "tools": []}),
+            &[],
+        )
+        .await?;
+        assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+        let unknown_body = json_body(unknown).await?;
+        assert_eq!(
+            unknown_body["error"]["type"],
+            "wayfinder_router_unsupported_request"
+        );
+        assert!(
+            unknown_body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("tools"))
+        );
+
+        let oversized_state = AppState::new(RoutingConfig::binary(0.5), Vec::new(), false, "test")
+            .with_dry_run(true)
+            .with_request_body_limit(responses::MAX_INPUT_CHARS + 1024);
+        let oversized = post_json(
+            &oversized_state,
+            "/v1/responses",
+            &json!({
+                "model": "auto",
+                "input": "x".repeat(responses::MAX_INPUT_CHARS + 1)
+            }),
+            &[],
+        )
+        .await?;
+        assert_eq!(oversized.status(), StatusCode::BAD_REQUEST);
+        let oversized_body = json_body(oversized).await?;
+        assert!(
+            oversized_body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("history"))
+        );
         Ok(())
     }
 
