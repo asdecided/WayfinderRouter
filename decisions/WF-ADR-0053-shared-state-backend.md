@@ -38,9 +38,11 @@ has a bounded namespace key. Redis keys use a versioned
 virtual-key, and audit-stream components. User-selected values therefore cannot
 create delimiter collisions, and limit and audit domains cannot alias the
 legacy raw-key layout. A request rejected by one dimension is not sent upstream.
-The first implementation keeps the existing local accounting ledger
-and response cache unchanged; those are separate state migrations and must not
-be implied by selecting Redis.
+The response cache remains local because cache locality is a performance and
+privacy decision, not a policy counter. Realized accounting, fleet admission,
+and provider health are coordinated by the follow-on WF-ADR-0060 contract;
+selecting Redis therefore changes policy consistency but never changes cache
+or prompt-retention behavior.
 
 If Redis becomes unavailable, the gateway does not drop requests or expose a
 connection error. It marks the policy degraded, falls back to its bounded
@@ -62,9 +64,8 @@ enforcement.
   gateway replicas as one coordinated policy cutover. Old fixed-window keys
   expire naturally; legacy audit keys remain separate evidence until the
   operator's retention policy removes them.
-- Cross-replica budgets, savings ledgers, response caches, and distributed
-  in-flight semaphores remain explicit follow-on work; this ADR does not claim
-  them.
+- Cross-replica accounting, admission, and provider health are specified in
+  WF-ADR-0060. Response caches remain process-local by design.
 
 ## Rejected alternatives
 

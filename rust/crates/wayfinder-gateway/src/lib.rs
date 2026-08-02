@@ -95,6 +95,7 @@ use crate::rate_limit::{RateResult, RateSnapshot};
 use crate::recent::{RecentCost, RecentEntry, RecentRoutes};
 use crate::reliability::{ReliabilityAttempt, ReliabilityError, ReliabilityPolicy, sleep_retry};
 use crate::reload::LastGood;
+use crate::state::{SharedBudgetReservation, SharedCostObservation, StateBackend};
 
 fn shared_state_identity(config: &wayfinder_config::gateway::StateConfig) -> [u8; 32] {
     let mut digest = Sha256::new();
@@ -111,6 +112,11 @@ fn shared_state_identity(config: &wayfinder_config::gateway::StateConfig) -> [u8
 
 /// Default maximum request body accepted by body-buffering extractors (1 MiB).
 pub const DEFAULT_REQUEST_BODY_LIMIT: usize = 1024 * 1024;
+
+/// Maximum lifetime of one fleet-wide delivery lease. A dropped process can
+/// therefore recover its slot without requiring a restart or an operator
+/// cleanup, while a normal response releases it immediately.
+const SHARED_ADMISSION_TTL_MS: u64 = 6 * 60 * 60 * 1_000;
 
 /// Invalid state for a network-exposed, data-plane-only listener.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -453,6 +459,7 @@ pub struct AppState {
     streaming_delivery: Option<Arc<dyn StreamingDelivery>>,
     access_policy: Option<Arc<AccessPolicy>>,
     shared_state_identity: Option<[u8; 32]>,
+    shared_state_backend: Option<Arc<dyn state::StateBackend>>,
     budget_policy: Arc<BudgetPolicy>,
     reliability_policy: Arc<ReliabilityPolicy>,
     response_cache: Arc<ResponseCache>,
@@ -514,6 +521,7 @@ impl AppState {
             streaming_delivery: None,
             access_policy: None,
             shared_state_identity: None,
+            shared_state_backend: None,
             budget_policy: Arc::new(BudgetPolicy::default()),
             reliability_policy: Arc::new(ReliabilityPolicy::default()),
             response_cache: Arc::new(ResponseCache::default()),
@@ -681,6 +689,7 @@ impl AppState {
             Arc::clone(&backend),
         )?;
         let mut state = self.with_access_policy(policy);
+        state.shared_state_backend = Some(Arc::clone(&backend));
         if config.state.backend == "redis" {
             let audit_log = state
                 .audit_log()
@@ -821,6 +830,7 @@ impl AppState {
     #[must_use]
     pub fn with_runtime_state_from(mut self, previous: &Self) -> Self {
         self.admission_policy = Arc::clone(&previous.admission_policy);
+        self.shared_state_backend = previous.shared_state_backend.clone();
         self.recent = Arc::clone(&previous.recent);
         self.metrics = Arc::clone(&previous.metrics);
         self.deployment_cursors = Arc::clone(&previous.deployment_cursors);
@@ -993,6 +1003,24 @@ impl AppState {
     #[must_use]
     pub fn access_policy(&self) -> Option<&AccessPolicy> {
         self.access_policy.as_deref()
+    }
+
+    /// Shared policy backend, when the gateway was built from `[gateway.state]`.
+    #[must_use]
+    pub fn shared_state_backend(&self) -> Option<Arc<dyn state::StateBackend>> {
+        self.shared_state_backend.clone()
+    }
+
+    /// Whether the shared backend is currently degraded.
+    #[must_use]
+    pub fn state_degraded(&self) -> bool {
+        self.shared_state_backend
+            .as_ref()
+            .is_some_and(|backend| backend.degraded())
+            || self
+                .access_policy
+                .as_ref()
+                .is_some_and(|policy| policy.state_degraded())
     }
 
     /// Configured operator authenticator, if OIDC is enabled.
@@ -1979,6 +2007,9 @@ async fn chat_completions(
     let key_id = state
         .access_policy()
         .and_then(|policy| access_grant.and_then(|grant| policy.key_id(grant)));
+    let workspace_id = state
+        .access_policy()
+        .and_then(|policy| access_grant.and_then(|grant| policy.workspace_id(grant)));
     let mut budget_state = None;
     if state.budget_policy().active() && state.price_table().priced {
         let today = match utc_today() {
@@ -1992,10 +2023,42 @@ async fn chat_completions(
                 );
             }
         };
-        match state
-            .budget_policy()
-            .evaluate(state.savings_ledger(), true, key_id, today, offline)
+        let budget_decision = if let Some(backend) = state
+            .shared_state_backend()
+            .filter(|backend| backend.backend_name() == "redis")
         {
+            match state
+                .budget_policy()
+                .evaluate_shared_for(backend.as_ref(), true, workspace_id, key_id, today, offline)
+                .await
+            {
+                Ok(decision) => Ok(decision),
+                Err(_) => state
+                    .budget_policy()
+                    .evaluate_for(
+                        state.savings_ledger(),
+                        true,
+                        workspace_id,
+                        key_id,
+                        today,
+                        offline,
+                    )
+                    .map_err(|error| error.to_string()),
+            }
+        } else {
+            state
+                .budget_policy()
+                .evaluate_for(
+                    state.savings_ledger(),
+                    true,
+                    workspace_id,
+                    key_id,
+                    today,
+                    offline,
+                )
+                .map_err(|error| error.to_string())
+        };
+        match budget_decision {
             Ok(BudgetDecision::Allow) => {}
             Ok(BudgetDecision::Degrade) => {
                 budget_state = Some("degraded");
@@ -2034,7 +2097,7 @@ async fn chat_completions(
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "wayfinder_router_state_error",
-                    error.to_string(),
+                    error,
                     request_id_headers(&request_id),
                 );
             }
@@ -2118,7 +2181,7 @@ async fn chat_completions(
         }
         match policy.tightest_snapshot_shared(grant).await {
             Ok(Some(snapshot)) => {
-                let _ = state.metrics().set_state_degraded(policy.state_degraded());
+                let _ = state.metrics().set_state_degraded(state.state_degraded());
                 if let Err(message) = insert_rate_snapshot_headers(&mut routing_headers, snapshot) {
                     return error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -2129,10 +2192,10 @@ async fn chat_completions(
                 }
             }
             Ok(None) => {
-                let _ = state.metrics().set_state_degraded(policy.state_degraded());
+                let _ = state.metrics().set_state_degraded(state.state_degraded());
             }
             Err(error) => {
-                let _ = state.metrics().set_state_degraded(policy.state_degraded());
+                let _ = state.metrics().set_state_degraded(state.state_degraded());
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "wayfinder_router_state_error",
@@ -2427,7 +2490,32 @@ async fn chat_completions(
         );
     }
 
-    let admission_permit = match acquire_delivery(&state).await {
+    let shared_budget = match reserve_shared_budget(
+        &state,
+        &request_id,
+        prompt_estimate,
+        &request_body,
+        workspace_id,
+        key_id,
+        offline,
+    )
+    .await
+    {
+        SharedBudgetReservationOutcome::Reserved(lease) => Some(lease),
+        SharedBudgetReservationOutcome::Denied => {
+            let mut headers = request_id_headers(&request_id);
+            headers.insert(ROUTER_BUDGET_HEADER, HeaderValue::from_static("blocked"));
+            return error_response(
+                StatusCode::PAYMENT_REQUIRED,
+                "wayfinder_router_budget_exhausted",
+                "shared budget reservation exhausted".to_owned(),
+                headers,
+            );
+        }
+        SharedBudgetReservationOutcome::Unavailable => None,
+    };
+
+    let admission_permit = match acquire_delivery(&state, &request_id).await {
         Ok(permit) => permit,
         Err(error) => return admission_error_response(&state, error, routing_headers),
     };
@@ -2497,11 +2585,13 @@ async fn chat_completions(
             initial_event,
             admission_permit,
             token_reservation,
+            shared_budget,
         })
         .await;
     }
 
     let _admission_permit = admission_permit;
+    let _shared_budget = shared_budget;
 
     let Some(delivery) = state.delivery() else {
         return error_response(
@@ -2571,6 +2661,7 @@ async fn chat_completions(
             content_type: &response_content_type,
             body: &body,
             token_reservation,
+            shared_budget: _shared_budget,
         },
     )
     .await;
@@ -2668,6 +2759,7 @@ fn inject_debug_decision(body: Bytes, decision: DecisionResponse) -> Bytes {
 struct ObservedAdmissionPermit {
     _permit: AdmissionPermit,
     metrics: Arc<GatewayMetrics>,
+    _shared: Option<SharedAdmissionLease>,
 }
 
 impl Drop for ObservedAdmissionPermit {
@@ -2676,14 +2768,351 @@ impl Drop for ObservedAdmissionPermit {
     }
 }
 
-async fn acquire_delivery(state: &AppState) -> Result<ObservedAdmissionPermit, AdmissionError> {
+struct SharedAdmissionLease {
+    backend: Arc<dyn StateBackend>,
+    lease_id: String,
+}
+
+impl Drop for SharedAdmissionLease {
+    fn drop(&mut self) {
+        let backend = Arc::clone(&self.backend);
+        let lease_id = self.lease_id.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
+            let _ = backend.release_admission(&lease_id).await;
+        });
+    }
+}
+
+/// A fleet budget reservation held until the request reaches a terminal
+/// accounting state. Failed or cancelled requests release it; successful
+/// requests settle it immediately after writing realized usage.
+struct SharedBudgetLease {
+    backend: Arc<dyn StateBackend>,
+    reservation: Option<SharedBudgetReservation>,
+    settled: bool,
+}
+
+enum SharedBudgetReservationOutcome {
+    Reserved(SharedBudgetLease),
+    Denied,
+    Unavailable,
+}
+
+impl SharedBudgetLease {
+    async fn settle(mut self) {
+        if let Some(reservation) = self.reservation.take() {
+            let _ = self.backend.settle_budget(reservation).await;
+        }
+        self.settled = true;
+    }
+}
+
+impl Drop for SharedBudgetLease {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let Some(reservation) = self.reservation.take() else {
+            return;
+        };
+        let backend = Arc::clone(&self.backend);
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
+            let _ = backend.release_budget(reservation).await;
+        });
+    }
+}
+
+async fn reserve_shared_budget(
+    state: &AppState,
+    request_id: &str,
+    prompt_estimate: u64,
+    request_body: &Value,
+    workspace_id: Option<&str>,
+    key_id: Option<&str>,
+    offline: bool,
+) -> SharedBudgetReservationOutcome {
+    let Some(backend) = state
+        .shared_state_backend()
+        .filter(|backend| backend.backend_name() == "redis")
+    else {
+        return SharedBudgetReservationOutcome::Unavailable;
+    };
+    if !state.price_table().priced {
+        return SharedBudgetReservationOutcome::Unavailable;
+    }
+    let scopes = state
+        .budget_policy()
+        .shared_scopes(workspace_id, key_id, offline);
+    if scopes.is_empty() {
+        return SharedBudgetReservationOutcome::Unavailable;
+    }
+    let completions = request_body
+        .get("n")
+        .and_then(Value::as_u64)
+        .filter(|count| *count > 0)
+        .unwrap_or(1);
+    let requested_output = requested_output_tokens(request_body).max(1_024);
+    let output_tokens = requested_output.saturating_mul(completions);
+    // Reserve against the configured frontier rate rather than the first
+    // route: a later provider failover must not bypass a hard cap.
+    let Ok(cost) = turn_cost(
+        "",
+        i64::try_from(prompt_estimate).unwrap_or(i64::MAX),
+        i64::try_from(output_tokens).unwrap_or(i64::MAX),
+        &state.price_table().costs,
+        true,
+        None,
+    ) else {
+        return SharedBudgetReservationOutcome::Unavailable;
+    };
+    let Ok(date) = utc_today() else {
+        return SharedBudgetReservationOutcome::Unavailable;
+    };
+    let reservation = SharedBudgetReservation {
+        request_id: request_id.to_owned(),
+        date: date.to_string(),
+        amount: cost.realized,
+        scopes,
+    };
+    match backend.reserve_budget(reservation.clone()).await {
+        Ok(true) => SharedBudgetReservationOutcome::Reserved(SharedBudgetLease {
+            backend,
+            reservation: Some(reservation),
+            settled: false,
+        }),
+        Ok(false) => SharedBudgetReservationOutcome::Denied,
+        Err(_) => {
+            let _ = state.metrics().set_state_degraded(true);
+            SharedBudgetReservationOutcome::Unavailable
+        }
+    }
+}
+
+async fn acquire_delivery(
+    state: &AppState,
+    request_id: &str,
+) -> Result<ObservedAdmissionPermit, AdmissionError> {
     let permit = state.admission_policy().acquire().await?;
+    let shared = if let Some(backend) = state
+        .shared_state_backend()
+        .filter(|backend| backend.backend_name() == "redis")
+    {
+        match backend
+            .acquire_admission(
+                state.admission_policy().max_in_flight() as u64,
+                request_id,
+                SHARED_ADMISSION_TTL_MS,
+            )
+            .await
+        {
+            Ok(true) => Some(SharedAdmissionLease {
+                backend,
+                lease_id: request_id.to_owned(),
+            }),
+            Ok(false) => {
+                drop(permit);
+                return Err(AdmissionError::SharedLimit);
+            }
+            Err(_) => {
+                let _ = state.metrics().set_state_degraded(true);
+                None
+            }
+        }
+    } else {
+        None
+    };
     let metrics = Arc::clone(&state.metrics);
     let _ = metrics.observe_admission(permit.waited().as_secs_f64());
     Ok(ObservedAdmissionPermit {
         _permit: permit,
         metrics,
+        _shared: shared,
     })
+}
+
+/// Fleet-wide circuit lease paired with the process-local reliability attempt.
+/// Redis failures degrade to local state, but never make a request look
+/// healthy: an unfinished lease is conservatively failed when it is dropped.
+struct SharedHealthGuard {
+    backend: Arc<dyn StateBackend>,
+    target: String,
+    threshold: u64,
+    cooldown_ms: u64,
+    probe_id: String,
+    completed: bool,
+}
+
+impl SharedHealthGuard {
+    async fn complete(mut self, succeeded: bool) {
+        self.completed = true;
+        let _ = self
+            .backend
+            .complete_provider_health(
+                &self.target,
+                self.threshold,
+                self.cooldown_ms,
+                &self.probe_id,
+                succeeded,
+            )
+            .await;
+    }
+
+    async fn release(mut self) {
+        self.completed = true;
+        let _ = self
+            .backend
+            .release_provider_health(&self.target, &self.probe_id)
+            .await;
+    }
+
+    fn release_in_background(mut self) {
+        self.completed = true;
+        let backend = Arc::clone(&self.backend);
+        let target = self.target.clone();
+        let probe_id = self.probe_id.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
+            let _ = backend.release_provider_health(&target, &probe_id).await;
+        });
+    }
+
+    fn complete_in_background(mut self, succeeded: bool) {
+        self.completed = true;
+        let backend = Arc::clone(&self.backend);
+        let target = self.target.clone();
+        let threshold = self.threshold;
+        let cooldown_ms = self.cooldown_ms;
+        let probe_id = self.probe_id.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
+            let _ = backend
+                .complete_provider_health(&target, threshold, cooldown_ms, &probe_id, succeeded)
+                .await;
+        });
+    }
+}
+
+impl Drop for SharedHealthGuard {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let backend = Arc::clone(&self.backend);
+        let target = self.target.clone();
+        let threshold = self.threshold;
+        let cooldown_ms = self.cooldown_ms;
+        let probe_id = self.probe_id.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
+            let _ = backend
+                .complete_provider_health(&target, threshold, cooldown_ms, &probe_id, false)
+                .await;
+        });
+    }
+}
+
+struct CombinedReliabilityAttempt {
+    local: Option<ReliabilityAttempt>,
+    shared: Option<SharedHealthGuard>,
+}
+
+impl CombinedReliabilityAttempt {
+    async fn complete(mut self, succeeded: bool) -> Result<(), ReliabilityError> {
+        let local = self.local.take().ok_or(ReliabilityError::LockPoisoned)?;
+        let result = local.complete(succeeded);
+        if let Some(shared) = self.shared.take() {
+            shared.complete(succeeded).await;
+        }
+        result
+    }
+
+    fn complete_in_background(mut self, succeeded: bool) -> Result<(), ReliabilityError> {
+        let local = self.local.take().ok_or(ReliabilityError::LockPoisoned)?;
+        let result = local.complete(succeeded);
+        if let Some(shared) = self.shared.take() {
+            shared.complete_in_background(succeeded);
+        }
+        result
+    }
+
+    fn release_in_background(mut self) {
+        self.local.take();
+        if let Some(shared) = self.shared.take() {
+            shared.release_in_background();
+        }
+    }
+}
+
+/// Acquire both the local and Redis circuit leases. The local breaker remains
+/// authoritative when Redis is unavailable, with degraded state exposed via
+/// metrics and health endpoints.
+async fn begin_reliability_attempt(
+    state: &AppState,
+    target: &str,
+    probe_id: &str,
+) -> Result<Option<CombinedReliabilityAttempt>, ReliableDeliveryFailure> {
+    let shared = if let Some(backend) = state
+        .shared_state_backend()
+        .filter(|backend| backend.backend_name() == "redis")
+    {
+        match backend
+            .begin_provider_health(
+                target,
+                state.reliability_policy().breaker_threshold(),
+                state.reliability_policy().breaker_cooldown_ms(),
+                probe_id,
+            )
+            .await
+        {
+            Ok(true) => Some(SharedHealthGuard {
+                backend,
+                target: target.to_owned(),
+                threshold: state.reliability_policy().breaker_threshold(),
+                cooldown_ms: state.reliability_policy().breaker_cooldown_ms(),
+                probe_id: probe_id.to_owned(),
+                completed: false,
+            }),
+            Ok(false) => return Ok(None),
+            Err(_) => {
+                let _ = state.metrics().set_state_degraded(true);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let local = match state.reliability_policy().begin_attempt(target) {
+        Ok(Some(attempt)) => attempt,
+        Ok(None) => {
+            if let Some(shared) = shared {
+                shared.release().await;
+            }
+            return Ok(None);
+        }
+        Err(error) => {
+            if let Some(shared) = shared {
+                shared.release().await;
+            }
+            return Err(ReliableDeliveryFailure::State(error));
+        }
+    };
+    Ok(Some(CombinedReliabilityAttempt {
+        local: Some(local),
+        shared,
+    }))
 }
 
 struct StreamRelayContext {
@@ -2698,8 +3127,9 @@ struct StreamRelayContext {
     started: Option<Instant>,
     initial_event: Option<Bytes>,
     token_reservation: Option<TokenReservation>,
-    reliability_attempt: Option<ReliabilityAttempt>,
+    reliability_attempt: Option<CombinedReliabilityAttempt>,
     _admission_permit: ObservedAdmissionPermit,
+    shared_budget: Option<SharedBudgetLease>,
 }
 
 struct StreamingChatInput {
@@ -2717,6 +3147,7 @@ struct StreamingChatInput {
     initial_event: Option<Bytes>,
     admission_permit: ObservedAdmissionPermit,
     token_reservation: Option<TokenReservation>,
+    shared_budget: Option<SharedBudgetLease>,
 }
 
 #[cfg_attr(
@@ -2739,6 +3170,7 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
         initial_event,
         admission_permit,
         token_reservation,
+        shared_budget,
     } = input;
     if state.streaming_delivery().is_none() {
         return error_response(
@@ -2782,18 +3214,20 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                 last_error = format!("deployment '{target_id}' credential is unavailable");
                 continue;
             }
-            let reliability_attempt = match state.reliability_policy().begin_attempt(&target_id) {
-                Ok(Some(attempt)) => attempt,
-                Ok(None) => continue,
-                Err(error) => {
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "wayfinder_router_state_error",
-                        error.to_string(),
-                        request_id_headers(&request_id),
-                    );
-                }
-            };
+            let reliability_attempt =
+                match begin_reliability_attempt(&state, &target_id, &request_id).await {
+                    Ok(Some(attempt)) => attempt,
+                    Ok(None) => continue,
+                    Err(ReliableDeliveryFailure::State(error)) => {
+                        return error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "wayfinder_router_state_error",
+                            error.to_string(),
+                            request_id_headers(&request_id),
+                        );
+                    }
+                    Err(_) => continue,
+                };
             let mut reliability_attempt = Some(reliability_attempt);
             let delays = state.reliability_policy().retry_delays();
             for attempt_index in 0..=state.reliability_policy().retries() {
@@ -2822,7 +3256,7 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                         let status = response.status();
                         let succeeded = !is_auth_failure(Some(status.as_u16()));
                         if let Some(attempt) = reliability_attempt.take() {
-                            if let Err(error) = attempt.complete(succeeded) {
+                            if let Err(error) = attempt.complete(succeeded).await {
                                 return error_response(
                                     StatusCode::INTERNAL_SERVER_ERROR,
                                     "wayfinder_router_state_error",
@@ -2856,7 +3290,7 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                         if !matches!(error, DeliveryError::Provider(ProviderError::Transport)) {
                             if stream_failure_affects_reliability(&error) {
                                 if let Some(attempt) = reliability_attempt.take() {
-                                    if let Err(error) = attempt.complete(false) {
+                                    if let Err(error) = attempt.complete(false).await {
                                         return error_response(
                                             StatusCode::INTERNAL_SERVER_ERROR,
                                             "wayfinder_router_state_error",
@@ -2865,6 +3299,8 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                                         );
                                     }
                                 }
+                            } else if let Some(attempt) = reliability_attempt.take() {
+                                attempt.release_in_background();
                             }
                             return error_response(
                                 last_failure.0,
@@ -2880,7 +3316,7 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                         sleep_retry(*delay).await;
                     }
                 } else if let Some(attempt) = reliability_attempt.take() {
-                    if let Err(error) = attempt.complete(false) {
+                    if let Err(error) = attempt.complete(false).await {
                         return error_response(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "wayfinder_router_state_error",
@@ -2927,6 +3363,7 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
         token_reservation,
         reliability_attempt: Some(reliability_attempt),
         _admission_permit: admission_permit,
+        shared_budget,
     };
     let body_stream = stream::unfold(
         Some((context, response.into_stream())),
@@ -3015,16 +3452,19 @@ async fn finish_stream_success(context: &mut StreamRelayContext) {
         .metrics()
         .observe_upstream(&context.target_id, elapsed);
     if let Some(attempt) = context.reliability_attempt.take() {
-        let _ = attempt.complete(true);
+        let _ = attempt.complete(true).await;
     }
     let _ = account_stream_success(
         &context.state,
-        &context.target_name,
-        &context.request_id,
-        &context.messages,
-        context.access_grant,
-        context.completion_chars,
-        context.token_reservation.take(),
+        StreamAccounting {
+            route: &context.target_name,
+            request_id: &context.request_id,
+            messages: &context.messages,
+            access_grant: context.access_grant,
+            completion_chars: context.completion_chars,
+            token_reservation: context.token_reservation.take(),
+            shared_budget: context.shared_budget.take(),
+        },
     )
     .await;
 }
@@ -3079,8 +3519,10 @@ fn stream_failure_chunk(
         .observe_upstream_error(&context.target_id);
     if affects_reliability {
         if let Some(attempt) = context.reliability_attempt.take() {
-            let _ = attempt.complete(false);
+            let _ = attempt.complete_in_background(false);
         }
+    } else if let Some(attempt) = context.reliability_attempt.take() {
+        attempt.release_in_background();
     }
     let payload = serde_json::to_string(&json!({
         "error": {
@@ -3339,10 +3781,8 @@ async fn deliver_with_reliability(
                 last_error = format!("deployment '{target_id}' credential is unavailable");
                 continue;
             }
-            let Some(reliability_attempt) = state
-                .reliability_policy()
-                .begin_attempt(&target_id)
-                .map_err(ReliableDeliveryFailure::State)?
+            let Some(reliability_attempt) =
+                begin_reliability_attempt(state, &target_id, &routing_request.request_id).await?
             else {
                 continue;
             };
@@ -3362,6 +3802,7 @@ async fn deliver_with_reliability(
                                         ReliabilityError::LockPoisoned,
                                     ))?
                                     .complete(false)
+                                    .await
                                     .map_err(ReliableDeliveryFailure::State)?;
                             } else {
                                 let _ = state
@@ -3373,6 +3814,7 @@ async fn deliver_with_reliability(
                                         ReliabilityError::LockPoisoned,
                                     ))?
                                     .complete(true)
+                                    .await
                                     .map_err(ReliableDeliveryFailure::State)?;
                             }
                             return Ok((target_name.clone(), response));
@@ -3383,6 +3825,9 @@ async fn deliver_with_reliability(
                     Err(error) => {
                         let _ = state.metrics().observe_upstream_error(&target_id);
                         if !matches!(error, DeliveryError::Provider(ProviderError::Transport)) {
+                            if let Some(attempt) = reliability_attempt.take() {
+                                attempt.release_in_background();
+                            }
                             return Err(ReliableDeliveryFailure::Fatal(error));
                         }
                         last_error = error.to_string();
@@ -3400,6 +3845,7 @@ async fn deliver_with_reliability(
                     ReliabilityError::LockPoisoned,
                 ))?
                 .complete(false)
+                .await
                 .map_err(ReliableDeliveryFailure::State)?;
         }
     }
@@ -3890,7 +4336,7 @@ async fn preflight_access(
     } else {
         policy.admit_key(grant)
     };
-    let _ = state.metrics().set_state_degraded(policy.state_degraded());
+    let _ = state.metrics().set_state_degraded(state.state_degraded());
     match result {
         Ok(Some(result)) if !result.allowed() => {
             Err(Box::new(rate_limited_response(state, result, request_id)))
@@ -3938,6 +4384,7 @@ fn admission_error_response(
             "queue-timeout",
             state.admission_policy().queue_timeout().as_secs().max(1),
         ),
+        AdmissionError::SharedLimit => ("fleet-limit", 1),
         AdmissionError::InvalidInFlightLimit
         | AdmissionError::InvalidQueueLimit
         | AdmissionError::InvalidQueueTimeout
@@ -4091,6 +4538,7 @@ struct BufferedAccounting<'a> {
     content_type: &'a str,
     body: &'a Bytes,
     token_reservation: Option<TokenReservation>,
+    shared_budget: Option<SharedBudgetLease>,
 }
 
 #[derive(Clone, Copy)]
@@ -4108,6 +4556,17 @@ struct UsageAccounting<'a> {
     completion_tokens: i64,
     estimated: bool,
     token_reservation: Option<TokenReservation>,
+    shared_budget: Option<SharedBudgetLease>,
+}
+
+struct StreamAccounting<'a> {
+    route: &'a str,
+    request_id: &'a str,
+    messages: &'a Value,
+    access_grant: Option<AccessGrant>,
+    completion_chars: u64,
+    token_reservation: Option<TokenReservation>,
+    shared_budget: Option<SharedBudgetLease>,
 }
 
 async fn account_buffered_success(
@@ -4123,6 +4582,7 @@ async fn account_buffered_success(
         content_type,
         body,
         token_reservation,
+        shared_budget,
     } = context;
     if status.as_u16() >= 400 {
         return None;
@@ -4144,6 +4604,7 @@ async fn account_buffered_success(
             completion_tokens: usage.completion,
             estimated: usage.estimated,
             token_reservation,
+            shared_budget,
         },
     )
     .await
@@ -4151,13 +4612,17 @@ async fn account_buffered_success(
 
 async fn account_stream_success(
     state: &AppState,
-    route: &str,
-    request_id: &str,
-    messages: &Value,
-    access_grant: Option<AccessGrant>,
-    completion_chars: u64,
-    token_reservation: Option<TokenReservation>,
+    context: StreamAccounting<'_>,
 ) -> Option<AccountedUsage> {
+    let StreamAccounting {
+        route,
+        request_id,
+        messages,
+        access_grant,
+        completion_chars,
+        token_reservation,
+        shared_budget,
+    } = context;
     let prompt_tokens = estimate_tokens(&extract_prompt(messages, RouteOn::All));
     let completion_tokens = if completion_chars == 0 {
         0
@@ -4174,6 +4639,7 @@ async fn account_stream_success(
             completion_tokens: i64::try_from(completion_tokens).unwrap_or(i64::MAX),
             estimated: true,
             token_reservation,
+            shared_budget,
         },
     )
     .await
@@ -4191,6 +4657,7 @@ async fn record_accounted_usage(
         completion_tokens,
         estimated,
         token_reservation,
+        shared_budget,
     } = accounting;
     let Ok(cost) = turn_cost(
         route,
@@ -4211,8 +4678,30 @@ async fn record_accounted_usage(
     let key_id = state
         .access_policy()
         .and_then(|policy| access_grant.and_then(|grant| policy.key_id(grant)));
+    let workspace_id = state
+        .access_policy()
+        .and_then(|policy| access_grant.and_then(|grant| policy.workspace_id(grant)));
     let _ = state.savings_ledger().record(&cost, today, key_id);
     let _ = state.persist_savings();
+    if let Some(backend) = state
+        .shared_state_backend()
+        .filter(|backend| backend.backend_name() == "redis")
+    {
+        let mut scopes = vec!["global".to_owned(), format!("route:{route}")];
+        if let Some(key_id) = key_id {
+            scopes.push(format!("key:{key_id}"));
+        }
+        if let Some(workspace_id) = workspace_id {
+            scopes.push(format!("workspace:{workspace_id}"));
+        }
+        let observation =
+            SharedCostObservation::from_turn(request_id, today.to_string(), &cost, scopes);
+        let _ = backend.record_cost(observation).await;
+        let _ = state.metrics().set_state_degraded(state.state_degraded());
+    }
+    if let Some(lease) = shared_budget {
+        lease.settle().await;
+    }
     let tokens = cost.prompt_tokens.saturating_add(cost.completion_tokens);
     if let Some(reservation) = token_reservation {
         if !estimated {
@@ -5445,6 +5934,7 @@ mod tests {
             "production".to_owned(),
             Workspace {
                 models: vec!["local".to_owned()],
+                budget: None,
                 rate_limit: Some(RateLimit {
                     rpm: Some(100),
                     tpm: None,
@@ -9309,6 +9799,7 @@ mod tests {
             "mobile".to_owned(),
             Workspace {
                 models: vec!["local".to_owned()],
+                budget: None,
                 rate_limit: None,
             },
         );

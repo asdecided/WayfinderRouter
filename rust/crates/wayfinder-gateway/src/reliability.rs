@@ -43,6 +43,8 @@ pub enum ReliabilityError {
 pub struct ReliabilityPolicy {
     retries: usize,
     failover: FailoverPolicy,
+    breaker_threshold: u64,
+    breaker_cooldown_ms: u64,
     breaker: Arc<Mutex<CircuitBreaker>>,
     clock: Clock,
     jitter: Jitter,
@@ -118,10 +120,19 @@ impl ReliabilityPolicy {
             usize::try_from(config.retries).map_err(|_| ReliabilityError::InvalidBounds)?;
         let threshold = usize::try_from(config.breaker_threshold)
             .map_err(|_| ReliabilityError::InvalidBounds)?;
+        let cooldown_ms = u64::try_from(
+            Duration::try_from_secs_f64(config.breaker_cooldown)
+                .map_err(|_| ReliabilityError::InvalidBounds)?
+                .as_millis(),
+        )
+        .map_err(|_| ReliabilityError::InvalidBounds)?
+        .max(1);
         let failover = parse_failover(&config.failover).ok_or(ReliabilityError::InvalidPolicy)?;
         Ok(Self {
             retries,
             failover,
+            breaker_threshold: config.breaker_threshold.max(1),
+            breaker_cooldown_ms: cooldown_ms,
             breaker: Arc::new(Mutex::new(CircuitBreaker::new(
                 threshold,
                 config.breaker_cooldown,
@@ -135,6 +146,18 @@ impl ReliabilityPolicy {
     #[must_use]
     pub const fn retries(&self) -> usize {
         self.retries
+    }
+
+    /// Failure count required to open the configured breaker.
+    #[must_use]
+    pub const fn breaker_threshold(&self) -> u64 {
+        self.breaker_threshold
+    }
+
+    /// Cooldown before one half-open probe may be attempted.
+    #[must_use]
+    pub const fn breaker_cooldown_ms(&self) -> u64 {
+        self.breaker_cooldown_ms
     }
 
     /// Configured policy, overridden only by a recognized request header.
@@ -234,6 +257,8 @@ impl Default for ReliabilityPolicy {
         Self {
             retries: 2,
             failover: FailoverPolicy::SameTier,
+            breaker_threshold: 5,
+            breaker_cooldown_ms: 30_000,
             breaker: Arc::new(Mutex::new(CircuitBreaker::default())),
             clock: Arc::new(move || started.elapsed().as_secs_f64()),
             jitter: Arc::new(system_jitter),

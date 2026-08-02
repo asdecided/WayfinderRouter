@@ -285,9 +285,10 @@ report needs them exact.
 
 The Rust implementation of the shared policy-state contract, Redis server-time
 fixed-window counters, and loud process-local degradation is tracked in
-WF-ADR-0053. Its first PR deliberately leaves the local savings ledger and
-response cache process-local; those migrations require their own compatibility
-and recovery evidence.
+WF-ADR-0053. WF-ADR-0060 extends that contract to idempotent realized-cost
+accounting, workspace budgets, fleet admission leases, and provider-health
+circuits while keeping the response cache and local evidence sink process-local.
+Issue #147 carries the two-replica failure and recovery evidence.
 
 Stable public aliases may now carry bounded weighted OpenAI-compatible
 deployments under WF-ADR-0054. Rotation and deployment-health state remain
@@ -312,9 +313,9 @@ OpenTelemetry, and Helm packaging remain separate follow-on slices.
 
 **Acceptance:**
 
-- Two gateway replicas against one Redis enforce a **single** shared RPM limit and budget: N
-  requests split across replicas trip at exactly the shared threshold (docker-compose integration
-  test, run in CI).
+- Two gateway replicas against one Redis enforce a **single** shared RPM limit, budget, delivery
+  lease limit, and provider circuit: N requests split across replicas trip at exactly the shared
+  threshold (docker-compose integration test, run in CI).
 - `backend = "memory"` leaves every existing test green with zero behavioral diff (regression).
 - Against a mock provider returning real `usage`, a 30-day CSV export reconciles with the mock's
   invoice within 1%, and every streamed row has `estimated=false`.

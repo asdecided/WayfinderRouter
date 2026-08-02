@@ -15,8 +15,10 @@ use tokio::time::sleep;
 use uuid::Uuid;
 use wayfinder_gateway::rate_limit::LimitKind;
 use wayfinder_gateway::state::{
-    RedisStateBackend, StateBackend, StateBackendError, StateLimitConfig,
+    RedisStateBackend, SharedBudgetReservation, SharedBudgetScope, SharedCostObservation,
+    StateBackend, StateBackendError, StateLimitConfig,
 };
+use wayfinder_service::pricing::TurnCost;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -145,6 +147,129 @@ async fn replicated_gateway_state_survives_real_redis_failure_modes() -> TestRes
         .query_async(&mut admin)
         .await?;
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn replicated_accounting_admission_and_health_are_atomic() -> TestResult {
+    let Some(admin_url) = live_redis_url()? else {
+        return Ok(());
+    };
+
+    let mut admin = admin_connection(&admin_url).await?;
+    let suffix = Uuid::new_v4().simple().to_string();
+    let username = format!("wayfinder_ci_{suffix}");
+    let password = format!("secret_{suffix}");
+    let namespace = format!("ci:fleet:{suffix}");
+    let authenticated_url = authenticated_url(&admin_url, &username, &password)?;
+    configure_gateway_user(&mut admin, &username, &password).await?;
+
+    let first = RedisStateBackend::connect(&authenticated_url, namespace.clone()).await?;
+    let second = RedisStateBackend::connect(&authenticated_url, namespace.clone()).await?;
+    let cost = TurnCost {
+        route: "cloud".to_owned(),
+        realized: 1.25,
+        baseline: 2.0,
+        savings: 0.75,
+        prompt_tokens: 100,
+        completion_tokens: 50,
+        estimated: false,
+    };
+    let observation = SharedCostObservation::from_turn(
+        "request-1",
+        "2026-07-11".to_owned(),
+        &cost,
+        vec!["global".to_owned(), "workspace:production".to_owned()],
+    );
+    assert!(first.record_cost(observation.clone()).await?);
+    assert!(!second.record_cost(observation).await?);
+    assert!(
+        !first
+            .record_cost(SharedCostObservation::from_turn(
+                "request-1",
+                "2026-07-12".to_owned(),
+                &cost,
+                vec!["global".to_owned(), "workspace:production".to_owned()],
+            ))
+            .await?,
+        "request idempotency must span UTC ledger boundaries"
+    );
+    assert_eq!(
+        second.spend("day", "global", "2026-07-11").await?.realized,
+        1.25
+    );
+    assert_eq!(
+        first
+            .spend("day", "workspace:production", "2026-07-11")
+            .await?
+            .realized,
+        1.25
+    );
+
+    let reservation = SharedBudgetReservation {
+        request_id: "budget-request".to_owned(),
+        date: "2026-07-11".to_owned(),
+        amount: 0.5,
+        scopes: vec![SharedBudgetScope {
+            scope: "global".to_owned(),
+            window: "day".to_owned(),
+            limit: 2.0,
+            blocks: true,
+        }],
+    };
+    assert!(first.reserve_budget(reservation.clone()).await?);
+    assert!(!second.reserve_budget(reservation.clone()).await?);
+    first.release_budget(reservation.clone()).await?;
+    assert!(second.reserve_budget(reservation.clone()).await?);
+    second.settle_budget(reservation).await?;
+
+    assert!(first.acquire_admission(1, "lease-a", 1_000).await?);
+    assert!(!second.acquire_admission(1, "lease-b", 1_000).await?);
+    first.release_admission("lease-a").await?;
+    assert!(second.acquire_admission(1, "lease-b", 1_000).await?);
+    second.release_admission("lease-b").await?;
+
+    assert!(
+        first
+            .begin_provider_health("cloud-eu", 1, 20, "probe-a")
+            .await?
+    );
+    assert!(
+        !second
+            .begin_provider_health("cloud-eu", 1, 20, "probe-b")
+            .await?
+    );
+    first
+        .complete_provider_health("cloud-eu", 1, 20, "probe-a", false)
+        .await?;
+    assert!(
+        !second
+            .begin_provider_health("cloud-eu", 1, 20, "probe-b")
+            .await?
+    );
+    sleep(Duration::from_millis(30)).await;
+    assert!(
+        second
+            .begin_provider_health("cloud-eu", 1, 20, "probe-b")
+            .await?
+    );
+    second
+        .complete_provider_health("cloud-eu", 1, 20, "probe-b", true)
+        .await?;
+
+    let namespace_component = URL_SAFE_NO_PAD.encode(namespace.as_bytes());
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg(format!("wayfinder:v1:{namespace_component}:*"))
+        .query_async(&mut admin)
+        .await?;
+    if !keys.is_empty() {
+        let _: i64 = redis::cmd("DEL").arg(keys).query_async(&mut admin).await?;
+    }
+    let _: i64 = redis::cmd("ACL")
+        .arg("DELUSER")
+        .arg(&username)
+        .query_async(&mut admin)
+        .await?;
     Ok(())
 }
 

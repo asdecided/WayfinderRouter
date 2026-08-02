@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 use wayfinder_config::gateway::{Budget, GatewayConfig};
 use wayfinder_service::pricing::{LedgerError, SavingsLedger, UtcDate};
 
+use crate::state::{SharedBudgetScope, StateBackend, StateBackendError};
+
 /// Result of applying every budget relevant to one authenticated request.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BudgetDecision {
@@ -25,10 +27,11 @@ pub enum BudgetDecision {
     },
 }
 
-/// Immutable gateway-wide and per-key spend caps.
+/// Immutable gateway-wide, workspace, and per-key spend caps.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BudgetPolicy {
     global: Option<Budget>,
+    by_workspace: BTreeMap<String, Budget>,
     by_key: BTreeMap<String, Budget>,
 }
 
@@ -38,6 +41,13 @@ impl BudgetPolicy {
     pub fn from_gateway_config(config: &GatewayConfig) -> Self {
         Self {
             global: config.budget.clone(),
+            by_workspace: config
+                .workspaces
+                .iter()
+                .filter_map(|(id, workspace)| {
+                    workspace.budget.clone().map(|budget| (id.clone(), budget))
+                })
+                .collect(),
             by_key: config
                 .keys
                 .iter()
@@ -49,7 +59,38 @@ impl BudgetPolicy {
     /// Whether any request can be affected by this policy.
     #[must_use]
     pub fn active(&self) -> bool {
-        self.global.is_some() || !self.by_key.is_empty()
+        self.global.is_some() || !self.by_workspace.is_empty() || !self.by_key.is_empty()
+    }
+
+    /// Return the configured dimensions that participate in a shared spend
+    /// reservation. The order is stable so Redis scripts and tests remain
+    /// deterministic.
+    #[must_use]
+    pub fn shared_scopes(
+        &self,
+        workspace_id: Option<&str>,
+        key_id: Option<&str>,
+        offline: bool,
+    ) -> Vec<SharedBudgetScope> {
+        let mut scopes = Vec::new();
+        if let Some(budget) = &self.global {
+            scopes.push(shared_scope("global", budget, offline));
+        }
+        if let Some((workspace_id, budget)) =
+            workspace_id.and_then(|id| self.by_workspace.get(id).map(|budget| (id, budget)))
+        {
+            scopes.push(shared_scope(
+                &format!("workspace:{workspace_id}"),
+                budget,
+                offline,
+            ));
+        }
+        if let Some((key_id, budget)) =
+            key_id.and_then(|id| self.by_key.get(id).map(|budget| (id, budget)))
+        {
+            scopes.push(shared_scope(&format!("key:{key_id}"), budget, offline));
+        }
+        scopes
     }
 
     /// Evaluate realized spend for the global cap and the authenticated key's cap.
@@ -65,6 +106,19 @@ impl BudgetPolicy {
         today: UtcDate,
         offline: bool,
     ) -> Result<BudgetDecision, LedgerError> {
+        self.evaluate_for(ledger, priced, None, key_id, today, offline)
+    }
+
+    /// Evaluate global, workspace, and key caps for one authenticated request.
+    pub fn evaluate_for(
+        &self,
+        ledger: &SavingsLedger,
+        priced: bool,
+        workspace_id: Option<&str>,
+        key_id: Option<&str>,
+        today: UtcDate,
+        offline: bool,
+    ) -> Result<BudgetDecision, LedgerError> {
         if !priced {
             return Ok(BudgetDecision::Allow);
         }
@@ -72,6 +126,15 @@ impl BudgetPolicy {
         let mut degraded = false;
         if let Some(budget) = &self.global {
             match evaluate_one(ledger, budget, None, today, offline)? {
+                BudgetDecision::Allow => {}
+                BudgetDecision::Degrade => degraded = true,
+                blocked @ BudgetDecision::Block { .. } => return Ok(blocked),
+            }
+        }
+        if let Some((workspace_id, budget)) =
+            workspace_id.and_then(|id| self.by_workspace.get(id).map(|budget| (id, budget)))
+        {
+            match evaluate_one(ledger, budget, Some(workspace_id), today, offline)? {
                 BudgetDecision::Allow => {}
                 BudgetDecision::Degrade => degraded = true,
                 blocked @ BudgetDecision::Block { .. } => return Ok(blocked),
@@ -92,6 +155,105 @@ impl BudgetPolicy {
             BudgetDecision::Allow
         })
     }
+
+    /// Evaluate against the fleet-wide realized-cost ledger.
+    ///
+    /// This path is used only when the configured state backend can provide
+    /// shared accounting. Callers retain the local-ledger fallback when the
+    /// backend is unavailable.
+    pub async fn evaluate_shared(
+        &self,
+        backend: &dyn StateBackend,
+        priced: bool,
+        key_id: Option<&str>,
+        today: UtcDate,
+        offline: bool,
+    ) -> Result<BudgetDecision, StateBackendError> {
+        self.evaluate_shared_for(backend, priced, None, key_id, today, offline)
+            .await
+    }
+
+    /// Evaluate shared global, workspace, and key caps for one request.
+    pub async fn evaluate_shared_for(
+        &self,
+        backend: &dyn StateBackend,
+        priced: bool,
+        workspace_id: Option<&str>,
+        key_id: Option<&str>,
+        today: UtcDate,
+        offline: bool,
+    ) -> Result<BudgetDecision, StateBackendError> {
+        if !priced {
+            return Ok(BudgetDecision::Allow);
+        }
+        let date = today.to_string();
+        let mut degraded = false;
+        if let Some(budget) = &self.global {
+            match evaluate_shared_one(backend, budget, "global", &date, offline).await? {
+                BudgetDecision::Allow => {}
+                BudgetDecision::Degrade => degraded = true,
+                blocked @ BudgetDecision::Block { .. } => return Ok(blocked),
+            }
+        }
+        if let Some((workspace_id, budget)) =
+            workspace_id.and_then(|id| self.by_workspace.get(id).map(|budget| (id, budget)))
+        {
+            let scope = format!("workspace:{workspace_id}");
+            match evaluate_shared_one(backend, budget, &scope, &date, offline).await? {
+                BudgetDecision::Allow => {}
+                BudgetDecision::Degrade => degraded = true,
+                blocked @ BudgetDecision::Block { .. } => return Ok(blocked),
+            }
+        }
+        if let Some((key_id, budget)) =
+            key_id.and_then(|key_id| self.by_key.get(key_id).map(|budget| (key_id, budget)))
+        {
+            let scope = format!("key:{key_id}");
+            match evaluate_shared_one(backend, budget, &scope, &date, offline).await? {
+                BudgetDecision::Allow => {}
+                BudgetDecision::Degrade => degraded = true,
+                blocked @ BudgetDecision::Block { .. } => return Ok(blocked),
+            }
+        }
+        Ok(if degraded {
+            BudgetDecision::Degrade
+        } else {
+            BudgetDecision::Allow
+        })
+    }
+}
+
+async fn evaluate_shared_one(
+    backend: &dyn StateBackend,
+    budget: &Budget,
+    scope: &str,
+    date: &str,
+    offline: bool,
+) -> Result<BudgetDecision, StateBackendError> {
+    let spent = backend.spend(&budget.window, scope, date).await?.realized;
+    Ok(evaluate_spent(spent, budget, offline))
+}
+
+fn shared_scope(scope: &str, budget: &Budget, offline: bool) -> SharedBudgetScope {
+    SharedBudgetScope {
+        scope: scope.to_owned(),
+        window: budget.window.clone(),
+        limit: budget.limit,
+        blocks: budget.on_breach == "block" && !offline,
+    }
+}
+
+fn evaluate_spent(spent: f64, budget: &Budget, offline: bool) -> BudgetDecision {
+    if spent < budget.limit {
+        return BudgetDecision::Allow;
+    }
+    if budget.on_breach == "block" && !offline {
+        return BudgetDecision::Block {
+            window: budget.window.clone(),
+            limit: budget.limit,
+        };
+    }
+    BudgetDecision::Degrade
 }
 
 fn evaluate_one(

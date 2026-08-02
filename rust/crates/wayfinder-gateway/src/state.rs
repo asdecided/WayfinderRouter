@@ -5,6 +5,7 @@
 //! time, while callers can fall back to the bounded local limiter on outage.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{
@@ -16,10 +17,16 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use redis::Script;
 use redis::aio::ConnectionManager;
 use thiserror::Error;
+use wayfinder_service::pricing::TurnCost;
 
 use crate::rate_limit::{LimitKind, RateReservation, RateResult, RateSnapshot, ReservationResult};
 
 const REDIS_KEY_ROOT: &str = "wayfinder:v1";
+const SHARED_COST_SCALE: f64 = 1_000_000.0;
+const SHARED_LEDGER_DAY_TTL_SECONDS: u64 = 400 * 24 * 60 * 60;
+const SHARED_LEDGER_MONTH_TTL_SECONDS: u64 = 5 * 365 * 24 * 60 * 60;
+const SHARED_LEDGER_IDEMPOTENCY_TTL_SECONDS: u64 = 5 * 365 * 24 * 60 * 60;
+const SHARED_BUDGET_RESERVATION_TTL_MS: u64 = 6 * 60 * 60 * 1_000;
 
 fn encode_redis_component(value: &str) -> String {
     URL_SAFE_NO_PAD.encode(value.as_bytes())
@@ -49,6 +56,86 @@ pub struct StateLimitConfig {
     pub tpm: Option<u64>,
     /// Fixed-window duration in seconds.
     pub window_seconds: f64,
+}
+
+/// One prompt-free cost observation written to the shared ledger.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharedCostObservation {
+    /// Request identity used to make retries idempotent.
+    pub request_id: String,
+    /// UTC date bucket in `YYYY-MM-DD` form.
+    pub date: String,
+    /// Dimensions that receive the observation, such as `global`, `key:<id>`,
+    /// `workspace:<id>`, and `route:<model>`.
+    pub scopes: Vec<String>,
+    /// Realized provider cost in the configured accounting unit.
+    pub realized: f64,
+    /// Counterfactual baseline cost in the configured accounting unit.
+    pub baseline: f64,
+    /// Baseline minus realized cost.
+    pub savings: f64,
+    /// Prompt/input tokens.
+    pub prompt_tokens: u64,
+    /// Completion/output tokens.
+    pub completion_tokens: u64,
+    /// Whether one or both token counts were estimated.
+    pub estimated: bool,
+}
+
+impl SharedCostObservation {
+    /// Build a bounded observation from an already-accounted turn.
+    #[must_use]
+    pub fn from_turn(
+        request_id: impl Into<String>,
+        date: impl Into<String>,
+        cost: &TurnCost,
+        scopes: Vec<String>,
+    ) -> Self {
+        Self {
+            request_id: request_id.into(),
+            date: date.into(),
+            scopes,
+            realized: cost.realized,
+            baseline: cost.baseline,
+            savings: cost.savings,
+            prompt_tokens: cost.prompt_tokens,
+            completion_tokens: cost.completion_tokens,
+            estimated: cost.estimated,
+        }
+    }
+}
+
+/// Shared spend returned by one configured budget dimension.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SharedSpend {
+    /// Realized cost in the configured accounting unit.
+    pub realized: f64,
+}
+
+/// One budget dimension participating in an atomic fleet reservation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharedBudgetScope {
+    /// Encoded accounting dimension, for example `global` or `key:team-a`.
+    pub scope: String,
+    /// Accounting window used by this cap.
+    pub window: String,
+    /// Spend ceiling in the configured accounting unit.
+    pub limit: f64,
+    /// Whether reaching the ceiling blocks online delivery.
+    pub blocks: bool,
+}
+
+/// Conservative, idempotent spend reservation held until terminal accounting.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharedBudgetReservation {
+    /// Request identity used for idempotent reserve/release/settlement.
+    pub request_id: String,
+    /// UTC date bucket used to select day and month ledgers.
+    pub date: String,
+    /// Conservative amount reserved in each participating scope.
+    pub amount: f64,
+    /// Budget dimensions covered by the reservation.
+    pub scopes: Vec<SharedBudgetScope>,
 }
 
 impl StateLimitConfig {
@@ -134,6 +221,91 @@ pub trait StateBackend: Send + Sync {
         tokens: u64,
         now_seconds: f64,
     ) -> StateFuture<'a, ()>;
+
+    /// Record one cost observation across all requested dimensions.
+    ///
+    /// Implementations must make the operation idempotent by `request_id`.
+    /// The default backend deliberately returns unavailable so existing local
+    /// ledger behaviour remains the fallback contract.
+    fn record_cost<'a>(&'a self, _observation: SharedCostObservation) -> StateFuture<'a, bool> {
+        Box::pin(async { Err(StateBackendError::Unavailable) })
+    }
+
+    /// Read realized spend for one shared ledger dimension and window.
+    fn spend<'a>(
+        &'a self,
+        _window: &'a str,
+        _scope: &'a str,
+        _date: &'a str,
+    ) -> StateFuture<'a, SharedSpend> {
+        Box::pin(async { Err(StateBackendError::Unavailable) })
+    }
+
+    /// Atomically reserve conservative spend across all hard budget scopes.
+    fn reserve_budget<'a>(
+        &'a self,
+        _reservation: SharedBudgetReservation,
+    ) -> StateFuture<'a, bool> {
+        Box::pin(async { Err(StateBackendError::Unavailable) })
+    }
+
+    /// Release a reservation after a failed or cancelled delivery.
+    fn release_budget<'a>(&'a self, _reservation: SharedBudgetReservation) -> StateFuture<'a, ()> {
+        Box::pin(async { Err(StateBackendError::Unavailable) })
+    }
+
+    /// Settle a completed request by releasing its reserved amount. The
+    /// realized amount is recorded separately by `record_cost`.
+    fn settle_budget<'a>(&'a self, reservation: SharedBudgetReservation) -> StateFuture<'a, ()> {
+        self.release_budget(reservation)
+    }
+
+    /// Acquire one fleet-wide in-flight lease.
+    fn acquire_admission<'a>(
+        &'a self,
+        _limit: u64,
+        _lease_id: &'a str,
+        _ttl_ms: u64,
+    ) -> StateFuture<'a, bool> {
+        Box::pin(async { Err(StateBackendError::Unavailable) })
+    }
+
+    /// Release one fleet-wide in-flight lease.
+    fn release_admission<'a>(&'a self, _lease_id: &'a str) -> StateFuture<'a, ()> {
+        Box::pin(async { Err(StateBackendError::Unavailable) })
+    }
+
+    /// Claim a provider health attempt, including the single half-open probe.
+    fn begin_provider_health<'a>(
+        &'a self,
+        _target: &'a str,
+        _threshold: u64,
+        _cooldown_ms: u64,
+        _probe_id: &'a str,
+    ) -> StateFuture<'a, bool> {
+        Box::pin(async { Err(StateBackendError::Unavailable) })
+    }
+
+    /// Record one provider health outcome.
+    fn complete_provider_health<'a>(
+        &'a self,
+        _target: &'a str,
+        _threshold: u64,
+        _cooldown_ms: u64,
+        _probe_id: &'a str,
+        _succeeded: bool,
+    ) -> StateFuture<'a, ()> {
+        Box::pin(async { Err(StateBackendError::Unavailable) })
+    }
+
+    /// Release a half-open probe without counting it as a provider failure.
+    fn release_provider_health<'a>(
+        &'a self,
+        _target: &'a str,
+        _probe_id: &'a str,
+    ) -> StateFuture<'a, ()> {
+        Box::pin(async { Err(StateBackendError::Unavailable) })
+    }
 
     /// Read the current request-window snapshot.
     fn snapshot<'a>(
@@ -446,6 +618,171 @@ redis.call('LTRIM', KEYS[1], -max_events, -1)
 return 1
 "#;
 
+const RECORD_COST_SCRIPT: &str = r#"
+-- KEYS[1] is the idempotency set. Remaining keys are the day/month/all
+-- aggregate hashes for each requested accounting scope.
+if redis.call('SADD', KEYS[1], ARGV[1]) == 0 then return 0 end
+local realized = ARGV[2]
+local baseline = ARGV[3]
+local savings = ARGV[4]
+local prompt = ARGV[5]
+local completion = ARGV[6]
+local estimated = ARGV[7]
+for index = 2, #KEYS do
+  redis.call('HINCRBY', KEYS[index], 'requests', 1)
+  redis.call('HINCRBY', KEYS[index], 'estimated_requests', estimated)
+  redis.call('HINCRBY', KEYS[index], 'prompt_tokens', prompt)
+  redis.call('HINCRBY', KEYS[index], 'completion_tokens', completion)
+  redis.call('HINCRBY', KEYS[index], 'realized_micros', realized)
+  redis.call('HINCRBY', KEYS[index], 'baseline_micros', baseline)
+  redis.call('HINCRBY', KEYS[index], 'savings_micros', savings)
+  local period_offset = (index - 2) % 3
+  if period_offset == 0 then
+    redis.call('PEXPIRE', KEYS[index], tonumber(ARGV[8]) * 1000)
+  elseif period_offset == 1 then
+    redis.call('PEXPIRE', KEYS[index], tonumber(ARGV[9]) * 1000)
+  end
+end
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[10]) * 1000)
+return 1
+"#;
+
+const RESERVE_BUDGET_SCRIPT: &str = r#"
+local request_id = ARGV[1]
+local amount = tonumber(ARGV[2])
+local scope_count = tonumber(ARGV[3])
+if request_id == nil or amount == nil or amount < 0 or scope_count == nil or scope_count < 1 then
+  return redis.error_reply('invalid budget reservation')
+end
+local field = request_id
+local scope_arg_stride = 4
+local time = redis.call('TIME')
+local now_ms = (tonumber(time[1]) * 1000) + math.floor(tonumber(time[2]) / 1000)
+local ttl_ms = tonumber(ARGV[4 + scope_count * scope_arg_stride])
+for scope_index = 1, scope_count do
+  local key_base = (scope_index - 1) * 3
+  local expiry = KEYS[key_base + 2]
+  local amounts = KEYS[key_base + 3]
+  local expired = redis.call('ZRANGEBYSCORE', expiry, '-inf', now_ms)
+  for _, expired_id in ipairs(expired) do
+    local expired_amount = tonumber(redis.call('HGET', amounts, expired_id) or '0')
+    if expired_amount > 0 then
+      redis.call('HINCRBY', KEYS[key_base + 1], 'reserved_micros', -expired_amount)
+      redis.call('HDEL', amounts, expired_id)
+    end
+    redis.call('ZREM', expiry, expired_id)
+  end
+end
+local existing_count = 0
+for scope_index = 1, scope_count do
+  local key_base = (scope_index - 1) * 3
+  local amounts = KEYS[key_base + 3]
+  if redis.call('HEXISTS', amounts, field) == 1 then existing_count = existing_count + 1 end
+end
+if existing_count == scope_count then return 1 end
+if existing_count > 0 then return redis.error_reply('partial budget reservation') end
+for scope_index = 1, scope_count do
+  local key_base = (scope_index - 1) * 3
+  local arg_base = 4 + (scope_index - 1) * scope_arg_stride
+  local limit = tonumber(ARGV[arg_base])
+  local blocks = tonumber(ARGV[arg_base + 1])
+  if blocks == 1 then
+    local realized = tonumber(redis.call('HGET', KEYS[key_base + 1], 'realized_micros') or '0')
+    local reserved = tonumber(redis.call('HGET', KEYS[key_base + 1], 'reserved_micros') or '0')
+    if realized + reserved + amount > limit then return 0 end
+  end
+end
+for scope_index = 1, scope_count do
+  local key_base = (scope_index - 1) * 3
+  local arg_base = 4 + (scope_index - 1) * scope_arg_stride
+  redis.call('HINCRBY', KEYS[key_base + 1], 'reserved_micros', amount)
+  local ledger_ttl_ms = tonumber(ARGV[arg_base + 2])
+  if redis.call('PTTL', KEYS[key_base + 1]) < 0 and ledger_ttl_ms ~= nil and ledger_ttl_ms > 0 then
+    redis.call('PEXPIRE', KEYS[key_base + 1], ledger_ttl_ms)
+  end
+  redis.call('HSET', KEYS[key_base + 3], field, amount)
+  redis.call('ZADD', KEYS[key_base + 2], now_ms + ttl_ms, field)
+  redis.call('PEXPIRE', KEYS[key_base + 2], ttl_ms)
+  redis.call('PEXPIRE', KEYS[key_base + 3], ttl_ms)
+end
+return 1
+"#;
+
+const RELEASE_BUDGET_SCRIPT: &str = r#"
+local field = ARGV[1]
+for scope_index = 1, #KEYS, 3 do
+  local ledger = KEYS[scope_index]
+  local expiry = KEYS[scope_index + 1]
+  local amounts = KEYS[scope_index + 2]
+  local reserved = tonumber(redis.call('HGET', amounts, field) or '0')
+  if reserved > 0 then
+    redis.call('HINCRBY', ledger, 'reserved_micros', -reserved)
+    redis.call('HDEL', amounts, field)
+  end
+  redis.call('ZREM', expiry, field)
+end
+return 1
+"#;
+
+const ACQUIRE_ADMISSION_SCRIPT: &str = r#"
+local limit = tonumber(ARGV[1])
+local ttl_ms = tonumber(ARGV[2])
+if limit == nil or limit < 1 or ttl_ms == nil or ttl_ms < 1 then
+  return redis.error_reply('invalid shared admission bounds')
+end
+local time = redis.call('TIME')
+local now_ms = (tonumber(time[1]) * 1000) + math.floor(tonumber(time[2]) / 1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_ms)
+if redis.call('ZSCORE', KEYS[1], ARGV[3]) ~= false then return 1 end
+if redis.call('ZCARD', KEYS[1]) >= limit then return 0 end
+redis.call('ZADD', KEYS[1], now_ms + ttl_ms, ARGV[3])
+redis.call('PEXPIRE', KEYS[1], ttl_ms)
+return 1
+"#;
+
+const RELEASE_ADMISSION_SCRIPT: &str = r#"
+redis.call('ZREM', KEYS[1], ARGV[1])
+if redis.call('ZCARD', KEYS[1]) == 0 then redis.call('DEL', KEYS[1]) end
+return 1
+"#;
+
+const BEGIN_HEALTH_SCRIPT: &str = r#"
+local time = redis.call('TIME')
+local now_ms = (tonumber(time[1]) * 1000) + math.floor(tonumber(time[2]) / 1000)
+local open_until = tonumber(redis.call('HGET', KEYS[1], 'open_until') or '0')
+local probe = redis.call('HGET', KEYS[1], 'probe')
+if open_until > now_ms and probe ~= ARGV[3] then return 0 end
+if probe ~= false and probe ~= ARGV[3] then return 0 end
+redis.call('HSET', KEYS[1], 'probe', ARGV[3])
+redis.call('PEXPIRE', KEYS[1], math.max(tonumber(ARGV[2]) * 2, 1000))
+return 1
+"#;
+
+const COMPLETE_HEALTH_SCRIPT: &str = r#"
+local time = redis.call('TIME')
+local now_ms = (tonumber(time[1]) * 1000) + math.floor(tonumber(time[2]) / 1000)
+local probe = redis.call('HGET', KEYS[1], 'probe')
+if probe ~= false and probe ~= ARGV[3] then return 0 end
+if ARGV[4] == '1' then
+  redis.call('HSET', KEYS[1], 'failures', 0, 'open_until', 0)
+  redis.call('HDEL', KEYS[1], 'probe')
+  return 1
+end
+local failures = redis.call('HINCRBY', KEYS[1], 'failures', 1)
+if failures >= tonumber(ARGV[1]) then
+  redis.call('HSET', KEYS[1], 'open_until', now_ms + tonumber(ARGV[2]))
+end
+redis.call('HDEL', KEYS[1], 'probe')
+return 1
+"#;
+
+const RELEASE_HEALTH_SCRIPT: &str = r#"
+if redis.call('HGET', KEYS[1], 'probe') == ARGV[1] then
+  redis.call('HDEL', KEYS[1], 'probe')
+end
+return 1
+"#;
+
 /// Redis-backed fixed-window counters using server time and Lua atomicity.
 #[derive(Clone)]
 pub struct RedisStateBackend {
@@ -479,6 +816,49 @@ impl RedisKeyNamespace {
             "{REDIS_KEY_ROOT}:{}:audit-log:{}",
             self.encoded_namespace,
             encode_redis_component(key)
+        )
+    }
+
+    fn ledger(&self, period: &str, scope: &str) -> String {
+        format!(
+            "{REDIS_KEY_ROOT}:{}:ledger:{}:{}",
+            self.encoded_namespace,
+            encode_redis_component(period),
+            encode_redis_component(scope)
+        )
+    }
+
+    fn ledger_seen(&self) -> String {
+        format!("{REDIS_KEY_ROOT}:{}:ledger-seen", self.encoded_namespace)
+    }
+
+    fn budget_reservations(&self, period: &str, scope: &str) -> String {
+        format!(
+            "{REDIS_KEY_ROOT}:{}:budget-reservations:{}:{}",
+            self.encoded_namespace,
+            encode_redis_component(period),
+            encode_redis_component(scope)
+        )
+    }
+
+    fn budget_amounts(&self, period: &str, scope: &str) -> String {
+        format!(
+            "{REDIS_KEY_ROOT}:{}:budget-amounts:{}:{}",
+            self.encoded_namespace,
+            encode_redis_component(period),
+            encode_redis_component(scope)
+        )
+    }
+
+    fn admission(&self) -> String {
+        format!("{REDIS_KEY_ROOT}:{}:admission", self.encoded_namespace)
+    }
+
+    fn health(&self, target: &str) -> String {
+        format!(
+            "{REDIS_KEY_ROOT}:{}:health:{}",
+            self.encoded_namespace,
+            encode_redis_component(target)
         )
     }
 }
@@ -526,6 +906,34 @@ impl RedisStateBackend {
             }
         }
     }
+}
+
+fn budget_period(date: &str, window: &str) -> Result<String, StateBackendError> {
+    match window {
+        "day" => Ok(format!("day:{date}")),
+        "month" => Ok(format!("month:{}", &date[..7])),
+        "all" => Ok("all".to_owned()),
+        _ => Err(StateBackendError::Unavailable),
+    }
+}
+
+fn shared_budget_keys(
+    namespace: &RedisKeyNamespace,
+    date: &str,
+    scopes: &[SharedBudgetScope],
+) -> Result<Vec<String>, StateBackendError> {
+    let date = validate_ledger_date(date)?;
+    let mut keys = Vec::with_capacity(scopes.len() * 3);
+    for scope in scopes {
+        if scope.scope.is_empty() || scope.scope.len() > 128 {
+            return Err(StateBackendError::Unavailable);
+        }
+        let period = budget_period(&date, &scope.window)?;
+        keys.push(namespace.ledger(&period, &scope.scope));
+        keys.push(namespace.budget_reservations(&period, &scope.scope));
+        keys.push(namespace.budget_amounts(&period, &scope.scope));
+    }
+    Ok(keys)
 }
 
 impl StateBackend for RedisStateBackend {
@@ -699,6 +1107,274 @@ impl StateBackend for RedisStateBackend {
         })
     }
 
+    fn record_cost<'a>(&'a self, observation: SharedCostObservation) -> StateFuture<'a, bool> {
+        Box::pin(async move {
+            let date = validate_ledger_date(&observation.date)?;
+            if observation.request_id.is_empty() || observation.request_id.len() > 128 {
+                return Err(StateBackendError::Unavailable);
+            }
+            let mut scopes = BTreeSet::new();
+            for scope in observation.scopes {
+                if scope.is_empty() || scope.len() > 128 {
+                    return Err(StateBackendError::Unavailable);
+                }
+                scopes.insert(scope);
+            }
+            if scopes.is_empty() || scopes.len() > 8 {
+                return Err(StateBackendError::Unavailable);
+            }
+            let realized = scaled_cost(observation.realized)?;
+            let baseline = scaled_cost(observation.baseline)?;
+            let savings = scaled_signed_cost(observation.savings)?;
+            let prompt = i64::try_from(observation.prompt_tokens)
+                .map_err(|_| StateBackendError::Unavailable)?;
+            let completion = i64::try_from(observation.completion_tokens)
+                .map_err(|_| StateBackendError::Unavailable)?;
+            let estimated = i64::from(observation.estimated);
+            let mut keys = vec![self.keys.ledger_seen()];
+            for scope in scopes {
+                keys.push(self.keys.ledger(&format!("day:{date}"), &scope));
+                keys.push(self.keys.ledger(&format!("month:{}", &date[..7]), &scope));
+                keys.push(self.keys.ledger("all", &scope));
+            }
+            let invocation = Script::new(RECORD_COST_SCRIPT);
+            for key in keys {
+                invocation.key(key);
+            }
+            let mut connection = self.connection.clone();
+            let result: Result<i64, _> = invocation
+                .arg(observation.request_id)
+                .arg(realized)
+                .arg(baseline)
+                .arg(savings)
+                .arg(prompt)
+                .arg(completion)
+                .arg(estimated)
+                .arg(SHARED_LEDGER_DAY_TTL_SECONDS)
+                .arg(SHARED_LEDGER_MONTH_TTL_SECONDS)
+                .arg(SHARED_LEDGER_IDEMPOTENCY_TTL_SECONDS)
+                .invoke_async(&mut connection)
+                .await;
+            self.mark(
+                result
+                    .map(|value| value == 1)
+                    .map_err(|_| StateBackendError::Unavailable),
+            )
+        })
+    }
+
+    fn spend<'a>(
+        &'a self,
+        window: &'a str,
+        scope: &'a str,
+        date: &'a str,
+    ) -> StateFuture<'a, SharedSpend> {
+        Box::pin(async move {
+            let date = validate_ledger_date(date)?;
+            if scope.is_empty() || scope.len() > 128 {
+                return Err(StateBackendError::Unavailable);
+            }
+            let period = match window {
+                "day" => format!("day:{date}"),
+                "month" => format!("month:{}", &date[..7]),
+                "all" => "all".to_owned(),
+                _ => return Err(StateBackendError::Unavailable),
+            };
+            let mut connection = self.connection.clone();
+            let value: Option<i64> = redis::cmd("HGET")
+                .arg(self.keys.ledger(&period, scope))
+                .arg("realized_micros")
+                .query_async(&mut connection)
+                .await
+                .map_err(|_| StateBackendError::Unavailable)?;
+            self.mark(Ok(SharedSpend {
+                realized: value.map_or(0.0, |value| value as f64 / SHARED_COST_SCALE),
+            }))
+        })
+    }
+
+    fn reserve_budget<'a>(&'a self, reservation: SharedBudgetReservation) -> StateFuture<'a, bool> {
+        Box::pin(async move {
+            if reservation.request_id.is_empty()
+                || reservation.request_id.len() > 128
+                || reservation.scopes.is_empty()
+                || reservation.scopes.len() > 8
+            {
+                return Err(StateBackendError::Unavailable);
+            }
+            let amount = scaled_cost(reservation.amount)?;
+            let keys = shared_budget_keys(&self.keys, &reservation.date, &reservation.scopes)?;
+            let invocation = Script::new(RESERVE_BUDGET_SCRIPT);
+            for key in keys {
+                invocation.key(key);
+            }
+            invocation
+                .arg(&reservation.request_id)
+                .arg(amount)
+                .arg(reservation.scopes.len());
+            for scope in &reservation.scopes {
+                let limit = scaled_cost(scope.limit)?;
+                let blocks = if scope.blocks { 1_i64 } else { 0_i64 };
+                let ledger_ttl_ms = match scope.window.as_str() {
+                    "day" => SHARED_LEDGER_DAY_TTL_SECONDS.saturating_mul(1_000),
+                    "month" | "all" => SHARED_LEDGER_MONTH_TTL_SECONDS.saturating_mul(1_000),
+                    _ => return Err(StateBackendError::Unavailable),
+                };
+                invocation.arg(limit).arg(blocks).arg(ledger_ttl_ms);
+                invocation.arg(SHARED_BUDGET_RESERVATION_TTL_MS);
+            }
+            invocation.arg(SHARED_BUDGET_RESERVATION_TTL_MS);
+            let mut connection = self.connection.clone();
+            let result: Result<i64, _> = invocation.invoke_async(&mut connection).await;
+            self.mark(
+                result
+                    .map(|value| value == 1)
+                    .map_err(|_| StateBackendError::Unavailable),
+            )
+        })
+    }
+
+    fn release_budget<'a>(&'a self, reservation: SharedBudgetReservation) -> StateFuture<'a, ()> {
+        Box::pin(async move {
+            let keys = shared_budget_keys(&self.keys, &reservation.date, &reservation.scopes)?;
+            let invocation = Script::new(RELEASE_BUDGET_SCRIPT);
+            for key in keys {
+                invocation.key(key);
+            }
+            let mut connection = self.connection.clone();
+            let result: Result<i64, _> = invocation
+                .arg(&reservation.request_id)
+                .invoke_async(&mut connection)
+                .await;
+            self.mark(
+                result
+                    .map(|_| ())
+                    .map_err(|_| StateBackendError::Unavailable),
+            )
+        })
+    }
+
+    fn settle_budget<'a>(&'a self, reservation: SharedBudgetReservation) -> StateFuture<'a, ()> {
+        self.release_budget(reservation)
+    }
+
+    fn acquire_admission<'a>(
+        &'a self,
+        limit: u64,
+        lease_id: &'a str,
+        ttl_ms: u64,
+    ) -> StateFuture<'a, bool> {
+        Box::pin(async move {
+            if limit == 0 || lease_id.is_empty() || lease_id.len() > 128 || ttl_ms == 0 {
+                return Err(StateBackendError::Unavailable);
+            }
+            let mut connection = self.connection.clone();
+            let result: Result<i64, _> = Script::new(ACQUIRE_ADMISSION_SCRIPT)
+                .key(self.keys.admission())
+                .arg(limit)
+                .arg(ttl_ms)
+                .arg(lease_id)
+                .invoke_async(&mut connection)
+                .await;
+            self.mark(
+                result
+                    .map(|value| value == 1)
+                    .map_err(|_| StateBackendError::Unavailable),
+            )
+        })
+    }
+
+    fn release_admission<'a>(&'a self, lease_id: &'a str) -> StateFuture<'a, ()> {
+        Box::pin(async move {
+            let mut connection = self.connection.clone();
+            let result: Result<i64, _> = Script::new(RELEASE_ADMISSION_SCRIPT)
+                .key(self.keys.admission())
+                .arg(lease_id)
+                .invoke_async(&mut connection)
+                .await;
+            self.mark(
+                result
+                    .map(|_| ())
+                    .map_err(|_| StateBackendError::Unavailable),
+            )
+        })
+    }
+
+    fn begin_provider_health<'a>(
+        &'a self,
+        target: &'a str,
+        threshold: u64,
+        cooldown_ms: u64,
+        probe_id: &'a str,
+    ) -> StateFuture<'a, bool> {
+        Box::pin(async move {
+            if threshold == 0 || cooldown_ms == 0 || target.is_empty() || probe_id.is_empty() {
+                return Err(StateBackendError::Unavailable);
+            }
+            let mut connection = self.connection.clone();
+            let result: Result<i64, _> = Script::new(BEGIN_HEALTH_SCRIPT)
+                .key(self.keys.health(target))
+                .arg(threshold)
+                .arg(cooldown_ms)
+                .arg(probe_id)
+                .invoke_async(&mut connection)
+                .await;
+            self.mark(
+                result
+                    .map(|value| value == 1)
+                    .map_err(|_| StateBackendError::Unavailable),
+            )
+        })
+    }
+
+    fn complete_provider_health<'a>(
+        &'a self,
+        target: &'a str,
+        threshold: u64,
+        cooldown_ms: u64,
+        probe_id: &'a str,
+        succeeded: bool,
+    ) -> StateFuture<'a, ()> {
+        Box::pin(async move {
+            if threshold == 0 || cooldown_ms == 0 || target.is_empty() || probe_id.is_empty() {
+                return Err(StateBackendError::Unavailable);
+            }
+            let mut connection = self.connection.clone();
+            let result: Result<i64, _> = Script::new(COMPLETE_HEALTH_SCRIPT)
+                .key(self.keys.health(target))
+                .arg(threshold)
+                .arg(cooldown_ms)
+                .arg(probe_id)
+                .arg(if succeeded { 1 } else { 0 })
+                .invoke_async(&mut connection)
+                .await;
+            self.mark(match result {
+                Ok(1) => Ok(()),
+                Ok(_) | Err(_) => Err(StateBackendError::Unavailable),
+            })
+        })
+    }
+
+    fn release_provider_health<'a>(
+        &'a self,
+        target: &'a str,
+        probe_id: &'a str,
+    ) -> StateFuture<'a, ()> {
+        Box::pin(async move {
+            let mut connection = self.connection.clone();
+            let result: Result<i64, _> = Script::new(RELEASE_HEALTH_SCRIPT)
+                .key(self.keys.health(target))
+                .arg(probe_id)
+                .invoke_async(&mut connection)
+                .await;
+            self.mark(
+                result
+                    .map(|_| ())
+                    .map_err(|_| StateBackendError::Unavailable),
+            )
+        })
+    }
+
     fn snapshot<'a>(
         &'a self,
         key: &'a str,
@@ -783,6 +1459,43 @@ fn redis_result(value: (i64, i64, i64)) -> Result<RateResult, StateBackendError>
         limited_by,
         retry_after_seconds,
     })
+}
+
+fn validate_ledger_date(value: &str) -> Result<String, StateBackendError> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+    {
+        return Err(StateBackendError::Unavailable);
+    }
+    Ok(value.to_owned())
+}
+
+fn scaled_cost(value: f64) -> Result<i64, StateBackendError> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(StateBackendError::Unavailable);
+    }
+    let scaled = (value * SHARED_COST_SCALE).round();
+    if !scaled.is_finite() || scaled > i64::MAX as f64 {
+        return Err(StateBackendError::Unavailable);
+    }
+    Ok(scaled as i64)
+}
+
+fn scaled_signed_cost(value: f64) -> Result<i64, StateBackendError> {
+    if !value.is_finite() {
+        return Err(StateBackendError::Unavailable);
+    }
+    let scaled = (value * SHARED_COST_SCALE).round();
+    if !scaled.is_finite() || scaled < i64::MIN as f64 || scaled > i64::MAX as f64 {
+        return Err(StateBackendError::Unavailable);
+    }
+    Ok(scaled as i64)
 }
 
 fn redis_reservation_result(
@@ -947,6 +1660,76 @@ mod tests {
             "wayfinder:v1:Pz8_:limits:workspace:Pj4-"
         );
         assert_eq!(virtual_key_limit_key("?").as_ref(), "virtual-key:Pw");
+    }
+
+    #[test]
+    fn shared_ledger_inputs_are_strictly_validated() {
+        assert_eq!(
+            validate_ledger_date("2026-07-11").ok().as_deref(),
+            Some("2026-07-11")
+        );
+        assert!(validate_ledger_date("2026-7-11").is_err());
+        assert!(validate_ledger_date("2026-07-1x").is_err());
+        assert_eq!(
+            budget_period("2026-07-11", "day").ok().as_deref(),
+            Some("day:2026-07-11")
+        );
+        assert_eq!(
+            budget_period("2026-07-11", "month").ok().as_deref(),
+            Some("month:2026-07")
+        );
+        assert_eq!(
+            budget_period("2026-07-11", "all").ok().as_deref(),
+            Some("all")
+        );
+        assert!(budget_period("2026-07-11", "week").is_err());
+
+        assert_eq!(scaled_cost(1.234_567), Ok(1_234_567));
+        assert!(scaled_cost(-0.1).is_err());
+        assert!(scaled_cost(f64::NAN).is_err());
+        assert_eq!(scaled_signed_cost(-1.25), Ok(-1_250_000));
+        assert!(scaled_signed_cost(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn shared_budget_keys_reject_unbounded_dimensions() {
+        let namespace = RedisKeyNamespace::new("prod");
+        let valid = [SharedBudgetScope {
+            scope: "workspace:production".to_owned(),
+            window: "month".to_owned(),
+            limit: 10.0,
+            blocks: true,
+        }];
+        assert_eq!(
+            shared_budget_keys(&namespace, "2026-07-11", &valid).map(|keys| keys.len()),
+            Ok(3)
+        );
+        assert!(
+            shared_budget_keys(
+                &namespace,
+                "2026-07-11",
+                &[SharedBudgetScope {
+                    scope: String::new(),
+                    window: "month".to_owned(),
+                    limit: 10.0,
+                    blocks: true,
+                }]
+            )
+            .is_err()
+        );
+        assert!(
+            shared_budget_keys(
+                &namespace,
+                "2026-07-11",
+                &[SharedBudgetScope {
+                    scope: "global".to_owned(),
+                    window: "week".to_owned(),
+                    limit: 10.0,
+                    blocks: true,
+                }]
+            )
+            .is_err()
+        );
     }
 
     #[test]
