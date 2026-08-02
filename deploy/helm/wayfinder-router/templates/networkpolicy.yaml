@@ -12,36 +12,38 @@ spec:
   policyTypes:
     - Ingress
     - Egress
+  {{- if .Values.networkPolicy.ingress }}
   ingress:
-    {{- if .Values.networkPolicy.ingress }}
     {{- toYaml .Values.networkPolicy.ingress | nindent 4 }}
-    {{- else }}
-    # Any namespace may reach the authenticated data-plane service. Use the
-    # values override to restrict callers to a known namespace/selector.
-    - ports:
-        - protocol: TCP
-          port: {{ .Values.service.port }}
-    {{- end }}
+  {{- else }}
+  ingress: []
+  {{- end }}
   egress:
     {{- if .Values.networkPolicy.egress }}
     {{- toYaml .Values.networkPolicy.egress | nindent 4 }}
     {{- else }}
-    # DNS is required for provider and Redis hostnames.
-    - ports:
+    # DNS is restricted to the configured cluster DNS pods.
+    - to:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.dns.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.dns.podSelector | nindent 12 }}
+      ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
           port: 53
-    # Providers and OTLP exporters normally use HTTPS.
-    - ports:
-        - protocol: TCP
-          port: 80
-        - protocol: TCP
-          port: 443
     {{- if .Values.redis.enabled }}
-    - ports:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "wayfinder-router.name" . }}-redis
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
         - protocol: TCP
           port: {{ .Values.redis.port }}
     {{- end }}
+    # Hosted providers, OTLP, and external Redis remain denied until the
+    # operator supplies explicit peer/IPBlock and port rules in `egress`.
     {{- end }}
 {{- end }}

@@ -58,11 +58,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{/* Redis URL used by the generated configuration. */}}
 {{- define "wayfinder-router.redisURL" -}}
-{{- if .Values.redis.url }}
-{{- .Values.redis.url }}
-{{- else }}
 {{- printf "redis://%s:%v" (include "wayfinder-router.redisName" .) .Values.redis.port }}
-{{- end }}
 {{- end }}
 
 {{/* Container image, optionally pinned by digest. */}}

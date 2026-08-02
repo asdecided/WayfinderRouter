@@ -44,11 +44,20 @@ from an operator-supplied credentials Secret.
 
 TLS terminates at the Ingress/controller or an external load balancer. The Rust
 listener remains HTTP inside the cluster, matching the managed-surface and
-security documentation. The bundled Redis StatefulSet is a durable
+security documentation. Ingress fails to render without a TLS configuration
+unless an explicit development-only escape hatch is enabled. Gateway ingress is
+denied by the default NetworkPolicy until trusted peer selectors are supplied;
+default egress is limited to selected cluster DNS and the exact bundled Redis
+Pods. Provider, OTLP, and external Redis destinations require explicit peer or
+IPBlock rules. Production ingress also requires controller-specific annotations
+that redirect or disable plaintext HTTP. The bundled Redis StatefulSet is a durable
 single-replica default with AOF, `appendfsync everysec`, and a `ReadWriteOnce`
 claim. Production installations should still prefer a managed Redis endpoint
 with an operator-owned availability, backup, TLS, and recovery policy.
 Disabling persistence is an explicit disposable-development choice.
+Authenticated external Redis URLs belong in the operator-owned configuration
+Secret and should use certificate-validated `rediss://`; they are not Helm
+values or ConfigMap data.
 
 ## Consequences
 

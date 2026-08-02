@@ -73,6 +73,7 @@ jobs:
             --set credentials.existingSecret=router-credentials \
             --set redis.enabled=false \
             --set ingress.enabled=true \
+            --set ingress.allowInsecureDevelopment=true \
             --set ingress.className=nginx \
             --set image.tag=ci-test \
             > "$RUNNER_TEMP/wayfinder-external.yaml"
@@ -85,6 +86,38 @@ jobs:
           fi
           if grep -q 'kind: StatefulSet' "$RUNNER_TEMP/wayfinder-external.yaml"; then
             echo "::error::external Redis unexpectedly rendered the bundled StatefulSet"
+            exit 1
+          fi
+          if helm template wayfinder deploy/helm/wayfinder-router \
+            --set image.tag=ci-test --set ingress.enabled=true >/dev/null 2>&1; then
+            echo "::error::chart accepted an ingress without TLS"
+            exit 1
+          fi
+          if helm template wayfinder deploy/helm/wayfinder-router \
+            --set image.tag=ci-test --set ingress.enabled=true \
+            --set-json 'ingress.tls=[{}]' \
+            --set ingress.httpsOnlyAnnotations.example=true >/dev/null 2>&1; then
+            echo "::error::chart accepted an empty TLS entry"
+            exit 1
+          fi
+          if helm template wayfinder deploy/helm/wayfinder-router \
+            --set image.tag=ci-test --set ingress.enabled=true \
+            --set ingress.tls[0].secretName=router-tls \
+            --set ingress.tls[0].hosts[0]=other.example.com \
+            --set ingress.httpsOnlyAnnotations.example=true >/dev/null 2>&1; then
+            echo "::error::chart accepted TLS hosts that do not cover ingress rules"
+            exit 1
+          fi
+          helm template wayfinder deploy/helm/wayfinder-router \
+            --set image.tag=ci-test --set ingress.enabled=true \
+            --set ingress.tls[0].secretName=router-tls \
+            --set ingress.tls[0].hosts[0]=wayfinder.example.com \
+            --set ingress.httpsOnlyAnnotations.example=true \
+            > "$RUNNER_TEMP/wayfinder-tls.yaml"
+          grep -q 'secretName: router-tls' "$RUNNER_TEMP/wayfinder-tls.yaml"
+          grep -q 'ingress: \[\]' "$RUNNER_TEMP/wayfinder-tls.yaml"
+          if grep -q 'port: 80$' "$RUNNER_TEMP/wayfinder-tls.yaml"; then
+            echo "::error::default network policy grants plaintext HTTP egress"
             exit 1
           fi
       - name: Render disposable Redis form

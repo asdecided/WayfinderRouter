@@ -44,6 +44,12 @@ boundaries. If Redis later becomes unavailable, requests continue through a
 bounded process-local fallback and `wayfinder_state_degraded 1` makes the
 consistency loss visible; treat that state as an operational incident.
 
+Redis keys use a versioned base64url namespace and separately encode every
+workspace, virtual-key, and audit-stream identifier. If upgrading from an
+experimental build that wrote the earlier raw key format, coordinate one fleet
+cutover: old rate-window keys expire, while legacy audit lists remain separate
+until the operator retention policy removes them.
+
 Then start the data plane on the address supplied by the deployment platform:
 
 ```sh
@@ -166,6 +172,9 @@ model ingress.
 
 - Terminate TLS at a trusted ingress or service mesh; the Rust process does not
   terminate public TLS.
+- The Helm chart rejects an Ingress without `ingress.tls` unless the explicit
+  local-development escape hatch is set. Its default NetworkPolicy denies all
+  ingress; add only the ingress-controller or caller selectors you trust.
 - Keep the configuration and provider credentials outside the container image.
 - Treat virtual keys as application credentials and rotate by minting a new key,
   updating the caller, then removing the old hashed entry.
@@ -189,11 +198,13 @@ credential Secrets, and can provision a shared Redis service for a small
 evaluation cluster. It does not create virtual keys or model destinations, so
 the data-plane fail-closed contract still applies after `helm install`.
 
-For production, point `redis.url` at a managed Redis service, keep
-`config.existingSecret` and `credentials.existingSecret` outside source control,
-and terminate TLS at the Ingress/controller or another trusted boundary. The
-bundled Redis StatefulSet is ephemeral unless persistence is explicitly
-enabled. See the chart [README](../deploy/helm/wayfinder-router/README.md) and
+For production, put a certificate-validated `rediss://` endpoint in the
+operator-owned TOML Secret, keep `config.existingSecret` and
+`credentials.existingSecret` outside source control, and terminate TLS at the
+Ingress/controller or another trusted boundary. Never pass a credential-bearing
+Redis URL through Helm values. The bundled Redis StatefulSet uses a persistent
+claim and AOF by default; disabling persistence is an explicit disposable mode.
+See the chart [README](../deploy/helm/wayfinder-router/README.md) and
 [WF-ADR-0059](../decisions/WF-ADR-0059-helm-deployment.md).
 
 See [WF-ADR-0050](../decisions/WF-ADR-0050-managed-gateway-surfaces.md) for the

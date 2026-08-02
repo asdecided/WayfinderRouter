@@ -36,8 +36,14 @@ recovery policy and disable the bundled StatefulSet:
 helm upgrade --install wayfinder ./deploy/helm/wayfinder-router \
   --set image.tag=<published-version> \
   --set redis.enabled=false \
-  --set redis.url=redis://redis.production.example:6379
+  --set config.existingSecret=wayfinder-router-config
 ```
+
+Put the complete TOML, including the credential-bearing `rediss://` URL, in the
+configuration Secret. Do not pass an authenticated Redis URL through Helm
+values or commit it to a ConfigMap. The Rust image includes certificate-
+validated Redis TLS support. External Redis also needs an explicit
+`networkPolicy.egress` rule appropriate to its cluster endpoint.
 
 For disposable evaluation only, set `redis.persistence.enabled=false`; that
 renders an `emptyDir` and all shared policy state is lost with the Pod. Redis is
@@ -59,12 +65,16 @@ promotion, prefer an immutable digest, for example
 
 ## TLS and network policy
 
-The chart does not terminate TLS in the Rust gateway. Configure TLS on the
-Ingress/controller or an external load balancer and keep the gateway Service
-internal where possible. Ingress is disabled by default. The default
-NetworkPolicy allows traffic to the gateway service from any namespace and
-allows DNS, HTTP(S), and bundled Redis egress; set `networkPolicy.ingress` and
-`networkPolicy.egress` to the selectors and ports appropriate for the cluster.
+The chart does not terminate TLS in the Rust gateway. Ingress is disabled by
+default and refuses to render without `ingress.tls`; the
+`ingress.allowInsecureDevelopment` escape hatch is only for an isolated local
+cluster. Production ingress must also provide controller-specific
+`ingress.httpsOnlyAnnotations` that redirect or disable plaintext HTTP. The
+default NetworkPolicy denies all gateway ingress, restricts DNS to the
+configured cluster-DNS selectors, and permits bundled Redis only to its exact
+Pod selector. Hosted providers, OTLP, and external Redis remain denied until the
+operator supplies explicit peer/IPBlock and port rules. Supply only the ingress
+controller/caller selectors and egress destinations the deployment needs.
 
 ## OpenTelemetry
 
@@ -82,6 +92,7 @@ helm template wayfinder deploy/helm/wayfinder-router --namespace wayfinder \
 helm template wayfinder deploy/helm/wayfinder-router \
   --set image.tag=local-test \
   --set ingress.enabled=true --set redis.enabled=false \
+  --set ingress.allowInsecureDevelopment=true \
   --set config.existingSecret=router-config
 ```
 

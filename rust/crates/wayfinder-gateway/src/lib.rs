@@ -45,6 +45,7 @@ use futures_util::{StreamExt, stream};
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -94,6 +95,19 @@ use crate::rate_limit::{RateResult, RateSnapshot};
 use crate::recent::{RecentCost, RecentEntry, RecentRoutes};
 use crate::reliability::{ReliabilityAttempt, ReliabilityError, ReliabilityPolicy, sleep_retry};
 use crate::reload::LastGood;
+
+fn shared_state_identity(config: &wayfinder_config::gateway::StateConfig) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    for component in [
+        config.backend.as_str(),
+        config.url.as_deref().unwrap_or_default(),
+        config.namespace.as_str(),
+    ] {
+        digest.update(component.as_bytes());
+        digest.update([0]);
+    }
+    digest.finalize().into()
+}
 
 /// Default maximum request body accepted by body-buffering extractors (1 MiB).
 pub const DEFAULT_REQUEST_BODY_LIMIT: usize = 1024 * 1024;
@@ -438,6 +452,7 @@ pub struct AppState {
     delivery: Option<Arc<dyn BufferedDelivery>>,
     streaming_delivery: Option<Arc<dyn StreamingDelivery>>,
     access_policy: Option<Arc<AccessPolicy>>,
+    shared_state_identity: Option<[u8; 32]>,
     budget_policy: Arc<BudgetPolicy>,
     reliability_policy: Arc<ReliabilityPolicy>,
     response_cache: Arc<ResponseCache>,
@@ -498,6 +513,7 @@ impl AppState {
             delivery: None,
             streaming_delivery: None,
             access_policy: None,
+            shared_state_identity: None,
             budget_policy: Arc::new(BudgetPolicy::default()),
             reliability_policy: Arc::new(ReliabilityPolicy::default()),
             response_cache: Arc::new(ResponseCache::default()),
@@ -651,9 +667,10 @@ impl AppState {
 
     /// Build access policy with the configured memory or Redis state backend.
     pub async fn with_gateway_shared_access(
-        self,
+        mut self,
         config: &wayfinder_config::gateway::GatewayConfig,
     ) -> Result<Self, AccessPolicyError> {
+        self.shared_state_identity = Some(shared_state_identity(&config.state));
         let backend = state::from_config(&config.state)
             .await
             .map_err(AccessPolicyError::from)?;
@@ -665,12 +682,24 @@ impl AppState {
         )?;
         let mut state = self.with_access_policy(policy);
         if config.state.backend == "redis" {
-            state = state.with_audit_log(audit::AuditLog::from_shared_backend(
-                backend,
-                config.state.namespace.clone(),
-            ));
+            let audit_log = state
+                .audit_log()
+                .clone()
+                .with_shared_backend(backend, config.state.namespace.clone())
+                .map_err(|_| {
+                    AccessPolicyError::StateBackend(state::StateBackendError::Unavailable)
+                })?;
+            state = state.with_audit_log(audit_log);
         }
         Ok(state)
+    }
+
+    /// Whether a replacement snapshot uses the same process-lifetime shared
+    /// state destination. Endpoint, credential, namespace, and backend changes
+    /// require restart so the access and audit authorities cannot diverge.
+    #[must_use]
+    pub fn shared_state_matches(&self, replacement: &Self) -> bool {
+        self.shared_state_identity == replacement.shared_state_identity
     }
 
     /// Attach the separately authenticated operator surface when configured.
@@ -1503,12 +1532,18 @@ async fn savings_report(
     match state.savings_ledger().period(period, today) {
         Ok(report) => {
             let actor = actor.as_ref().map_or("local", |actor| actor.0.0.as_str());
-            let _ = state.audit_log().record(
-                actor,
-                "savings.export",
-                None,
-                Some(json!({"period_days": period})),
-            );
+            if let Err(error) = state
+                .audit_log()
+                .record(
+                    actor,
+                    "savings.export",
+                    None,
+                    Some(json!({"period_days": period})),
+                )
+                .await
+            {
+                return audit_unavailable_response(error);
+            }
             Json(SavingsResponse {
                 report,
                 price_table_version: state.price_table_version().to_owned(),
@@ -1583,17 +1618,33 @@ async fn router_config(
         .map(|body| body.keys().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
     let actor = actor.as_ref().map_or("local", |actor| actor.0.0.as_str());
-    let _ = state.audit_log().record(
-        actor,
-        "config.export",
-        None,
-        Some(json!({"fields": fields})),
-    );
+    if let Err(error) = state
+        .audit_log()
+        .record(
+            actor,
+            "config.export",
+            None,
+            Some(json!({"fields": fields})),
+        )
+        .await
+    {
+        return audit_unavailable_response(error);
+    }
     (
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
         dump_routing_toml(&tuned),
     )
         .into_response()
+}
+
+fn audit_unavailable_response(error: audit::AuditError) -> Response {
+    tracing::error!(error = %error, "operator audit event was not persisted");
+    error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "wayfinder_router_audit_unavailable",
+        "operator audit persistence is unavailable".to_owned(),
+        HeaderMap::new(),
+    )
 }
 
 fn recent_limit(uri: &Uri) -> Result<i64, String> {
@@ -5569,6 +5620,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hot_reload_snapshots_preserve_one_ordered_audit_pipeline() -> TestResult {
+        let previous_path = std::env::temp_dir().join(format!(
+            "wayfinder-reload-audit-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let replacement_path = std::env::temp_dir().join(format!(
+            "wayfinder-replacement-audit-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let previous = AppState::new(RoutingConfig::default(), Vec::new(), false, "before")
+            .with_audit_log(crate::audit::AuditLog::from_path(&previous_path)?);
+        let current = AppState::new(RoutingConfig::default(), Vec::new(), false, "after")
+            .with_audit_log(crate::audit::AuditLog::from_path(&replacement_path)?)
+            .with_runtime_state_from(&previous);
+
+        previous
+            .audit_log()
+            .record("system", "before.reload", None, None)
+            .await?;
+        current
+            .audit_log()
+            .record("system", "after.reload", None, None)
+            .await?;
+        current.audit_log().shutdown().await?;
+
+        let events = std::fs::read_to_string(&previous_path)?;
+        assert!(matches!(
+            (events.find("before.reload"), events.find("after.reload")),
+            (Some(before), Some(after)) if before < after
+        ));
+        assert!(std::fs::read_to_string(&replacement_path)?.is_empty());
+        let _ = std::fs::remove_file(previous_path);
+        let _ = std::fs::remove_file(replacement_path);
+        Ok(())
+    }
+
+    #[test]
+    fn shared_state_destination_changes_are_restart_only() {
+        let mut previous = AppState::new(RoutingConfig::default(), Vec::new(), false, "before");
+        let mut replacement = AppState::new(RoutingConfig::default(), Vec::new(), false, "after");
+        let first = wayfinder_config::gateway::StateConfig::default();
+        let mut second = first.clone();
+        previous.shared_state_identity = Some(super::shared_state_identity(&first));
+        replacement.shared_state_identity = Some(super::shared_state_identity(&first));
+        assert!(previous.shared_state_matches(&replacement));
+
+        second.namespace = "replacement".to_owned();
+        replacement.shared_state_identity = Some(super::shared_state_identity(&second));
+        assert!(!previous.shared_state_matches(&replacement));
+    }
+
+    #[tokio::test]
     async fn streaming_delivery_holds_capacity_until_response_body_is_dropped() -> TestResult {
         let dropped = Arc::new(AtomicBool::new(false));
         let outcomes = Arc::new(Mutex::new(BTreeMap::from([(
@@ -5747,6 +5850,25 @@ mod tests {
         }
         let today = json_body(get(&state, "/v1/savings?period=today").await?).await?;
         assert_eq!(today["period_days"], 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn operator_endpoint_surfaces_unacknowledged_audit_write() -> TestResult {
+        let audit_log = crate::audit::AuditLog::from_shared_backend(
+            Arc::new(crate::state::MemoryStateBackend::default()),
+            "test",
+        )?;
+        let state = AppState::new(RoutingConfig::binary(0.5), Vec::new(), false, "test")
+            .with_audit_log(audit_log);
+
+        let response = get(&state, "/v1/savings").await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json_body(response).await?["error"]["type"],
+            "wayfinder_router_audit_unavailable"
+        );
+        state.audit_log().shutdown().await?;
         Ok(())
     }
 

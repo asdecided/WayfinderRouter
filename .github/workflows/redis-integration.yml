@@ -1,0 +1,53 @@
+name: Redis integration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/redis-integration.yml"
+      - "rust/Cargo.lock"
+      - "rust/Cargo.toml"
+      - "rust/crates/wayfinder-config/**"
+      - "rust/crates/wayfinder-gateway/**"
+  pull_request:
+    paths:
+      - ".github/workflows/redis-integration.yml"
+      - "rust/Cargo.lock"
+      - "rust/Cargo.toml"
+      - "rust/crates/wayfinder-config/**"
+      - "rust/crates/wayfinder-gateway/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: redis-integration-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live-redis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      redis:
+        image: redis:7.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    env:
+      CARGO_INCREMENTAL: "0"
+      WAYFINDER_REDIS_TEST_URL: redis://127.0.0.1:6379/
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
+      - name: Install the MSRV Rust toolchain
+        run: rustup toolchain install 1.85.0 --profile minimal
+      - name: Verify replicated Redis state contracts
+        run: >-
+          cargo +1.85.0 test --manifest-path rust/Cargo.toml --locked
+          -p wayfinder-gateway --test redis_live -- --test-threads=1

@@ -417,10 +417,11 @@ pub async fn run_serve_process(
     };
     let reload_path = selected_config_path(&options);
     let initial_version = config_source_version(&reload_path);
+    let audit_log = state.audit_log().clone();
     let holder = Arc::new(LastGood::new(state, initial_version));
     let reload_holder = Arc::clone(&holder);
     let reload_options = options.clone();
-    tokio::spawn(async move {
+    let reload_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -438,7 +439,13 @@ pub async fn run_serve_process(
                         Ok(())
                     };
                     match (validated, reload_holder.current()) {
-                        (Ok(()), Ok(current)) => Ok(next.with_runtime_state_from(&current)),
+                        (Ok(()), Ok(current)) if current.shared_state_matches(&next) => {
+                            Ok(next.with_runtime_state_from(&current))
+                        }
+                        (Ok(()), Ok(_)) => Err(
+                            "shared state backend, endpoint, or namespace changes require restart"
+                                .to_owned(),
+                        ),
                         (Err(error), _) => Err(error),
                         (_, Err(error)) => Err(error.to_string()),
                     }
@@ -453,25 +460,40 @@ pub async fn run_serve_process(
                     }
                 }
             };
-            let outcome = reload_holder.refresh(version, || loaded);
-            match outcome {
-                Ok(ReloadOutcome::Reloaded(current)) => {
-                    let _ = current.audit_log().record(
+            let loaded = match loaded {
+                Ok(next) => match next
+                    .audit_log()
+                    .record(
                         "system",
                         "config.reload",
                         None,
                         Some(json!({"version": version.to_string()})),
-                    );
-                }
+                    )
+                    .await
+                {
+                    Ok(()) => Ok(next),
+                    Err(error) => Err(format!("config reload audit failed: {error}")),
+                },
+                Err(error) => Err(error),
+            };
+            let outcome = reload_holder.refresh(version, || loaded);
+            match outcome {
+                Ok(ReloadOutcome::Reloaded(_)) => {}
                 Ok(ReloadOutcome::Retained { current, error }) => {
                     eprintln!("wayfinder-router: config reload rejected: {error}");
                     let _ = current.metrics().record_reload_failure();
-                    let _ = current.audit_log().record(
-                        "system",
-                        "config.reload_failed",
-                        None,
-                        Some(json!({"version": version.to_string()})),
-                    );
+                    if let Err(error) = current
+                        .audit_log()
+                        .record(
+                            "system",
+                            "config.reload_failed",
+                            None,
+                            Some(json!({"version": version.to_string()})),
+                        )
+                        .await
+                    {
+                        eprintln!("wayfinder-router: config reload failure audit failed: {error}");
+                    }
                 }
                 Ok(ReloadOutcome::Unchanged(_)) | Err(_) => {}
             }
@@ -484,10 +506,32 @@ pub async fn run_serve_process(
         ServeSurface::Local => build_reloadable_router(holder),
         ServeSurface::DataPlane => build_reloadable_data_plane_router(holder),
     };
-    match serve_with_shutdown(listener, application, shutdown, DEFAULT_DRAIN_TIMEOUT).await {
-        Ok(()) => EXIT_OK,
-        Err(error) => {
-            write_error(stderr, &format!("wayfinder-router: {error}"));
+    let server_result =
+        serve_with_shutdown(listener, application, shutdown, DEFAULT_DRAIN_TIMEOUT).await;
+    reload_task.abort();
+    let _ = reload_task.await;
+    let audit_result = tokio::time::timeout(DEFAULT_DRAIN_TIMEOUT, audit_log.shutdown()).await;
+    let audit_result = match audit_result {
+        Ok(result) => result.map_err(|error| error.to_string()),
+        Err(_) => Err(format!(
+            "audit worker did not drain within {DEFAULT_DRAIN_TIMEOUT:?}"
+        )),
+    };
+    match (server_result, audit_result) {
+        (Ok(()), Ok(())) => EXIT_OK,
+        (Err(server), Ok(())) => {
+            write_error(stderr, &format!("wayfinder-router: {server}"));
+            EXIT_CONFIG
+        }
+        (Ok(()), Err(audit)) => {
+            write_error(stderr, &format!("wayfinder-router: {audit}"));
+            EXIT_CONFIG
+        }
+        (Err(server), Err(audit)) => {
+            write_error(
+                stderr,
+                &format!("wayfinder-router: {server}; audit shutdown failed: {audit}"),
+            );
             EXIT_CONFIG
         }
     }
