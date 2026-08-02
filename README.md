@@ -90,12 +90,17 @@ are resolved only for delivery after the route is chosen.
 ```sh
 docker build -t wayfinder-router .
 docker run --rm -p 8088:8088 \
-  -v "$PWD/wayfinder-router.toml:/data/wayfinder-router.toml:ro" \
+  --read-only --tmpfs /tmp --user 10001:10001 \
+  -v "$PWD/config:/etc/wayfinder:ro" \
+  -v wayfinder-state:/var/lib/wayfinder \
   wayfinder-router
 ```
 
 The image is built from the Rust workspace and contains only the native gateway
-plus its runtime certificates.
+plus its runtime certificates. It starts the authenticated managed data plane,
+so `config/wayfinder-router.toml` must define at least one virtual key and model.
+Configuration remains read-only; audit and savings state are written beneath
+`/var/lib/wayfinder` by the unprivileged UID/GID `10001` process.
 
 ## Verification
 

@@ -22,6 +22,11 @@ spec:
     spec:
       automountServiceAccountToken: false
       securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -33,7 +38,13 @@ spec:
             - --save
             - ""
             - --appendonly
+            {{- if .Values.redis.persistence.enabled }}
+            - "yes"
+            - --appendfsync
+            - everysec
+            {{- else }}
             - "no"
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -42,6 +53,7 @@ spec:
             readOnlyRootFilesystem: true
             runAsNonRoot: true
             runAsUser: 999
+            runAsGroup: 999
           ports:
             - name: redis
               containerPort: {{ .Values.redis.port }}

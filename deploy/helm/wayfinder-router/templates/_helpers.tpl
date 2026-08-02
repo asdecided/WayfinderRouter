@@ -67,9 +67,19 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{/* Container image, optionally pinned by digest. */}}
 {{- define "wayfinder-router.image" -}}
-{{- if .Values.image.digest }}
+{{- if not .Values.image.repository }}
+{{- fail "image.repository must not be empty" }}
+{{- end }}
+{{- if and .Values.image.digest .Values.image.tag }}
+{{- fail "image.tag and image.digest are mutually exclusive" }}
+{{- else if .Values.image.digest }}
+{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" .Values.image.digest) }}
+{{- fail "image.digest must be sha256 followed by 64 lowercase hexadecimal characters" }}
+{{- end }}
 {{- printf "%s@%s" .Values.image.repository .Values.image.digest }}
+{{- else if .Values.image.tag }}
+{{- printf "%s:%s" .Values.image.repository .Values.image.tag }}
 {{- else }}
-{{- printf "%s:%s" .Values.image.repository (default .Chart.AppVersion .Values.image.tag) }}
+{{- fail "set an explicit image.tag or image.digest" }}
 {{- end }}
 {{- end }}

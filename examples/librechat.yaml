@@ -14,10 +14,10 @@ cache: true
 endpoints:
   custom:
     - name: "Wayfinder"
-      # The gateway never checks an inbound key (it injects its own upstream key
-      # from each model's api_key_env). LibreChat just requires the field to be
-      # set — any placeholder works.
-      apiKey: "wayfinder-noop"
+      # This is the plaintext Wayfinder virtual key. Mint it with
+      # `wayfinder-router keys new --id <id>`, place only the printed SHA-256 hash
+      # under `[gateway.keys.<id>]`, and export the plaintext value for LibreChat.
+      apiKey: "${WAYFINDER_VIRTUAL_KEY}"
       # The `wayfinder` service from docker-compose.override.yml. If you instead
       # run the gateway on your host, use http://host.docker.internal:8088/v1 (and
       # on Linux add extra_hosts: ["host.docker.internal:host-gateway"] to the api

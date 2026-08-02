@@ -11,7 +11,7 @@ mod service_command;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -59,6 +59,66 @@ pub const EXIT_USAGE: i32 = 2;
 
 fn product_version() -> &'static str {
     option_env!("WAYFINDER_PRODUCT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
+fn validate_persistence_target(path: &Path, label: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "cannot prepare {label} directory {}: {error}",
+            parent.display()
+        )
+    })?;
+
+    let probe = parent.join(format!(
+        ".wayfinder-write-probe-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    let mut probe_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .map_err(|error| {
+            format!(
+                "cannot write {label} directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    probe_file
+        .write_all(b"wayfinder persistence probe\n")
+        .map_err(|error| format!("cannot write {label} probe {}: {error}", probe.display()))?;
+    probe_file
+        .sync_all()
+        .map_err(|error| format!("cannot sync {label} probe {}: {error}", probe.display()))?;
+    drop(probe_file);
+    fs::remove_file(&probe).map_err(|error| {
+        format!(
+            "cannot clean {label} write probe {}: {error}",
+            probe.display()
+        )
+    })?;
+
+    if path.exists() {
+        OpenOptions::new()
+            .append(true)
+            .open(path)
+            .map_err(|error| format!("cannot write {label} file {}: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn load_savings_ledger(path: &Path) -> Result<(SavingsLedger, LedgerLoad), String> {
+    validate_persistence_target(path, "savings")?;
+    let (ledger, loaded) = SavingsLedger::load_resilient(path, 400, true)
+        .map_err(|error| format!("cannot load savings ledger: {error}"))?;
+    ledger
+        .save(path)
+        .map_err(|error| format!("cannot persist savings ledger: {error}"))?;
+    Ok((ledger, loaded))
 }
 
 /// Whether the process entry point must select the asynchronous serve path.
@@ -369,8 +429,8 @@ pub async fn run_serve_process(
             if reload_holder.version().ok() == Some(version) {
                 continue;
             }
-            let mut errors = std::io::sink();
-            let loaded = match build_serve_state(&reload_options, &mut errors).await {
+            let mut diagnostics = Vec::new();
+            let loaded = match build_serve_state(&reload_options, &mut diagnostics).await {
                 Ok(next) => {
                     let validated = if reload_options.surface == ServeSurface::DataPlane {
                         validate_data_plane_state(&next).map_err(|error| error.to_string())
@@ -383,7 +443,15 @@ pub async fn run_serve_process(
                         (_, Err(error)) => Err(error.to_string()),
                     }
                 }
-                Err(error) => Err(error),
+                Err(error) => {
+                    let diagnostics = String::from_utf8_lossy(&diagnostics);
+                    let diagnostics = diagnostics.trim();
+                    if diagnostics.is_empty() {
+                        Err(error)
+                    } else {
+                        Err(format!("{error}; {diagnostics}"))
+                    }
+                }
             };
             let outcome = reload_holder.refresh(version, || loaded);
             match outcome {
@@ -395,7 +463,8 @@ pub async fn run_serve_process(
                         Some(json!({"version": version.to_string()})),
                     );
                 }
-                Ok(ReloadOutcome::Retained { current, .. }) => {
+                Ok(ReloadOutcome::Retained { current, error }) => {
+                    eprintln!("wayfinder-router: config reload rejected: {error}");
                     let _ = current.metrics().record_reload_failure();
                     let _ = current.audit_log().record(
                         "system",
@@ -655,6 +724,7 @@ async fn build_serve_state<W: Write>(
                 .unwrap_or_else(|| Path::new("."))
                 .join("wayfinder-audit.jsonl")
         });
+    validate_persistence_target(&audit_path, "audit")?;
     let audit_log = AuditLog::from_path(audit_path).map_err(|error| error.to_string())?;
     let mut state = AppState::new(routing, models, gateway.offline, product_version())
         .with_dry_run(options.dry_run)
@@ -670,8 +740,7 @@ async fn build_serve_state<W: Write>(
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("wayfinder-savings.json"));
-    let (ledger, loaded) = SavingsLedger::load_resilient(&savings_path, 400, true)
-        .map_err(|error| format!("cannot load savings ledger: {error}"))?;
+    let (ledger, loaded) = load_savings_ledger(&savings_path)?;
     if let LedgerLoad::Recovered { quarantine } = loaded {
         let _ = writeln!(
             stderr,
@@ -1528,6 +1597,55 @@ mod tests {
         ] {
             assert!(parse_serve_options(&arguments).is_err());
         }
+    }
+
+    #[test]
+    fn persistence_target_probe_prepares_parent_without_creating_state_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root =
+            std::env::temp_dir().join(format!("wayfinder-persistence-probe-{}", Uuid::new_v4()));
+        let target = root.join("nested").join("state.json");
+        validate_persistence_target(&target, "test state")?;
+        assert!(target.parent().is_some_and(Path::exists));
+        assert!(!target.exists());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn persistence_target_probe_rejects_non_directory_parent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "wayfinder-persistence-probe-file-{}",
+            Uuid::new_v4()
+        ));
+        fs::write(&root, b"not a directory")?;
+        let error = match validate_persistence_target(&root.join("state.json"), "test state") {
+            Ok(()) => return Err("a file was accepted as the persistence directory".into()),
+            Err(error) => error,
+        };
+        assert!(error.contains("cannot prepare test state directory"));
+        fs::remove_file(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn savings_startup_rejects_blocked_atomic_temporary_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "wayfinder-savings-probe-blocked-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root)?;
+        let target = root.join("savings.json");
+        fs::create_dir(target.with_extension("json.tmp"))?;
+        let error = match load_savings_ledger(&target) {
+            Ok(_) => return Err("a blocked atomic-write path was accepted".into()),
+            Err(error) => error,
+        };
+        assert!(error.contains("cannot persist savings ledger"));
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
