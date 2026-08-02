@@ -647,12 +647,12 @@ impl StateBackend for MemoryStateBackend {
                     state.snapshot.cost_samples = state.snapshot.cost_samples.saturating_add(1);
                 }
             }
-            if let Some(loss) = observation.quality_loss
-                && loss.is_finite()
-                && (0.0..=1.0).contains(&loss)
-            {
-                state.snapshot.quality_loss += loss;
-                state.snapshot.quality_samples = state.snapshot.quality_samples.saturating_add(1);
+            if let Some(loss) = observation.quality_loss {
+                if loss.is_finite() && (0.0..=1.0).contains(&loss) {
+                    state.snapshot.quality_loss += loss;
+                    state.snapshot.quality_samples =
+                        state.snapshot.quality_samples.saturating_add(1);
+                }
             }
             Ok(true)
         })
