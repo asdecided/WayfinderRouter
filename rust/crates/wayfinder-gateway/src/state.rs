@@ -1137,7 +1137,8 @@ impl StateBackend for RedisStateBackend {
                 keys.push(self.keys.ledger(&format!("month:{}", &date[..7]), &scope));
                 keys.push(self.keys.ledger("all", &scope));
             }
-            let invocation = Script::new(RECORD_COST_SCRIPT);
+            let script = Script::new(RECORD_COST_SCRIPT);
+            let mut invocation = script.prepare_invoke();
             for key in keys {
                 invocation.key(key);
             }
@@ -1204,7 +1205,8 @@ impl StateBackend for RedisStateBackend {
             }
             let amount = scaled_cost(reservation.amount)?;
             let keys = shared_budget_keys(&self.keys, &reservation.date, &reservation.scopes)?;
-            let invocation = Script::new(RESERVE_BUDGET_SCRIPT);
+            let script = Script::new(RESERVE_BUDGET_SCRIPT);
+            let mut invocation = script.prepare_invoke();
             for key in keys {
                 invocation.key(key);
             }
@@ -1237,7 +1239,8 @@ impl StateBackend for RedisStateBackend {
     fn release_budget<'a>(&'a self, reservation: SharedBudgetReservation) -> StateFuture<'a, ()> {
         Box::pin(async move {
             let keys = shared_budget_keys(&self.keys, &reservation.date, &reservation.scopes)?;
-            let invocation = Script::new(RELEASE_BUDGET_SCRIPT);
+            let script = Script::new(RELEASE_BUDGET_SCRIPT);
+            let mut invocation = script.prepare_invoke();
             for key in keys {
                 invocation.key(key);
             }
