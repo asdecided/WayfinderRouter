@@ -24,6 +24,10 @@ type TestResult = Result<(), Box<dyn Error>>;
 
 const REDIS_URL_ENV: &str = "WAYFINDER_REDIS_TEST_URL";
 
+fn redis_step<T>(result: Result<T, StateBackendError>, step: &str) -> Result<T, io::Error> {
+    result.map_err(|error| io::Error::other(format!("{step}: {error:?}")))
+}
+
 #[tokio::test]
 async fn replicated_gateway_state_survives_real_redis_failure_modes() -> TestResult {
     let Some(admin_url) = live_redis_url()? else {
@@ -181,28 +185,44 @@ async fn replicated_accounting_admission_and_health_are_atomic() -> TestResult {
         &cost,
         vec!["global".to_owned(), "workspace:production".to_owned()],
     );
-    assert!(first.record_cost(observation.clone()).await?);
-    assert!(!second.record_cost(observation).await?);
+    assert!(redis_step(
+        first.record_cost(observation.clone()).await,
+        "record first"
+    )?);
+    assert!(!redis_step(
+        second.record_cost(observation).await,
+        "record duplicate"
+    )?);
     assert!(
-        !first
-            .record_cost(SharedCostObservation::from_turn(
-                "request-1",
-                "2026-07-12".to_owned(),
-                &cost,
-                vec!["global".to_owned(), "workspace:production".to_owned()],
-            ))
-            .await?,
+        !redis_step(
+            first
+                .record_cost(SharedCostObservation::from_turn(
+                    "request-1",
+                    "2026-07-12".to_owned(),
+                    &cost,
+                    vec!["global".to_owned(), "workspace:production".to_owned()],
+                ))
+                .await,
+            "record cross-date duplicate",
+        )?,
         "request idempotency must span UTC ledger boundaries"
     );
     assert_eq!(
-        second.spend("day", "global", "2026-07-11").await?.realized,
+        redis_step(
+            second.spend("day", "global", "2026-07-11").await,
+            "spend global",
+        )?
+        .realized,
         1.25
     );
     assert_eq!(
-        first
-            .spend("day", "workspace:production", "2026-07-11")
-            .await?
-            .realized,
+        redis_step(
+            first
+                .spend("day", "workspace:production", "2026-07-11")
+                .await,
+            "spend workspace",
+        )?
+        .realized,
         1.25
     );
 
@@ -217,45 +237,85 @@ async fn replicated_accounting_admission_and_health_are_atomic() -> TestResult {
             blocks: true,
         }],
     };
-    assert!(first.reserve_budget(reservation.clone()).await?);
-    assert!(!second.reserve_budget(reservation.clone()).await?);
-    first.release_budget(reservation.clone()).await?;
-    assert!(second.reserve_budget(reservation.clone()).await?);
-    second.settle_budget(reservation).await?;
-
-    assert!(first.acquire_admission(1, "lease-a", 1_000).await?);
-    assert!(!second.acquire_admission(1, "lease-b", 1_000).await?);
-    first.release_admission("lease-a").await?;
-    assert!(second.acquire_admission(1, "lease-b", 1_000).await?);
-    second.release_admission("lease-b").await?;
-
+    assert!(redis_step(
+        first.reserve_budget(reservation.clone()).await,
+        "reserve first"
+    )?);
     assert!(
+        redis_step(
+            second.reserve_budget(reservation.clone()).await,
+            "reserve duplicate"
+        )?,
+        "same budget request is idempotently accepted"
+    );
+    redis_step(
+        first.release_budget(reservation.clone()).await,
+        "release first",
+    )?;
+    assert!(redis_step(
+        second.reserve_budget(reservation.clone()).await,
+        "reserve after release"
+    )?);
+    redis_step(second.settle_budget(reservation).await, "settle")?;
+
+    assert!(redis_step(
+        first.acquire_admission(1, "lease-a", 1_000).await,
+        "admission first",
+    )?);
+    assert!(!redis_step(
+        second.acquire_admission(1, "lease-b", 1_000).await,
+        "admission rejected",
+    )?);
+    redis_step(
+        first.release_admission("lease-a").await,
+        "admission release first",
+    )?;
+    assert!(redis_step(
+        second.acquire_admission(1, "lease-b", 1_000).await,
+        "admission after release",
+    )?);
+    redis_step(
+        second.release_admission("lease-b").await,
+        "admission release second",
+    )?;
+
+    assert!(redis_step(
         first
             .begin_provider_health("cloud-eu", 1, 20, "probe-a")
-            .await?
-    );
-    assert!(
-        !second
-            .begin_provider_health("cloud-eu", 1, 20, "probe-b")
-            .await?
-    );
-    first
-        .complete_provider_health("cloud-eu", 1, 20, "probe-a", false)
-        .await?;
-    assert!(
-        !second
-            .begin_provider_health("cloud-eu", 1, 20, "probe-b")
-            .await?
-    );
-    sleep(Duration::from_millis(30)).await;
-    assert!(
+            .await,
+        "health first",
+    )?);
+    assert!(!redis_step(
         second
             .begin_provider_health("cloud-eu", 1, 20, "probe-b")
-            .await?
-    );
-    second
-        .complete_provider_health("cloud-eu", 1, 20, "probe-b", true)
-        .await?;
+            .await,
+        "health concurrent",
+    )?);
+    redis_step(
+        first
+            .complete_provider_health("cloud-eu", 1, 20, "probe-a", false)
+            .await,
+        "health failure",
+    )?;
+    assert!(!redis_step(
+        second
+            .begin_provider_health("cloud-eu", 1, 20, "probe-b")
+            .await,
+        "health open",
+    )?);
+    sleep(Duration::from_millis(30)).await;
+    assert!(redis_step(
+        second
+            .begin_provider_health("cloud-eu", 1, 20, "probe-b")
+            .await,
+        "health probe",
+    )?);
+    redis_step(
+        second
+            .complete_provider_health("cloud-eu", 1, 20, "probe-b", true)
+            .await,
+        "health recovery",
+    )?;
 
     let namespace_component = URL_SAFE_NO_PAD.encode(namespace.as_bytes());
     let keys: Vec<String> = redis::cmd("KEYS")
