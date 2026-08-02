@@ -64,6 +64,26 @@ pub const MAX_ROUTE_PRESETS: usize = 64;
 pub const MAX_ROUTE_PRESET_MODELS: usize = 32;
 /// Supported operator authentication modes.
 pub const OPERATOR_AUTH_MODES: [&str; 3] = ["vkeys", "oidc", "both"];
+/// Default shadow-routing sample rate. Shadow routing is opt-in.
+pub const DEFAULT_SHADOW_SAMPLE_RATE: f64 = 0.0;
+/// Default process-local shadow evaluation concurrency.
+pub const DEFAULT_SHADOW_MAX_IN_FLIGHT: u64 = 2;
+/// Default retained prompt-free shadow record bound.
+pub const DEFAULT_SHADOW_MAX_RECORDS: u64 = 2_048;
+/// Default provider-comparison sample rate.
+pub const DEFAULT_SHADOW_PROVIDER_SAMPLE_RATE: f64 = 0.0;
+/// Default provider-comparison request budget per window.
+pub const DEFAULT_SHADOW_PROVIDER_MAX_REQUESTS: u64 = 0;
+/// Default provider-comparison budget window in seconds.
+pub const DEFAULT_SHADOW_PROVIDER_WINDOW: f64 = 60.0;
+/// Supported shadow privacy-consent header value.
+pub const SHADOW_PROVIDER_CONSENT_HEADER: &str = "x-wayfinder-shadow-provider-consent";
+/// Maximum candidate routes retained in one shadow policy.
+pub const MAX_SHADOW_CANDIDATE_ROUTES: usize = 32;
+/// Maximum shadow sample rate accepted by configuration.
+pub const MAX_SHADOW_SAMPLE_RATE: f64 = 1.0;
+/// Maximum shadow provider budget window in seconds.
+pub const MAX_SHADOW_PROVIDER_WINDOW: f64 = 86_400.0;
 
 /// Authentication policy for local operator surfaces.
 ///
@@ -209,6 +229,53 @@ impl ProviderTier {
         match self {
             Self::Local => "local",
         }
+    }
+}
+
+/// Opt-in, bounded off-path routing evidence collection.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShadowConfig {
+    /// Whether sampled shadow evaluation is enabled.
+    pub enabled: bool,
+    /// Deterministic request sample rate for decision-only shadow work.
+    pub sample_rate: f64,
+    /// Existing named routes evaluated as counterfactual candidates.
+    pub candidate_routes: Vec<String>,
+    /// Maximum concurrent shadow evaluations in one process.
+    pub max_in_flight: u64,
+    /// Maximum prompt-free records retained in one process.
+    pub max_records: u64,
+    /// Whether explicit provider comparisons are allowed by configuration.
+    pub provider_comparisons: bool,
+    /// Deterministic sample rate for provider comparisons.
+    pub provider_sample_rate: f64,
+    /// Maximum provider comparisons in one budget window.
+    pub provider_max_requests: u64,
+    /// Provider-comparison budget window in seconds.
+    pub provider_window: f64,
+}
+
+impl Default for ShadowConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sample_rate: DEFAULT_SHADOW_SAMPLE_RATE,
+            candidate_routes: Vec::new(),
+            max_in_flight: DEFAULT_SHADOW_MAX_IN_FLIGHT,
+            max_records: DEFAULT_SHADOW_MAX_RECORDS,
+            provider_comparisons: false,
+            provider_sample_rate: DEFAULT_SHADOW_PROVIDER_SAMPLE_RATE,
+            provider_max_requests: DEFAULT_SHADOW_PROVIDER_MAX_REQUESTS,
+            provider_window: DEFAULT_SHADOW_PROVIDER_WINDOW,
+        }
+    }
+}
+
+impl ShadowConfig {
+    /// Whether this policy is the disabled compatibility default.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
     }
 }
 
@@ -440,6 +507,8 @@ pub struct GatewayConfig {
     pub state: StateConfig,
     /// Authentication boundary for operator surfaces.
     pub auth: GatewayAuthConfig,
+    /// Opt-in off-path shadow routing and provider comparison policy.
+    pub shadow: ShadowConfig,
     /// Workspace policy namespaces keyed by operator-selected identifier.
     pub workspaces: IndexMap<String, Workspace>,
     /// Named ordered routing presets keyed by operator-selected identifier.
@@ -467,6 +536,7 @@ impl Default for GatewayConfig {
             concurrency: ConcurrencyConfig::default(),
             state: StateConfig::default(),
             auth: GatewayAuthConfig::default(),
+            shadow: ShadowConfig::default(),
             workspaces: IndexMap::new(),
             routes: IndexMap::new(),
             keys: IndexMap::new(),
@@ -552,6 +622,7 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
     let keys = parse_keys(gateway.get("keys"), where_)?;
     let models = parse_models(gateway.get("models"), where_)?;
     let routes = parse_routes(gateway.get("routes"), where_)?;
+    let shadow = parse_shadow(gateway.get("shadow"), where_, &routes)?;
 
     validate_model_fallbacks(&models, where_)?;
     validate_workspace_models(&workspaces, &models, where_)?;
@@ -575,6 +646,7 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
         concurrency,
         state,
         auth,
+        shadow,
         workspaces,
         routes,
         keys,
@@ -734,6 +806,53 @@ fn render_gateway_toml(gateway: &GatewayConfig) -> String {
             lines.push(format!(
                 "admin_claim = {}",
                 quote_toml_string(&gateway.auth.admin_claim)
+            ));
+        }
+        blocks.push(lines.join("\n"));
+    }
+
+    if !gateway.shadow.is_default() {
+        let mut lines = vec!["[gateway.shadow]".to_owned()];
+        if gateway.shadow.enabled {
+            lines.push("enabled = true".to_owned());
+        }
+        if gateway.shadow.sample_rate != DEFAULT_SHADOW_SAMPLE_RATE {
+            lines.push(format!(
+                "sample_rate = {}",
+                format_number(gateway.shadow.sample_rate)
+            ));
+        }
+        if !gateway.shadow.candidate_routes.is_empty() {
+            lines.push(format!(
+                "candidate_routes = {}",
+                render_string_list(&gateway.shadow.candidate_routes)
+            ));
+        }
+        if gateway.shadow.max_in_flight != DEFAULT_SHADOW_MAX_IN_FLIGHT {
+            lines.push(format!("max_in_flight = {}", gateway.shadow.max_in_flight));
+        }
+        if gateway.shadow.max_records != DEFAULT_SHADOW_MAX_RECORDS {
+            lines.push(format!("max_records = {}", gateway.shadow.max_records));
+        }
+        if gateway.shadow.provider_comparisons {
+            lines.push("provider_comparisons = true".to_owned());
+        }
+        if gateway.shadow.provider_sample_rate != DEFAULT_SHADOW_PROVIDER_SAMPLE_RATE {
+            lines.push(format!(
+                "provider_sample_rate = {}",
+                format_number(gateway.shadow.provider_sample_rate)
+            ));
+        }
+        if gateway.shadow.provider_max_requests != DEFAULT_SHADOW_PROVIDER_MAX_REQUESTS {
+            lines.push(format!(
+                "provider_max_requests = {}",
+                gateway.shadow.provider_max_requests
+            ));
+        }
+        if gateway.shadow.provider_window != DEFAULT_SHADOW_PROVIDER_WINDOW {
+            lines.push(format!(
+                "provider_window = {}",
+                format_number(gateway.shadow.provider_window)
             ));
         }
         blocks.push(lines.join("\n"));
@@ -1355,6 +1474,139 @@ fn parse_routes(
         routes.insert(route_id.clone(), RoutePreset { models });
     }
     Ok(routes)
+}
+
+fn parse_shadow(
+    value: Option<&Value>,
+    where_: &str,
+    routes: &IndexMap<String, RoutePreset>,
+) -> Result<ShadowConfig, ConfigError> {
+    let Some(value) = value else {
+        return Ok(ShadowConfig::default());
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| invalid(where_, "'[gateway.shadow]' must be a table"))?;
+    let enabled = optional_bool(
+        table.get("enabled"),
+        false,
+        where_,
+        "gateway.shadow.enabled",
+    )?;
+    let sample_rate = optional_non_negative_number(
+        table.get("sample_rate"),
+        DEFAULT_SHADOW_SAMPLE_RATE,
+        where_,
+        "gateway.shadow.sample_rate",
+    )?;
+    if sample_rate > MAX_SHADOW_SAMPLE_RATE {
+        return Err(invalid(
+            where_,
+            "'gateway.shadow.sample_rate' must be at most 1",
+        ));
+    }
+    let candidate_routes = optional_non_empty_string_list(
+        table.get("candidate_routes"),
+        where_,
+        "gateway.shadow.candidate_routes",
+        "a list of route names",
+    )?;
+    if candidate_routes.len() > MAX_SHADOW_CANDIDATE_ROUTES {
+        return Err(invalid(
+            where_,
+            format!(
+                "'gateway.shadow.candidate_routes' may contain at most {MAX_SHADOW_CANDIDATE_ROUTES} routes"
+            ),
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for route in &candidate_routes {
+        if !seen.insert(route) {
+            return Err(invalid(
+                where_,
+                format!("'gateway.shadow.candidate_routes' contains duplicate route '{route}'"),
+            ));
+        }
+        if !routes.contains_key(route) {
+            return Err(invalid(
+                where_,
+                format!("'gateway.shadow.candidate_routes' references unknown route '{route}'"),
+            ));
+        }
+    }
+    let max_in_flight = optional_positive_integer(
+        table.get("max_in_flight"),
+        DEFAULT_SHADOW_MAX_IN_FLIGHT,
+        where_,
+        "gateway.shadow.max_in_flight",
+    )?;
+    let max_records = optional_positive_integer(
+        table.get("max_records"),
+        DEFAULT_SHADOW_MAX_RECORDS,
+        where_,
+        "gateway.shadow.max_records",
+    )?;
+    let provider_comparisons = optional_bool(
+        table.get("provider_comparisons"),
+        false,
+        where_,
+        "gateway.shadow.provider_comparisons",
+    )?;
+    let provider_sample_rate = optional_non_negative_number(
+        table.get("provider_sample_rate"),
+        DEFAULT_SHADOW_PROVIDER_SAMPLE_RATE,
+        where_,
+        "gateway.shadow.provider_sample_rate",
+    )?;
+    if provider_sample_rate > MAX_SHADOW_SAMPLE_RATE {
+        return Err(invalid(
+            where_,
+            "'gateway.shadow.provider_sample_rate' must be at most 1",
+        ));
+    }
+    let provider_max_requests = optional_non_negative_integer(
+        table.get("provider_max_requests"),
+        DEFAULT_SHADOW_PROVIDER_MAX_REQUESTS,
+        where_,
+        "gateway.shadow.provider_max_requests",
+    )?;
+    let provider_window = optional_positive_number(
+        table.get("provider_window"),
+        DEFAULT_SHADOW_PROVIDER_WINDOW,
+        where_,
+        "gateway.shadow.provider_window",
+    )?;
+    if provider_window > MAX_SHADOW_PROVIDER_WINDOW {
+        return Err(invalid(
+            where_,
+            format!(
+                "'gateway.shadow.provider_window' must be at most {MAX_SHADOW_PROVIDER_WINDOW}"
+            ),
+        ));
+    }
+    if enabled && candidate_routes.is_empty() {
+        return Err(invalid(
+            where_,
+            "'gateway.shadow.candidate_routes' must not be empty when shadow routing is enabled",
+        ));
+    }
+    if provider_comparisons && (provider_sample_rate <= 0.0 || provider_max_requests == 0) {
+        return Err(invalid(
+            where_,
+            "gateway.shadow.provider_comparisons requires a positive provider_sample_rate and provider_max_requests",
+        ));
+    }
+    Ok(ShadowConfig {
+        enabled,
+        sample_rate,
+        candidate_routes,
+        max_in_flight,
+        max_records,
+        provider_comparisons,
+        provider_sample_rate,
+        provider_max_requests,
+        provider_window,
+    })
 }
 
 fn valid_policy_id(value: &str) -> bool {
@@ -2348,6 +2600,59 @@ rpm = 5
         assert_eq!(model.deployments[0].cost_per_1k, Some(0.01));
         assert_eq!(dump_gateway_toml(&config)?, text);
         Ok(())
+    }
+
+    #[test]
+    fn shadow_policy_is_bounded_and_round_trips() -> Result<(), ConfigError> {
+        let text = r#"
+[gateway.models.local]
+base_url = "http://localhost:11434/v1"
+model = "llama3.2"
+
+[gateway.routes.counterfactual]
+models = ["local"]
+
+[gateway.shadow]
+enabled = true
+sample_rate = 0.5
+candidate_routes = ["counterfactual"]
+max_in_flight = 4
+max_records = 100
+provider_comparisons = true
+provider_sample_rate = 0.25
+provider_max_requests = 3
+provider_window = 120
+"#;
+        let config = gateway_config_from_toml(text, "shadow-test")?;
+        assert!(config.shadow.enabled);
+        assert_eq!(config.shadow.sample_rate, 0.5);
+        assert_eq!(config.shadow.candidate_routes, ["counterfactual"]);
+        assert_eq!(config.shadow.max_in_flight, 4);
+        assert_eq!(config.shadow.max_records, 100);
+        assert!(config.shadow.provider_comparisons);
+        assert_eq!(config.shadow.provider_sample_rate, 0.25);
+        assert_eq!(config.shadow.provider_max_requests, 3);
+        assert_eq!(config.shadow.provider_window, 120.0);
+
+        let dumped = dump_gateway_toml(&config)?;
+        let reparsed = gateway_config_from_toml(&dumped, "shadow-round-trip")?;
+        assert_eq!(reparsed.shadow, config.shadow);
+        Ok(())
+    }
+
+    #[test]
+    fn shadow_policy_rejects_unbounded_or_unknown_candidates() {
+        for text in [
+            "[gateway.shadow]\nenabled = true\n",
+            "[gateway.shadow]\nsample_rate = 1.1\n",
+            "[gateway.shadow]\ncandidate_routes = [\"missing\"]\n",
+            "[gateway.shadow]\nprovider_comparisons = true\nprovider_sample_rate = 0.5\nprovider_max_requests = 0\n",
+        ] {
+            assert!(
+                gateway_config_from_toml(text, "shadow-invalid").is_err(),
+                "accepted: {text}"
+            );
+        }
     }
 
     #[test]

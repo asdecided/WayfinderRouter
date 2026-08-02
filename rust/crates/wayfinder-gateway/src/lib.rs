@@ -24,6 +24,7 @@ pub mod recent;
 pub mod reliability;
 pub mod reload;
 pub mod server;
+pub mod shadow;
 pub mod state;
 
 pub use crate::decision_policy::RouteOn;
@@ -52,7 +53,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 use wayfinder_config::dump_routing_toml;
 use wayfinder_config::gateway::{
-    DeploymentSelectionPolicy, GatewayModel, ProviderKind, ProviderTier, RoutePreset,
+    DeploymentSelectionPolicy, GatewayModel, ProviderKind, ProviderTier, RoutePreset, ShadowConfig,
 };
 use wayfinder_providers::anthropic::{
     MessagesStreamTranslator, anthropic_error, anthropic_to_openai_request,
@@ -103,6 +104,7 @@ use crate::rate_limit::{RateResult, RateSnapshot};
 use crate::recent::{RecentCost, RecentEntry, RecentRoutes};
 use crate::reliability::{ReliabilityAttempt, ReliabilityError, ReliabilityPolicy, sleep_retry};
 use crate::reload::LastGood;
+use crate::shadow::{ShadowJob, ShadowSnapshot, ShadowStore};
 use crate::state::{SharedBudgetReservation, SharedCachePut, SharedCostObservation, StateBackend};
 
 fn shared_state_identity(config: &wayfinder_config::gateway::StateConfig) -> [u8; 32] {
@@ -499,6 +501,9 @@ pub struct AppState {
     route_presets: Arc<IndexMap<String, RoutePreset>>,
     deployment_cursors: Arc<Mutex<BTreeMap<String, u64>>>,
     deployment_signals: Arc<DeploymentObservationStore>,
+    shadow_config: Arc<ShadowConfig>,
+    shadow_store: Arc<ShadowStore>,
+    shadow_slots: Arc<tokio::sync::Semaphore>,
     offline: bool,
     dry_run: bool,
     route_on: RouteOn,
@@ -547,6 +552,7 @@ impl AppState {
         let build_version = Arc::<str>::from(build_version.into());
         let cache_started = Instant::now();
         let deployment_started = Instant::now();
+        let shadow_started = Instant::now();
         let metrics = Arc::new(GatewayMetrics::new(
             build_version.to_string(),
             DEFAULT_MAX_LABEL_SERIES,
@@ -568,6 +574,15 @@ impl AppState {
             deployment_signals: Arc::new(DeploymentObservationStore::new(move || {
                 deployment_started.elapsed().as_secs_f64()
             })),
+            shadow_config: Arc::new(ShadowConfig::default()),
+            shadow_store: Arc::new(ShadowStore::new(
+                wayfinder_config::gateway::DEFAULT_SHADOW_MAX_RECORDS,
+                move || shadow_started.elapsed().as_secs_f64(),
+            )),
+            shadow_slots: Arc::new(tokio::sync::Semaphore::new(
+                usize::try_from(wayfinder_config::gateway::DEFAULT_SHADOW_MAX_IN_FLIGHT)
+                    .unwrap_or(1),
+            )),
             offline,
             dry_run: false,
             route_on: RouteOn::Turn,
@@ -825,6 +840,40 @@ impl AppState {
         Ok(self)
     }
 
+    /// Attach bounded, opt-in off-path shadow routing from gateway config.
+    pub fn with_gateway_shadow(
+        mut self,
+        config: &wayfinder_config::gateway::GatewayConfig,
+    ) -> Result<Self, String> {
+        let shadow = config.shadow.clone();
+        let slots = usize::try_from(shadow.max_in_flight)
+            .map_err(|_| "gateway.shadow.max_in_flight is too large".to_owned())?;
+        if slots == 0 {
+            return Err("gateway.shadow.max_in_flight must be positive".to_owned());
+        }
+        let started = Instant::now();
+        self.shadow_store = Arc::new(ShadowStore::new(shadow.max_records, move || {
+            started.elapsed().as_secs_f64()
+        }));
+        self.shadow_store.set_active(shadow.enabled);
+        self.shadow_config = Arc::new(shadow);
+        self.shadow_slots = Arc::new(tokio::sync::Semaphore::new(slots));
+        Ok(self)
+    }
+
+    /// Replace shadow policy while retaining an existing record store.
+    pub fn with_shadow_config(mut self, config: ShadowConfig) -> Result<Self, String> {
+        let slots = usize::try_from(config.max_in_flight)
+            .map_err(|_| "gateway.shadow.max_in_flight is too large".to_owned())?;
+        if slots == 0 {
+            return Err("gateway.shadow.max_in_flight must be positive".to_owned());
+        }
+        self.shadow_config = Arc::new(config);
+        self.shadow_store.set_active(self.shadow_config.enabled);
+        self.shadow_slots = Arc::new(tokio::sync::Semaphore::new(slots));
+        Ok(self)
+    }
+
     /// Attach an opt-in bounded exact-response cache and monotonic clock.
     pub fn with_cache_and_clock(
         mut self,
@@ -950,6 +999,9 @@ impl AppState {
         self.metrics = Arc::clone(&previous.metrics);
         self.deployment_cursors = Arc::clone(&previous.deployment_cursors);
         self.deployment_signals = Arc::clone(&previous.deployment_signals);
+        self.shadow_store = Arc::clone(&previous.shadow_store);
+        self.shadow_slots = Arc::clone(&previous.shadow_slots);
+        self.shadow_store.set_active(self.shadow_config.enabled);
         self.savings_ledger = Arc::clone(&previous.savings_ledger);
         self.savings_path = previous.savings_path.clone();
         self.audit_log = Arc::clone(&previous.audit_log);
@@ -1068,6 +1120,58 @@ impl AppState {
         self.deployment_signals.observe(deployment_id, observation);
     }
 
+    /// Queue sampled off-path shadow evaluation without affecting delivery.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn schedule_shadow(
+        &self,
+        request_id: &str,
+        prompt: &str,
+        routing_request: &RoutingRequest,
+        production_model: &str,
+        production_score: f64,
+        request_body: &Value,
+        provider_consent: bool,
+    ) {
+        let config = self.shadow_config.as_ref().clone();
+        if !config.enabled
+            || config.candidate_routes.is_empty()
+            || !crate::shadow::deterministic_sample(
+                request_id,
+                &crate::shadow::candidate_fingerprint(&config.candidate_routes),
+                config.sample_rate,
+            )
+        {
+            return;
+        }
+        self.shadow_store.sampled();
+        let permit = match Arc::clone(&self.shadow_slots).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                self.shadow_store.dropped_in_flight();
+                self.metrics().observe_shadow_event("dropped", "in-flight");
+                return;
+            }
+        };
+        let job = ShadowJob {
+            request_id: request_id.to_owned(),
+            prompt: prompt.to_owned(),
+            routing_request: routing_request.clone(),
+            production_model: production_model.to_owned(),
+            production_score,
+            request_body: request_body.clone(),
+            provider_consent,
+        };
+        let state = self.clone();
+        let store = Arc::clone(&self.shadow_store);
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            drop(permit);
+            store.error();
+            self.metrics().observe_shadow_event("error", "runtime");
+            return;
+        };
+        handle.spawn(crate::shadow::evaluate(state, config, store, job, permit));
+    }
+
     fn configured_deployment_targets(&self, alias: &str) -> Vec<ConfiguredModel> {
         let Some(model) = self.models.iter().find(|model| model.name() == alias) else {
             return Vec::new();
@@ -1153,10 +1257,21 @@ impl AppState {
         self.delivery.as_deref()
     }
 
+    /// Clone the configured buffered delivery for a non-blocking shadow task.
+    pub(crate) fn delivery_arc(&self) -> Option<Arc<dyn BufferedDelivery>> {
+        self.delivery.clone()
+    }
+
     /// Selected streaming provider implementation, if configured.
     #[must_use]
     pub fn streaming_delivery(&self) -> Option<&dyn StreamingDelivery> {
         self.streaming_delivery.as_deref()
+    }
+
+    /// Prompt-free shadow evidence retained by this process.
+    #[must_use]
+    pub fn shadow_snapshot(&self, limit: usize) -> ShadowSnapshot {
+        self.shadow_store.snapshot(limit)
     }
 
     /// Configured opt-in gateway access policy, if any.
@@ -2441,6 +2556,16 @@ async fn chat_completions(
         state
             .metrics()
             .observe_decision(&chosen, mode, decision_started.elapsed().as_secs_f64());
+
+    state.schedule_shadow(
+        &request_id,
+        &prompt,
+        &routing_request,
+        &chosen,
+        decision.score,
+        &Value::Object(body.clone()),
+        crate::shadow::provider_consent(&headers),
+    );
 
     if state.dry_run() || state.models().is_empty() {
         return decision_only_response(
