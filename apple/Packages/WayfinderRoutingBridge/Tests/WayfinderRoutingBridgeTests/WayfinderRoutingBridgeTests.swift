@@ -31,7 +31,12 @@ final class WayfinderRoutingBridgeTests: XCTestCase {
                 text: true,
                 streaming: true,
                 imageInput: false,
-                tools: false
+                tools: false,
+                embeddings: false,
+                imageGeneration: false,
+                audioInput: false,
+                audioOutput: false,
+                batch: false
             ),
             automaticEligible: true
         )
@@ -69,7 +74,8 @@ final class WayfinderRoutingBridgeTests: XCTestCase {
                     contextTokens: 1_024,
                     imageInput: false,
                     tools: false,
-                    streaming: true
+                    streaming: true,
+                    surface: .text
                 )
             ),
             candidates: [
@@ -81,7 +87,7 @@ final class WayfinderRoutingBridgeTests: XCTestCase {
         XCTAssertEqual(plan.selectedDestinationId, "device")
         XCTAssertEqual(
             plan.candidates.first?.exclusions,
-            [.privacyBoundaryDenied]
+            [ExclusionReason.privacyBoundaryDenied]
         )
     }
 
@@ -129,7 +135,8 @@ final class WayfinderRoutingBridgeTests: XCTestCase {
                         contextTokens: nil,
                         imageInput: false,
                         tools: false,
-                        streaming: false
+                        streaming: false,
+                        surface: .text
                     )
                 ),
                 candidates: []
