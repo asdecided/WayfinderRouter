@@ -436,7 +436,8 @@ final class AppModel {
           contextTokens: nil,
           imageInput: false,
           tools: false,
-          streaming: true
+          streaming: true,
+          surface: .text
         )
       )
       let plan: RoutePlan
@@ -1240,7 +1241,12 @@ struct RoutingDestination: Identifiable, Hashable {
         text: true,
         streaming: true,
         imageInput: false,
-        tools: false
+        tools: false,
+        embeddings: false,
+        imageGeneration: false,
+        audioInput: false,
+        audioOutput: false,
+        batch: false
       ),
       automaticEligible: automaticEligible
     )
@@ -1261,7 +1267,12 @@ struct RoutingDestination: Identifiable, Hashable {
         text: true,
         streaming: true,
         imageInput: false,
-        tools: false
+        tools: false,
+        embeddings: false,
+        imageGeneration: false,
+        audioInput: false,
+        audioOutput: false,
+        batch: false
       ),
       automaticEligible: true
     )
