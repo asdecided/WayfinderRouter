@@ -8,6 +8,12 @@ details, release history over commit history.
 
 ### Added
 
+- **Omarchy Quattro integration** (WF-ADR-0068). Linux users can add a native
+  Wayfinder service and bar widget that reports gateway health, recent routing,
+  model readiness, savings, and the stable OpenAI-compatible endpoint. The
+  plugin controls the existing `systemd --user` service and never sits on the
+  request path or stores provider credentials.
+
 - **Bounded modality capability contracts** (WF-ADR-0067, issue #154). The shared Rust routing
   contract now carries explicit embeddings, image-generation, audio, and batch capabilities and
   applies them as hard pre-score eligibility filters. The current gateway remains text-only and

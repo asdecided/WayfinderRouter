@@ -106,3 +106,17 @@ jobs:
           node-version: "22"
       - name: Shared decision-preview contract
         run: node clients/shared/test/parity.mjs
+
+  omarchy-plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate the Omarchy manifest and package
+        run: node integrations/omarchy-wayfinder/scripts/validate.mjs
+      - name: Test the prompt-free presentation model
+        run: node integrations/omarchy-wayfinder/test/model.test.mjs
+      - name: Check install and removal scripts
+        run: bash -n integrations/omarchy-wayfinder/install.sh integrations/omarchy-wayfinder/uninstall.sh
