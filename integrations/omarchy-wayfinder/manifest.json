@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.wayfinderstack.wayfinder",
+  "name": "Wayfinder",
+  "version": "0.1.0",
+  "author": "Tom Ballard",
+  "license": "Apache-2.0",
+  "description": "System-wide AI model routing status and controls for Omarchy.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Wayfinder",
+    "description": "Gateway health, routes, model readiness, savings, and service controls.",
+    "category": "AI",
+    "aliases": [
+      "router",
+      "models",
+      "llm"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "endpoint": "http://127.0.0.1:8088",
+      "refreshIntervalSec": 15,
+      "configPath": ""
+    },
+    "schema": [
+      {
+        "key": "endpoint",
+        "type": "string",
+        "label": "Gateway endpoint",
+        "defaultValue": "http://127.0.0.1:8088",
+        "description": "The Wayfinder gateway base URL. Credentials must not be included."
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 5,
+        "max": 300,
+        "step": 5,
+        "defaultValue": 15
+      },
+      {
+        "key": "configPath",
+        "type": "path",
+        "label": "Router config",
+        "defaultValue": "",
+        "description": "Optional path passed to service installation. Leave empty for Wayfinder discovery."
+      }
+    ]
+  }
+}
