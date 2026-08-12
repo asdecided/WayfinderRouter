@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-plugin_id="io.github.wayfinderstack.wayfinder"
+plugin_id="io.github.asdecided.wayfinder"
 source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 plugin_dir="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/$plugin_id"
 repo_root="$(cd -- "$source_dir/../.." && pwd)"

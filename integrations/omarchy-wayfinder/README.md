@@ -19,33 +19,31 @@ shell does not interrupt requests.
 The plugin never stores provider credentials. It reads only the gateway's
 prompt-free local status surfaces.
 
-## Install from the Wayfinder workspace
+## Install
 
 ```sh
-git clone https://github.com/asdecided/WayfinderRouter.git
-cd WayfinderRouter
-./integrations/omarchy-wayfinder/install.sh
+omarchy plugin add https://github.com/asdecided/omarchy-wayfinder.git
+cd ~/.config/omarchy/plugins/io.github.asdecided.wayfinder
+./install.sh
 ```
 
-The installer copies the plugin into
-`~/.config/omarchy/plugins/io.github.wayfinderstack.wayfinder`, builds the Rust
-CLI when Cargo is available and the binary is missing, rescans plugins, and
-enables the widget. It does not create a gateway configuration or provider
-credential.
+The installer builds the Rust CLI when Cargo is available and the binary is
+missing, rescans plugins, and enables the widget. It does not create a gateway
+configuration or provider credential.
 
 Open the Wayfinder bar item and choose **Install service**. The existing CLI
 writes and starts `~/.config/systemd/user/wayfinder-router.service` on the
 configured loopback address.
 
-## Install from the marketplace repository
+## Install from the Wayfinder workspace
 
-This directory is root-ready for publication as the dedicated public plugin
-repository. Once published, installation is:
+Contributors working from a WayfinderRouter checkout can install the same
+plugin directly:
 
 ```sh
-omarchy plugin add https://github.com/wayfinderstack/omarchy-wayfinder.git
-cd ~/.config/omarchy/plugins/io.github.wayfinderstack.wayfinder
-./install.sh
+git clone https://github.com/asdecided/WayfinderRouter.git
+cd WayfinderRouter
+./integrations/omarchy-wayfinder/install.sh
 ```
 
 Omarchy clones third-party plugins disabled so their source can be reviewed
@@ -85,7 +83,7 @@ not ask for or persist an operator token.
 ## Remove
 
 ```sh
-omarchy plugin remove io.github.wayfinderstack.wayfinder
+omarchy plugin remove io.github.asdecided.wayfinder
 ```
 
 Removal intentionally leaves the Wayfinder gateway running because other

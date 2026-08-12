@@ -6,7 +6,7 @@ import "Model.js" as Model
 
 BarWidget {
   id: root
-  moduleName: "io.github.wayfinderstack.wayfinder"
+  moduleName: "io.github.asdecided.wayfinder"
 
   readonly property var wayfinder: bar && bar.shell ? bar.shell.serviceFor(moduleName) : null
   property bool popupOpen: false

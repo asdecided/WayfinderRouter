@@ -9,7 +9,7 @@ const manifestPath = path.join(root, "manifest.json");
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
 
 assert.equal(manifest.schemaVersion, 1);
-assert.equal(manifest.id, "io.github.wayfinderstack.wayfinder");
+assert.equal(manifest.id, "io.github.asdecided.wayfinder");
 assert.match(manifest.id, /^[a-z0-9]+(?:[._-][a-z0-9]+)+$/);
 assert.equal(manifest.name, "Wayfinder");
 assert.match(manifest.version, /^\d+\.\d+\.\d+$/);

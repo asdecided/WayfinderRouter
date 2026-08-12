@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-plugin_id="io.github.wayfinderstack.wayfinder"
+plugin_id="io.github.asdecided.wayfinder"
 
 if command -v omarchy >/dev/null 2>&1; then
   omarchy plugin remove "$plugin_id"
