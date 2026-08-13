@@ -43,8 +43,13 @@ plugin directly:
 ```sh
 git clone https://github.com/asdecided/WayfinderRouter.git
 cd WayfinderRouter
+git checkout --detach 9874b08b466822ea6fd0c0875a88950521110997
 ./integrations/omarchy-wayfinder/install.sh
 ```
+
+The detached checkout matches the Router revision used by the standalone
+installer. Router upgrades are reviewed as explicit plugin changes before this
+pin moves.
 
 Omarchy clones third-party plugins disabled so their source can be reviewed
 before enablement. The script performs the explicit enable step.
