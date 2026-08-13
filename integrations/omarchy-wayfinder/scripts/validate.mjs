@@ -32,9 +32,19 @@ for (const required of ["README.md", "LICENSE", "NOTICE", "Model.js", "RouteMark
 
 const service = await readFile(path.join(root, "Service.qml"), "utf8");
 const widget = await readFile(path.join(root, "BarWidget.qml"), "utf8");
+const installer = await readFile(path.join(root, "install.sh"), "utf8");
+const readme = await readFile(path.join(root, "README.md"), "utf8");
 assert.ok(service.includes("wayfinder-router.service"));
 assert.ok(service.includes("/healthz"));
 assert.ok(widget.includes(manifest.id));
 assert.ok(!service.match(/api[_-]?key\s*[:=]\s*["'][^"']+/i), "QML must not contain an API key");
+
+const revisionMatch = installer.match(/^wayfinder_rev="([0-9a-f]{40})"$/m);
+assert.ok(revisionMatch, "installer must pin WayfinderRouter to a full commit SHA");
+assert.ok(installer.includes('--rev "$wayfinder_rev"'), "cargo install must use the pinned revision");
+assert.ok(
+  readme.includes(`git checkout --detach ${revisionMatch[1]}`),
+  "workspace instructions must use the installer revision"
+);
 
 console.log(`validated ${manifest.id} ${manifest.version}`);

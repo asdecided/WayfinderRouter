@@ -2,6 +2,7 @@
 set -euo pipefail
 
 plugin_id="io.github.asdecided.wayfinder"
+wayfinder_rev="9874b08b466822ea6fd0c0875a88950521110997"
 source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 plugin_dir="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/$plugin_id"
 repo_root="$(cd -- "$source_dir/../.." && pwd)"
@@ -29,7 +30,11 @@ if ! command -v wayfinder-router >/dev/null 2>&1; then
   elif [[ -f "$repo_root/rust/Cargo.toml" ]]; then
     cargo install --path "$repo_root/rust/crates/wayfinder-cli" --locked
   else
-    cargo install --git https://github.com/asdecided/WayfinderRouter.git --locked wayfinder-cli
+    cargo install \
+      --git https://github.com/asdecided/WayfinderRouter.git \
+      --rev "$wayfinder_rev" \
+      --locked \
+      wayfinder-cli
   fi
 fi
 
