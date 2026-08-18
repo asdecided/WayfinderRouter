@@ -2401,7 +2401,7 @@ dependencies = [
 
 [[package]]
 name = "wayfinder-apple-ffi"
-version = "2026.7.0"
+version = "2026.8.0"
 dependencies = [
  "serde_json",
  "thiserror",
@@ -2411,7 +2411,7 @@ dependencies = [
 
 [[package]]
 name = "wayfinder-apple-foundation-xpc"
-version = "2026.7.0"
+version = "2026.8.0"
 dependencies = [
  "cc",
  "serde",
@@ -2421,7 +2421,7 @@ dependencies = [
 
 [[package]]
 name = "wayfinder-cli"
-version = "2026.7.0"
+version = "2026.8.0"
 dependencies = [
  "serde_json",
  "thiserror",
@@ -2439,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "wayfinder-codex-app-server"
-version = "2026.7.0"
+version = "2026.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2450,7 +2450,7 @@ dependencies = [
 
 [[package]]
 name = "wayfinder-compat-tests"
-version = "2026.7.0"
+version = "2026.8.0"
 dependencies = [
  "axum",
  "http",
@@ -2466,7 +2466,7 @@ dependencies = [
 
 [[package]]
 name = "wayfinder-config"
-version = "2026.7.0"
+version = "2026.8.0"
 dependencies = [
  "indexmap",
  "serde",
@@ -2479,7 +2479,7 @@ dependencies = [
 
 [[package]]
 name = "wayfinder-gateway"
-version = "2026.7.0"
+version = "2026.8.0"
 dependencies = [
  "axum",
  "base64",
@@ -2517,7 +2517,7 @@ dependencies = [
 
 [[package]]
 name = "wayfinder-macos-xpc"
-version = "2026.7.0"
+version = "2026.8.0"
 dependencies = [
  "cc",
  "thiserror",
@@ -2526,7 +2526,7 @@ dependencies = [
 
 [[package]]
 name = "wayfinder-providers"
-version = "2026.7.0"
+version = "2026.8.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2540,7 +2540,7 @@ dependencies = [
 
 [[package]]
 name = "wayfinder-routing-core"
-version = "2026.7.0"
+version = "2026.8.0"
 dependencies = [
  "regex",
  "serde",
@@ -2552,7 +2552,7 @@ dependencies = [
 
 [[package]]
 name = "wayfinder-runtime-contracts"
-version = "2026.7.0"
+version = "2026.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2560,7 +2560,7 @@ dependencies = [
 
 [[package]]
 name = "wayfinder-service"
-version = "2026.7.0"
+version = "2026.8.0"
 dependencies = [
  "indexmap",
  "serde",

@@ -14,6 +14,13 @@ details, release history over commit history.
   stays offline and model-free, emits a parse-verified costed routing fragment,
   and does not restore the retired Python objectives or automatic recalibration.
 
+- **Checksummed native Linux Router releases** (WF-ADR-0069). Version-matched
+  `router-v*` tags now build and smoke-test reproducibly packaged `x86_64` and
+  `aarch64` GNU/Linux archives on native runners, publish a SHA-256 file for
+  each, and create a maintainer-reviewed draft release. This lets integrations
+  install the Rust gateway without requiring Cargo while keeping service start,
+  routing configuration, and credentials explicit and independent.
+
 - **Omarchy Quattro integration** (WF-ADR-0068). Linux users can add a native
   Wayfinder service and bar widget that reports gateway health, recent routing,
   model readiness, savings, and the stable OpenAI-compatible endpoint. The

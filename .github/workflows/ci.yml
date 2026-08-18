@@ -120,3 +120,12 @@ jobs:
         run: node integrations/omarchy-wayfinder/test/model.test.mjs
       - name: Check install and removal scripts
         run: bash -n integrations/omarchy-wayfinder/install.sh integrations/omarchy-wayfinder/uninstall.sh
+
+  linux-packaging:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate deterministic Linux packaging
+        run: |
+          bash -n packaging/linux/check_release_surfaces.sh packaging/linux/package_router.sh packaging/linux/test_package_router.sh
+          packaging/linux/test_package_router.sh
