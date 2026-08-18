@@ -27,7 +27,7 @@ not meaning. See [`routerbench-results.md`](../benchmarks/routerbench-results.md
 
 ## Your own benchmark says it's no better than random on RouterBench. Why use it?
 
-True, and it's in the repo on purpose: at the cost-aware knee, structural routing lands a few points
+True, and it's in the repo on purpose: at the historical benchmark knee, structural routing lands a few points
 below random at *ranking which prompts need the big model* on RouterBench — whose hardest items are
 short multiple-choice questions with no structural tell. Structure isn't difficulty.
 
@@ -253,21 +253,27 @@ result as config ([WF-ADR-0023](../decisions/WF-ADR-0023-in-demo-scoring-overrid
 
 ## Is it production-ready? Who maintains it? What are the dependencies?
 
-It's early and largely a solo project, built to be boring on purpose. The core is stdlib-only (zero
-runtime dependencies), so there's no supply-chain surface and nothing to rot as the ecosystem churns;
-it's deterministic, so it's fully tested and the benchmarks reproduce byte-for-byte; it's Apache-2.0 and
-small enough to read in a sitting. The upside of "boring and deterministic" is that there's no service
-to go down and no API to deprecate — it's a pure function plus a thin gateway, and worst case you vendor
-the file. Python 3.11+.
+It's early and largely a solo project, built to be boring on purpose. The pure Rust routing core has no
+network, process, filesystem, async-runtime, platform-framework, or secret dependencies. It is
+deterministic, fully tested, and Apache-2.0. The gateway is a separate bounded layer, and release builds
+ship as self-contained native binaries.
 
 ## How do I tune it to my own traffic?
 
-Label a representative sample of your prompts (`{"text": ..., "label": "local"|"cloud"}`) and let the
-calibrator place the cut at the cost-aware knee:
+Label a representative sample of your prompts (`{"text": ..., "label": "local"|"cloud"}`). Then
+give the native calibrator the cost of each arm:
 
 ```bash
-wayfinder-router calibrate your-data.jsonl --mode threshold --objective knee --out wayfinder-router.toml
+wayfinder-router calibrate your-data.jsonl \
+  --mode threshold \
+  --objective min-cost \
+  --costs local=0.0001,cloud=0.003 \
+  --out wayfinder-router.toml
 ```
+
+The command minimizes expected inference cost plus a penalty when a prompt labelled `cloud` routes
+to `local`. `--quality-penalty` sets that penalty and defaults to the high-arm cost. The command writes
+TOML to stdout when `--out` is absent, and it refuses to replace an existing output file.
 
 To switch the lexical signals on for your domain, raise their weights and (optionally) supply your own
 trigger words — ideally mined from your labels rather than hand-picked. Full walkthrough, including the
