@@ -65,9 +65,9 @@ the selected cut. This amendment supersedes any earlier sentence that calls
 `knee` cost-aware or says configured prices affect its selected cut.
 
 The historical name `knee` may be retained for reproducibility, but its contract
-is a quality/call-fraction heuristic. Any future native price-sensitive
-calibrator will use the `min-cost` objective proposed in issue #170 and first
-implemented for the retired Python tree in PR #78:
+is a quality/call-fraction heuristic. The native price-sensitive calibrator uses
+the `min-cost` objective proposed in issue #170 and first implemented for the
+retired Python tree in PR #78:
 
 ```text
 L(c) = (1 / N) × Σ [
@@ -81,12 +81,33 @@ prompt that requires the high-quality arm to the low-cost arm. It uses the same
 units as the configured arm costs. The default is `Q = C_high`, equivalent to
 one additional high-arm request to repair a wrong cheap answer.
 
-This decision specifies the objective, not a shipping command. WF-ADR-0046
-removed the Python calibrator; the Rust CLI must continue to fail closed for
-`calibrate` and `recalibrate` until a separate native implementation defines
-the dataset, candidate-cut, deterministic tie-break, config-write, and test
-contracts. Costs and `Q` remain calibration inputs only and never enter the
-per-request scored path.
+### Native `min-cost` implementation (2026-08-18)
+
+The reviewed Rust replacement restores only `calibrate --mode threshold
+--objective min-cost` under this contract:
+
+- Input is UTF-8 JSONL with `text` and non-empty `label` strings. Blank lines
+  are ignored. Exactly two labels must be present.
+- `--costs LABEL=COST,LABEL=COST` is required and must name those labels
+  exactly. Both costs are finite and non-negative; the cheaper label is the low
+  arm, and equal costs are rejected because they define no cheap/high ordering.
+- Prompts are scored by the pure Rust routing core. Default weights and lexicon
+  are used unless the operator supplies an explicit `--config`; calibration
+  makes no model or network call.
+- Candidate cuts are `0.0`, `1.0`, and observed scores rounded to four decimal
+  places. The high arm owns the inclusive `score >= cut` boundary. Objective
+  ties choose the upper median candidate deterministically.
+- `Q` defaults to the high-arm cost. A supplied `--quality-penalty` must be
+  finite and non-negative.
+- Output is a deterministic, parse-verified routing fragment with arm costs.
+  A `0.0` optimum is emitted as one high-arm tier because the strict tier schema
+  cannot represent two different models at the same inclusive boundary.
+  `--out` creates a new file and refuses to replace an existing file.
+
+This implementation does not restore `accuracy`, `knee`, `cost-quality`, tier
+or classifier fitting, automatic config replacement, or `recalibrate`. Those
+surfaces continue to fail closed under WF-ADR-0046. Costs and `Q` remain
+calibration inputs only and never enter the per-request scored path.
 
 Explicitly out of scope for v1: live spend metering and token-level costing (which
 would need a tokenizer dependency and per-provider price tables). v1 uses a flat

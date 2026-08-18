@@ -4,6 +4,7 @@
 
 mod app_setup_command;
 mod apple_foundation_live;
+mod calibrate_command;
 mod codex_app_server;
 mod config_command;
 mod service_command;
@@ -160,6 +161,7 @@ pub fn run(
             EXIT_OK
         }
         "route" => run_route(&arguments[1..], stdin, stdout, stderr),
+        "calibrate" => calibrate_command::run_calibrate(&arguments[1..], stdin, stdout, stderr),
         "keys" => run_keys(&arguments[1..], stdout, stderr),
         "app-setup-init" => app_setup_command::run_app_setup(&arguments[1..], stdout, stderr),
         "config" => config_command::run_config(&arguments[1..], stdin, stdout, stderr),
@@ -327,8 +329,8 @@ fn run_capabilities(arguments: &[String], stdout: &mut dyn Write, stderr: &mut d
         "implementation": "rust",
         "version": product_version(),
         "target_architecture": target_architecture(),
-        "commands": ["route", "serve", "service", "keys", "capabilities", "app-setup-init", "app-configure-chatgpt", "config", "apple-foundation-live-smoke"],
-        "native_commands": ["route", "serve", "service", "keys new", "capabilities", "app-setup-init", "app-configure-chatgpt", "config read-routing", "config apply-routing", "apple-foundation-live-smoke"],
+        "commands": ["route", "calibrate", "serve", "service", "keys", "capabilities", "app-setup-init", "app-configure-chatgpt", "config", "apple-foundation-live-smoke"],
+        "native_commands": ["route", "calibrate", "serve", "service", "keys new", "capabilities", "app-setup-init", "app-configure-chatgpt", "config read-routing", "config apply-routing", "apple-foundation-live-smoke"],
         "delegated_commands": [],
         "delegation": null,
         "decision_schema_versions": ["3"],
@@ -1397,7 +1399,7 @@ fn write_error(stream: &mut dyn Write, message: &str) {
 }
 
 const TOP_LEVEL_USAGE: &str = "usage: wayfinder-router [-h] [--version] COMMAND ...";
-const TOP_LEVEL_HELP: &str = "usage: wayfinder-router [-h] [--version] COMMAND ...\n\nNative deterministic prompt-complexity router.\n\nCommands:\n  route          Score a prompt and recommend a model.\n  serve          Run the bounded HTTP gateway.\n  service        Manage the always-on launchd/systemd user service.\n  keys new       Mint a virtual gateway key and its hashed config entry.\n  capabilities   Emit the versioned helper capability handshake.\n  app-setup-init Create a bounded desktop setup config.\n  app-configure-chatgpt\n                 Add a bounded ChatGPT account route for Desktop.\n  config read-routing | apply-routing\n                 Read or replace the desktop-owned routing fragment.\n  apple-foundation-live-smoke\n                 Exercise the bounded Apple Foundation Models delivery path.";
+const TOP_LEVEL_HELP: &str = "usage: wayfinder-router [-h] [--version] COMMAND ...\n\nNative deterministic prompt-complexity router.\n\nCommands:\n  route          Score a prompt and recommend a model.\n  calibrate      Fit a price-sensitive min-cost threshold from labelled JSONL.\n  serve          Run the bounded HTTP gateway.\n  service        Manage the always-on launchd/systemd user service.\n  keys new       Mint a virtual gateway key and its hashed config entry.\n  capabilities   Emit the versioned helper capability handshake.\n  app-setup-init Create a bounded desktop setup config.\n  app-configure-chatgpt\n                 Add a bounded ChatGPT account route for Desktop.\n  config read-routing | apply-routing\n                 Read or replace the desktop-owned routing fragment.\n  apple-foundation-live-smoke\n                 Exercise the bounded Apple Foundation Models delivery path.";
 const ROUTE_HELP: &str = "usage: wayfinder-router route [-h] [--threshold THRESHOLD] [--json] [--explain] prompt\n\nScore a prompt and recommend a model.";
 const KEYS_HELP: &str = "usage: wayfinder-router keys new [--id ID] [--workspace ID] [--json]\n\nMint a virtual gateway key. The plaintext is printed once; only its SHA-256 hash belongs in config.";
 const SERVE_HELP: &str = "usage: wayfinder-router serve [-h] [--host HOST] [--port PORT] [--surface local|data-plane] [--dry-run] [--timeout TIMEOUT] [--config CONFIG]\n\nRun the bounded HTTP gateway. Non-loopback serving requires the authenticated data-plane surface.";
@@ -1494,6 +1496,7 @@ mod tests {
             payload["native_commands"],
             json!([
                 "route",
+                "calibrate",
                 "serve",
                 "service",
                 "keys new",
@@ -1536,7 +1539,6 @@ mod tests {
     #[test]
     fn removed_legacy_commands_fail_closed() {
         for command in [
-            "calibrate",
             "recalibrate",
             "webchat",
             "ui",
