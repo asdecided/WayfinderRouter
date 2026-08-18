@@ -1,12 +1,28 @@
 # Wayfinder
 
-Wayfinder is a local-first model router and native Apple AI environment. It
-scores each request locally, chooses an eligible destination, and keeps delivery
-policy separate from the application making the request.
+**Local execution policy for AI.**
 
-The production router is implemented in Rust. Wayfinder Desktop embeds that
-router inside the signed application bundle; no Python runtime, package, or
-fallback is required.
+Wayfinder sits between your AI clients and your local runtimes, account-backed
+models, and API providers. It decides on your machine which eligible destination
+should handle each request, then resolves credentials only for that delivery.
+The decision path is deterministic, offline, and implemented in Rust.
+
+Build the current Router and create a no-clobber local policy:
+
+```sh
+cargo install --path rust/crates/wayfinder-cli --locked
+wayfinder-router init
+wayfinder-router doctor
+wayfinder-router serve
+```
+
+Point Codex, Claude Code, or OpenCode at the same loopback policy with
+`wayfinder-router connect <client>`. See the
+[verified coding-agent quick starts](docs/coding-agent-quickstarts.md), or run
+`wayfinder-router open` to inspect local routing decisions.
+
+Wayfinder Desktop embeds the same Router inside its signed application bundle;
+no Python runtime, package, or fallback is required.
 
 ## Products
 

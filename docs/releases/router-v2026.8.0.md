@@ -21,6 +21,8 @@ credentials.
 ## Included Router change
 
 This release includes native price-sensitive `min-cost` threshold calibration.
+It also adds the bounded native activation surface: `init`, `doctor`, `connect`,
+and `open` (WF-ADR-0070).
 Operators can fit a deterministic routing cut from labelled JSONL and explicit
 arm costs. The command stays offline and model-free. Thanks to
 [@doctatortot](https://github.com/doctatortot) for raising the use case and
