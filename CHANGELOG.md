@@ -8,6 +8,12 @@ details, release history over commit history.
 
 ### Added
 
+- **Native price-sensitive threshold calibration** (WF-ADR-0017, issue #170).
+  Operators can fit a deterministic `min-cost` cut from labelled JSONL using
+  explicit arm costs and an optional missed-high quality penalty. Calibration
+  stays offline and model-free, emits a parse-verified costed routing fragment,
+  and does not restore the retired Python objectives or automatic recalibration.
+
 - **Omarchy Quattro integration** (WF-ADR-0068). Linux users can add a native
   Wayfinder service and bar widget that reports gateway health, recent routing,
   model readiness, savings, and the stable OpenAI-compatible endpoint. The

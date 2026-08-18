@@ -31,9 +31,13 @@ Rust is the sole production implementation of the Wayfinder router and gateway.
   fixture generators, PyPI workflow, and Python container are removed.
 - CI validates Rust, Swift, Docker, and the retained JavaScript preview contract.
 - The Docker image builds and runs the Rust binary.
-- The old `calibrate`, `recalibrate`, `webchat`, `ui`, `chat`, `onboard`,
-  `judge`, `init`, and `doctor` command surfaces are removed. They fail closed
-  as unsupported until a reviewed native replacement is justified.
+- The old `recalibrate`, `webchat`, `ui`, `chat`, `onboard`, `judge`, `init`,
+  and `doctor` command surfaces are removed. They fail closed as unsupported
+  until a reviewed native replacement is justified.
+- WF-ADR-0017 restores only `calibrate --mode threshold --objective min-cost`
+  as a bounded native Rust command. It parses labelled JSONL, scores with the
+  pure core, and emits a routing fragment. No legacy runtime, other objective,
+  or automatic config mutation returns.
 - WF-ADR-0050 restores only `keys new` as a bounded native Rust command for
   managed data-plane virtual-key creation. It prints the plaintext once and
   persists nothing; no legacy runtime or broad key-management API returns.

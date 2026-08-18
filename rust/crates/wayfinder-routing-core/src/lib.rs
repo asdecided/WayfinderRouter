@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod calibration;
 pub mod profiles;
 
 use regex::Regex;

@@ -1,16 +1,17 @@
 # Lexical routing — the opt-in recipe that beats the structural default
 
-> The legacy calibration commands referenced in this historical guide were
-> removed by the Rust-only cutover (WF-ADR-0046). Existing Rust configuration
-> support remains, but there is not yet a supported native corpus-mining CLI.
+> The broad legacy calibration surface referenced in this historical guide was
+> removed by the Rust-only cutover (WF-ADR-0046). The native CLI now supports
+> the bounded `threshold` + `min-cost` path documented below; legacy objectives,
+> classifier fitting, and automatic recalibration remain unsupported.
 
 Wayfinder's default scorer is **structural only** (length, headings, lists, code, tables).
 On real frontier traffic that default does not beat stable-random: against RouterBench
-(`mistralai/mistral-7b-chat` as `local` vs `gpt-4-1106-preview` as `cloud`) its cost-aware
+(`mistralai/mistral-7b-chat` as `local` vs `gpt-4-1106-preview` as `cloud`) its historical
 knee recovers a *negative* skill — see [`../benchmarks/routerbench-results.md`](../benchmarks/routerbench-results.md).
 
 The one deterministic, **held-out** improvement is to opt in to the lexical features
-(reasoning / math / constraint vocabulary) and cut at the cost-aware knee. Measured
+(reasoning / math / constraint vocabulary) and cut at the historical benchmark knee. Measured
 leakage-free (calibrate on train, score on held-out test;
 [`../benchmarks/calibration-eval.md`](../benchmarks/calibration-eval.md)):
 
@@ -55,33 +56,27 @@ Two things the evidence is clear about:
   until you have a few hundred labeled prompts (see the learning curve in
   `calibration-eval.md`). Treat 20 prompts as a smoke test, not a calibration.
 
-## Recalibrate the threshold to your traffic
+## Calibrate the threshold to your traffic
 
 Label a representative sample of *your* prompts (`{"text": ..., "label": "local"|"cloud"}` —
-the model each prompt should have gone to), then let the calibrator place the cut at the
-**cost-aware knee** with the lexicon switched on — one command emits the whole config
-(weights + threshold + per-arm cost):
+the model each prompt should have gone to). Then let the native `min-cost`
+calibrator place a price-sensitive cut and emit a routing config:
 
 ```bash
-wayfinder-router calibrate your-data.jsonl --mode threshold --objective knee \
+wayfinder-router calibrate your-data.jsonl --mode threshold --objective min-cost \
   --costs local=0.0001,cloud=0.003 \
-  --weights reasoning_term_count=5,math_symbol_count=3,constraint_term_count=1.5 \
+  --quality-penalty 0.003 \
+  --config tuned-wayfinder-router.toml \
   --out wayfinder-router.toml
 ```
 
-`--objective knee` maximizes quality-recovered × cost-saved, so — unlike the default
-`accuracy` objective, which on skewed traffic collapses to always-routing-cloud — it finds
-the balanced cut on its own (no savings target to guess). To bootstrap a labeled set
-interactively, start from the domain-tagged starter prompts in
-[`../benchmarks/seed/domain-seed.jsonl`](../benchmarks/seed/domain-seed.jsonl) (science /
-maths / general / code / commonsense) and judge each arm:
+`--quality-penalty` is the cost of a cheap answer that should have used the high
+arm. It defaults to the high-arm cost. Increase it when a wrong answer costs more
+than one strong-model retry. `--config` is optional; when present, the calibrator
+uses that file's weights and lexicon and preserves them in the generated fragment.
 
-```bash
-wayfinder-router onboard your-prompts.jsonl --arms local,cloud --calibrate > wayfinder-router.toml
-```
-
-Aim for a few hundred labels before trusting the cut; recalibrate as your traffic drifts
-(`wayfinder-router recalibrate`).
+Aim for a few hundred labels before trusting the cut. `recalibrate` remains
+unsupported; rerun this explicit command when your traffic or prices change.
 
 ## Bring your own lexicon (configurable trigger words)
 
