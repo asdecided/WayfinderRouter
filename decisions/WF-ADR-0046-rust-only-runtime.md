@@ -41,6 +41,9 @@ Rust is the sole production implementation of the Wayfinder router and gateway.
 - WF-ADR-0050 restores only `keys new` as a bounded native Rust command for
   managed data-plane virtual-key creation. It prints the plaintext once and
   persists nothing; no legacy runtime or broad key-management API returns.
+- WF-ADR-0070 restores `init` and `doctor` as bounded native Rust activation
+  commands and adds `connect` and `open`. These commands do not delegate to the
+  retired runtime or restore its onboarding workflow.
 - Desktop-owned setup and bounded configuration commands remain native.
 
 Checked compatibility vectors are retained as immutable migration evidence.

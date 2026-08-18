@@ -8,6 +8,12 @@ details, release history over commit history.
 
 ### Added
 
+- **Native activation surface** (WF-ADR-0070). `wayfinder-router init` creates a
+  no-clobber starter policy, `doctor` validates policy and credential references,
+  `connect` prints bounded Codex, Claude Code, and OpenCode configurations, and
+  `open` opens only the local decision dashboard. These are new Rust contracts,
+  not compatibility shims for the retired Python onboarding commands.
+
 - **Native price-sensitive threshold calibration** (WF-ADR-0017, issue #170).
   Operators can fit a deterministic `min-cost` cut from labelled JSONL using
   explicit arm costs and an optional missed-high quality penalty. Calibration
