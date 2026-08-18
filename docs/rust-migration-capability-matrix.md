@@ -18,6 +18,13 @@ Rust parity: Phases 1–3 complete; operations, CLI, and distribution gates rema
 > Python rollback sentence is superseded by WF-ADR-0046; Intel and universal evidence remain future gates.
 > Conservative `gateway_ready: false` migration metadata does not override Desktop's explicit
 > verified-helper selection.
+>
+> Calibration erratum (2026-08-18): the historical `knee` parity target must not be ported
+> unchanged. With fixed two-arm costs, the cost-ratio term is constant across candidate cuts, so
+> changing only the configured prices cannot move the selected cut. WF-ADR-0015 reclassifies
+> `knee` as a quality/call-fraction heuristic, and WF-ADR-0017 specifies `min-cost` for any future
+> price-sensitive native calibrator. The current Rust CLI continues to reject `calibrate` and
+> `recalibrate` under WF-ADR-0046.
 
 This is the compatibility contract for the Python-to-Rust migration. It is intentionally
 evidence-first: a Rust module is not considered compatible merely because it has an analogous
