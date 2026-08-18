@@ -41,10 +41,14 @@ Wayfinder will ship an Omarchy Quattro integration with these boundaries:
    refresh-interval, and optional config-path settings. API keys and account
    credentials remain behind the reviewed gateway/provider boundaries. The
    plugin never displays or copies credential values.
-5. **Installation is explicit and reversible.** Plugin enablement and service
-   installation are user actions. Removing the plugin does not silently remove
-   the independently useful Wayfinder service or configuration. Service removal
-   remains the explicit `wayfinder-router service uninstall` command.
+5. **Installation is explicit and reversible.** The plugin can install a
+   checksum-pinned, project-published Linux Router binary into a user-owned path,
+   but it never replaces an independent Router installation. Plugin enablement
+   and service installation are user actions. Removing the plugin does not
+   silently remove the independently useful Wayfinder service or configuration.
+   Service removal remains the explicit `wayfinder-router service uninstall`
+   command, and a plugin-owned binary is removable only through an explicit
+   ownership-checked path.
 6. **The marketplace package stays separable.** Its source lives in
    `integrations/omarchy-wayfinder` with a root-ready manifest, README, license,
    and validation scripts so that directory can be published as one public
@@ -60,10 +64,10 @@ Wayfinder will ship an Omarchy Quattro integration with these boundaries:
   continues to use the same localhost endpoint.
 - The integration can evolve independently without weakening the deterministic
   core or provider-security boundaries.
-- A compatible `wayfinder-router` binary remains an external dependency of the
-  plugin package. The development installer can build it from this workspace;
-  marketplace installation documents the Rust build dependency until signed
-  Linux release artifacts are available.
+- The plugin repository remains a small, reviewable control surface while its
+  installer can fetch a concrete Router release and verify its reviewed SHA-256
+  digest before extraction. A pinned Cargo build remains an explicit source
+  fallback rather than a first-run requirement.
 - Operator endpoints protected by OIDC may be unavailable to an uncredentialed
   local plugin. Health remains visible and the UI degrades without requesting or
   storing an operator token.
@@ -83,4 +87,3 @@ Wayfinder will ship an Omarchy Quattro integration with these boundaries:
 - WF-ADR-0004 (OpenAI-compatible gateway boundary)
 - WF-ADR-0038 (Linux systemd user service)
 - WF-ADR-0046 (Rust-only runtime)
-

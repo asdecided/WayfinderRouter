@@ -63,6 +63,11 @@ rust/target/debug/wayfinder-router route "Summarise this request"
 rust/target/debug/wayfinder-router serve --host 127.0.0.1 --port 8088
 ```
 
+Versioned `router-v*` releases also provide checksum-verified native Linux
+archives for `x86_64` and `aarch64`. These contain the same independent Router
+process used by the Omarchy integration; installing an archive does not create
+or start a service or alter provider credentials.
+
 For a network-exposed deployment, do not publish the local surface. Mint a
 virtual key and select the fail-closed managed data plane:
 

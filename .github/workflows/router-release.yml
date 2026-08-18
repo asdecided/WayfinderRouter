@@ -1,0 +1,198 @@
+name: Router Release
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/router-release.yml"
+      - "docs/releases/router-v*.md"
+      - "packaging/linux/**"
+      - "rust/**"
+  push:
+    tags:
+      - "router-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: router-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Validate Router source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read version and validate release tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace_version="$(sed -n '/^\[workspace.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' rust/Cargo.toml)"
+          version="$workspace_version"
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            if [[ ! "$GITHUB_REF_NAME" =~ ^router-v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]]; then
+              echo "::error::invalid Router release tag: $GITHUB_REF_NAME"
+              exit 1
+            fi
+            version="${BASH_REMATCH[1]}"
+            if [[ "$version" != "$workspace_version" ]]; then
+              echo "::error::tag version $version does not match workspace version $workspace_version"
+              exit 1
+            fi
+            test -f "docs/releases/router-v$version.md" || {
+              echo "::error::missing release notes for Router $version"
+              exit 1
+            }
+            tag_commit="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
+            test "$tag_commit" = "$GITHUB_SHA" || {
+              echo "::error::tag commit does not match workflow commit"
+              exit 1
+            }
+            git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+              echo "::error::Router releases must point to a commit on main"
+              exit 1
+            }
+          elif [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            echo "::error::unsupported Router workflow event: $GITHUB_EVENT_NAME"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Validate packaging policy
+        run: |
+          bash -n packaging/linux/check_release_surfaces.sh packaging/linux/package_router.sh packaging/linux/test_package_router.sh
+          packaging/linux/test_package_router.sh
+      - name: Install pinned SurfaceCheck
+        run: >-
+          cargo install surfacecheck
+          --git https://github.com/tcballard/SurfaceCheck.git
+          --rev 202768fc0068e303602544dbb7be9d23d76101b5
+          --locked
+          --root "$RUNNER_TEMP/surfacecheck"
+      - name: Check public release facts
+        env:
+          SURFACECHECK_BIN: ${{ runner.temp }}/surfacecheck/bin/surfacecheck
+        run: packaging/linux/check_release_surfaces.sh
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Prove native release architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}:$(uname -m)" in
+            x86_64-unknown-linux-gnu:x86_64 | aarch64-unknown-linux-gnu:aarch64) ;;
+            *) echo "::error::release target does not match runner architecture"; exit 1 ;;
+          esac
+      - name: Install the MSRV Rust toolchain
+        run: |
+          rustup toolchain install 1.85.0 --profile minimal
+          rustup target add "${{ matrix.target }}" --toolchain 1.85.0
+      - name: Build deterministic release archive
+        env:
+          DIST_DIR: ${{ runner.temp }}/router-dist
+          RUSTUP_TOOLCHAIN: 1.85.0
+          TARGET: ${{ matrix.target }}
+        run: packaging/linux/package_router.sh
+      - name: Smoke the packaged Router
+        shell: bash
+        env:
+          DIST_DIR: ${{ runner.temp }}/router-dist
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive="wayfinder-router-$TARGET.tar.gz"
+          cd "$DIST_DIR"
+          sha256sum --check "$archive.sha256"
+          mkdir smoke
+          tar -xzf "$archive" -C smoke
+          binary="smoke/wayfinder-router-$TARGET/wayfinder-router"
+          test "$("$binary" --version)" = "wayfinder-router $VERSION"
+          "$binary" capabilities --json | jq -e --arg version "$VERSION" '.version == $version'
+          "$binary" service --print install | grep -q '^ExecStart='
+      - name: Upload immutable release inputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wayfinder-router-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/router-dist/wayfinder-router-${{ matrix.target }}.tar.gz
+            ${{ runner.temp }}/router-dist/wayfinder-router-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Create draft Router release
+    needs: [preflight, build]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Download verified release inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/router-dist
+          merge-multiple: true
+      - name: Recheck release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/router-dist"
+          for checksum in *.sha256; do sha256sum --check "$checksum"; done
+          test "$(find . -maxdepth 1 -name '*.tar.gz' -type f | wc -l)" -eq 2
+          test "$(find . -maxdepth 1 -name '*.sha256' -type f | wc -l)" -eq 2
+      - name: Create or update draft GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          notes="docs/releases/router-v$VERSION.md"
+          assets=("$RUNNER_TEMP"/router-dist/*)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)"
+            test "$is_draft" = "true" || {
+              echo "::error::refusing to replace assets on a published release"
+              exit 1
+            }
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+            gh release edit "$GITHUB_REF_NAME" \
+              --draft \
+              --title "Wayfinder Router $VERSION" \
+              --notes-file "$notes"
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --verify-tag \
+              --draft \
+              --title "Wayfinder Router $VERSION" \
+              --notes-file "$notes"
+          fi
