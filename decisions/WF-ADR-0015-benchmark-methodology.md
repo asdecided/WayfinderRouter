@@ -48,7 +48,7 @@ aligned to the routing literature.
   cost-savings, and **decision latency** (RouterArena's latency axis — where a structural
   router wins by deciding in microseconds with no model call). A single threshold is one
   point on the **cost-quality curve**; the harness sweeps it and reports the curve plus a
-  cost-aware knee (`PGR × cost_savings`).
+  cost-quality knee (`PGR × cost_savings`; corrected below).
 - **Labels are the oracle; no model is called** to produce a number. Each dataset row
   carries per-model correctness labels, so the harness is reproducible byte-for-byte
   (apart from the wall-clock latency column).
@@ -65,6 +65,27 @@ aligned to the routing literature.
 - **Positioning follows the numbers.** The README claim is the precise, defensible one —
   the only offline, zero-model-call, calibrate-on-your-data, self-hosted structural router
   — not "best PGR" or "nothing like this".
+
+### Erratum (2026-08-18): `knee` is price-ratio invariant
+
+For two arms with fixed per-request costs `C_high > C_low >= 0`, let `f_low(c)`
+be the fraction of prompts sent to the low-cost arm at cut `c`. Savings against
+always using the high-cost arm factorizes as:
+
+```text
+cost_savings(c) = f_low(c) × (1 - C_low / C_high)
+knee(c) = PGR(c) × f_low(c) × (1 - C_low / C_high)
+```
+
+The final price term is positive and constant across candidate cuts. It changes
+the reported savings and knee value, but it cannot change the cut selected by
+the `argmax`. The historical `knee` is therefore a quality/call-fraction
+heuristic, not a price-sensitive optimizer. Changing only the configured cost
+ratio cannot move the selected cut.
+
+Historical benchmark results remain reproducible as reported. WF-ADR-0017
+defines `min-cost` as the price-sensitive objective for any future native
+calibration surface.
 
 ## Consequences
 
