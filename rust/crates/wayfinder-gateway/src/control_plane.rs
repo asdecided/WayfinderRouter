@@ -769,11 +769,7 @@ mod tests {
             },
         ];
         let policy = PolicyLifecycle::draft(
-            PolicyDocument::new_with_default(
-                profiles,
-                bindings,
-                Some("default".to_owned()),
-            )?,
+            PolicyDocument::new_with_default(profiles, bindings, Some("default".to_owned()))?,
             actor()?,
         )?
         .validate()?;
