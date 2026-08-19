@@ -11114,7 +11114,7 @@ mod tests {
         let document = PolicyDocument::new_with_default(
             vec![
                 PolicyProfile::new("default", &RoutingConfig::binary(1.0))?,
-                PolicyProfile::new("workspace", &RoutingConfig::binary(0.0))?,
+                PolicyProfile::new("workspace", &RoutingConfig::binary(0.2))?,
                 PolicyProfile::new("key", &RoutingConfig::binary(1.0))?,
             ],
             vec![
@@ -11147,7 +11147,8 @@ mod tests {
         let lifecycle =
             PolicyLifecycle::bootstrap(&policy, |_| Ok(base), &actor, AuditLog::disabled()).await?;
         let state = lifecycle.runtime_holder().current()?;
-        let payload = json!({"messages": [{"role": "user", "content": "hi"}]});
+        let long_turn = (0..450).map(|_| "word").collect::<Vec<_>>().join(" ");
+        let payload = json!({"messages": [{"role": "user", "content": long_turn}]});
 
         for (secret, profile, model) in [
             ("wf-default", "default", "local"),
