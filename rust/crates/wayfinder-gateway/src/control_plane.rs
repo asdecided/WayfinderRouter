@@ -445,12 +445,13 @@ impl PolicyLifecycle {
             .cloned()
             .ok_or(PolicyError::NoRollbackTarget)?;
         let receipt = new_receipt(&target.policy_version);
+        let current = self.holder.current()?;
         let runtime = self
             .runtimes_by_snapshot
             .get(&target.snapshot_id)
             .cloned()
             .ok_or(PolicyError::MissingRuntime)?
-            .with_runtime_state_from(&self.holder.current()?)
+            .with_runtime_state_from(&current)
             .with_policy_receipt(&receipt);
         self.audit_log
             .record_with_policy(
