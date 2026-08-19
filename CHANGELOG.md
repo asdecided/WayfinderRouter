@@ -8,6 +8,14 @@ details, release history over commit history.
 
 ### Added
 
+- **Versioned control-plane policy lifecycle** (WF-ADR-0071). Secret-free
+  `wf-policy-v1` contracts define reusable routing profiles and client,
+  workspace, or virtual-key bindings. Drafts validate before activation;
+  immutable runtime snapshots expose policy and snapshot identities on request
+  receipts and audit events; failed updates retain the last-known-good data
+  plane; and rollback restores the preceding version without a restart. This is
+  the contract beneath issue #160, not an administrative UI or hosted gateway.
+
 - **Native activation surface** (WF-ADR-0070). `wayfinder-router init` creates a
   no-clobber starter policy, `doctor` validates policy and credential references,
   `connect` prints bounded Codex, Claude Code, and OpenCode configurations, and

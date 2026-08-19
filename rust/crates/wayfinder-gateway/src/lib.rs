@@ -14,6 +14,7 @@ pub mod budget;
 pub mod cache;
 pub mod canary;
 pub mod codex_control;
+pub mod control_plane;
 pub mod decision_policy;
 pub mod delivery;
 pub mod deployment_selection;
@@ -93,6 +94,7 @@ use crate::cache::{
     is_storable,
 };
 use crate::canary::{CANARY_COHORT_HEADER, CANARY_IDENTITY_HEADER, CANARY_RESPONSE_HEADER};
+use crate::control_plane::{PolicyReceipt, UNMANAGED_POLICY_ID, UNMANAGED_SNAPSHOT_ID};
 use crate::decision_policy::{
     AUTO_MODEL, PREFER_HIGH, PREFER_HIGH_ALIAS, PREFER_LOW, ROUTE_ON_HEADER,
     STICKY_COOLDOWN_HEADER, STICKY_HEADER, THRESHOLD_HEADER, TUNING_FIELD, apply_scoring_overrides,
@@ -351,8 +353,7 @@ async fn record_canary_outcome(
         {
             let _ = context
                 .state
-                .audit_log()
-                .record(
+                .record_audit(
                     "canary",
                     "canary.rollback",
                     None,
@@ -409,6 +410,8 @@ const ROUTER_MODEL_HEADER: &str = "x-wayfinder-router-model";
 const ROUTER_SCORE_HEADER: &str = "x-wayfinder-router-score";
 const ROUTER_MODE_HEADER: &str = "x-wayfinder-router-mode";
 const ROUTER_REQUEST_ID_HEADER: &str = "x-wayfinder-router-request-id";
+const ROUTER_POLICY_VERSION_HEADER: &str = "x-wayfinder-policy-version";
+const ROUTER_SNAPSHOT_ID_HEADER: &str = "x-wayfinder-policy-snapshot";
 const ROUTER_WORKSPACE_HEADER: &str = "x-wayfinder-router-workspace";
 const ROUTER_OFFLINE_HEADER: &str = "x-wayfinder-router-offline";
 const ROUTER_DECISION_ONLY_HEADER: &str = "x-wayfinder-router-decision-only";
@@ -760,6 +763,8 @@ pub struct AppState {
     sticky_cooldown: u64,
     slash_directives: bool,
     build_version: Arc<str>,
+    policy_version: Arc<str>,
+    policy_snapshot_id: Arc<str>,
     request_body_limit: usize,
     admission_policy: Arc<AdmissionPolicy>,
     recent: Arc<RecentRoutes>,
@@ -841,6 +846,8 @@ impl AppState {
             sticky_cooldown: 0,
             slash_directives: false,
             build_version,
+            policy_version: Arc::from(UNMANAGED_POLICY_ID),
+            policy_snapshot_id: Arc::from(UNMANAGED_SNAPSHOT_ID),
             request_body_limit: DEFAULT_REQUEST_BODY_LIMIT,
             admission_policy: Arc::new(AdmissionPolicy::default()),
             recent: Arc::new(RecentRoutes::default()),
@@ -893,6 +900,14 @@ impl AppState {
     #[must_use]
     pub const fn with_slash_directives(mut self, enabled: bool) -> Self {
         self.slash_directives = enabled;
+        self
+    }
+
+    /// Stamp one immutable control-plane activation on this runtime snapshot.
+    #[must_use]
+    pub fn with_policy_receipt(mut self, receipt: &PolicyReceipt) -> Self {
+        self.policy_version = Arc::from(receipt.policy_version.clone());
+        self.policy_snapshot_id = Arc::from(receipt.snapshot_id.clone());
         self
     }
 
@@ -1300,6 +1315,18 @@ impl AppState {
         &self.models
     }
 
+    /// Active immutable policy version identity.
+    #[must_use]
+    pub fn policy_version(&self) -> &str {
+        &self.policy_version
+    }
+
+    /// Active immutable runtime snapshot identity.
+    #[must_use]
+    pub fn policy_snapshot_id(&self) -> &str {
+        &self.policy_snapshot_id
+    }
+
     /// Configured named routing presets in source insertion order.
     #[must_use]
     pub fn route_presets(&self) -> &IndexMap<String, RoutePreset> {
@@ -1613,6 +1640,26 @@ impl AppState {
         &self.audit_log
     }
 
+    /// Record an operator event against this immutable policy snapshot.
+    pub async fn record_audit(
+        &self,
+        actor: impl AsRef<str>,
+        action: impl AsRef<str>,
+        before: Option<Value>,
+        after: Option<Value>,
+    ) -> Result<(), audit::AuditError> {
+        self.audit_log
+            .record_with_policy(
+                actor,
+                action,
+                before,
+                after,
+                self.policy_version(),
+                self.policy_snapshot_id(),
+            )
+            .await
+    }
+
     /// Configured spend-budget policy.
     #[must_use]
     pub fn budget_policy(&self) -> &BudgetPolicy {
@@ -1736,6 +1783,8 @@ impl fmt::Debug for AppState {
             .field("sticky_cooldown", &self.sticky_cooldown)
             .field("slash_directives", &self.slash_directives)
             .field("build_version", &self.build_version)
+            .field("policy_version", &self.policy_version)
+            .field("policy_snapshot_id", &self.policy_snapshot_id)
             .field("request_body_limit", &self.request_body_limit)
             .field("admission_policy", &self.admission_policy)
             .field("delivery_configured", &self.delivery.is_some())
@@ -1859,23 +1908,32 @@ pub fn build_data_plane_router(state: AppState) -> Result<Router, DataPlaneError
 /// Reload installation is deliberately owned by the process boundary. A
 /// request can therefore observe either the complete old snapshot or the
 /// complete new snapshot, never a partially mutated configuration.
-pub fn build_reloadable_router(holder: Arc<LastGood<AppState, u128>>) -> Router {
+pub fn build_reloadable_router<V>(holder: Arc<LastGood<AppState, V>>) -> Router
+where
+    V: Clone + Eq + Send + Sync + 'static,
+{
     Router::new()
-        .fallback(reloadable_dispatch)
+        .fallback(reloadable_dispatch::<V>)
         .with_state(holder)
 }
 
 /// Build a managed data plane over immutable last-good configuration snapshots.
-pub fn build_reloadable_data_plane_router(holder: Arc<LastGood<AppState, u128>>) -> Router {
+pub fn build_reloadable_data_plane_router<V>(holder: Arc<LastGood<AppState, V>>) -> Router
+where
+    V: Clone + Eq + Send + Sync + 'static,
+{
     Router::new()
-        .fallback(reloadable_data_plane_dispatch)
+        .fallback(reloadable_data_plane_dispatch::<V>)
         .with_state(holder)
 }
 
-async fn reloadable_dispatch(
-    State(holder): State<Arc<LastGood<AppState, u128>>>,
+async fn reloadable_dispatch<V>(
+    State(holder): State<Arc<LastGood<AppState, V>>>,
     request: Request<Body>,
-) -> Response {
+) -> Response
+where
+    V: Clone + Eq + Send + Sync + 'static,
+{
     let state = match holder.current() {
         Ok(state) => state,
         Err(_) => return internal_error_response(),
@@ -1886,10 +1944,13 @@ async fn reloadable_dispatch(
     }
 }
 
-async fn reloadable_data_plane_dispatch(
-    State(holder): State<Arc<LastGood<AppState, u128>>>,
+async fn reloadable_data_plane_dispatch<V>(
+    State(holder): State<Arc<LastGood<AppState, V>>>,
     request: Request<Body>,
-) -> Response {
+) -> Response
+where
+    V: Clone + Eq + Send + Sync + 'static,
+{
     let state = match holder.current() {
         Ok(state) => state,
         Err(_) => return internal_error_response(),
@@ -2322,8 +2383,7 @@ async fn record_evidence_audit(
 ) -> Result<(), Response> {
     let actor = actor.as_ref().map_or("local", |actor| actor.0.0.as_str());
     state
-        .audit_log()
-        .record(actor, action, None, None)
+        .record_audit(actor, action, None, None)
         .await
         .map_err(audit_unavailable_response)
 }
@@ -2356,8 +2416,7 @@ async fn savings_report(
         Ok(report) => {
             let actor = actor.as_ref().map_or("local", |actor| actor.0.0.as_str());
             if let Err(error) = state
-                .audit_log()
-                .record(
+                .record_audit(
                     actor,
                     "savings.export",
                     None,
@@ -2442,8 +2501,7 @@ async fn router_config(
         .unwrap_or_default();
     let actor = actor.as_ref().map_or("local", |actor| actor.0.0.as_str());
     if let Err(error) = state
-        .audit_log()
-        .record(
+        .record_audit(
             actor,
             "config.export",
             None,
@@ -2954,8 +3012,15 @@ pub(crate) async fn chat_completions(
         chosen = candidate;
         mode = "canary";
     }
-    let mut routing_headers =
-        match decision_headers(&chosen, decision.score, mode, &request_id, offline) {
+    let mut routing_headers = match decision_headers(
+        &chosen,
+        decision.score,
+        mode,
+        &request_id,
+        offline,
+        state.policy_version(),
+        state.policy_snapshot_id(),
+    ) {
             Ok(headers) => headers,
             Err(message) => {
                 return error_response(
@@ -3059,6 +3124,8 @@ pub(crate) async fn chat_completions(
         model: chosen.clone(),
         score: python_round(decision.score, 2),
         mode: mode.to_owned(),
+        policy_version: state.policy_version().to_owned(),
+        snapshot_id: state.policy_snapshot_id().to_owned(),
         ts: timestamp,
         cost: None,
         key: key_id.map(str::to_owned),
@@ -5869,12 +5936,16 @@ fn decision_headers(
     mode: &str,
     request_id: &str,
     offline: bool,
+    policy_version: &str,
+    snapshot_id: &str,
 ) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
     insert_header(&mut headers, ROUTER_MODEL_HEADER, chosen)?;
     insert_header(&mut headers, ROUTER_SCORE_HEADER, &format!("{score:.2}"))?;
     insert_header(&mut headers, ROUTER_MODE_HEADER, mode)?;
     insert_header(&mut headers, ROUTER_REQUEST_ID_HEADER, request_id)?;
+    insert_header(&mut headers, ROUTER_POLICY_VERSION_HEADER, policy_version)?;
+    insert_header(&mut headers, ROUTER_SNAPSHOT_ID_HEADER, snapshot_id)?;
     if offline {
         headers.insert(ROUTER_OFFLINE_HEADER, HeaderValue::from_static("true"));
     }
@@ -7252,12 +7323,10 @@ mod tests {
             .with_runtime_state_from(&previous);
 
         previous
-            .audit_log()
-            .record("system", "before.reload", None, None)
+            .record_audit("system", "before.reload", None, None)
             .await?;
         current
-            .audit_log()
-            .record("system", "after.reload", None, None)
+            .record_audit("system", "after.reload", None, None)
             .await?;
         current.audit_log().shutdown().await?;
 
@@ -8056,8 +8125,10 @@ mod tests {
             Some(std::collections::BTreeSet::from([
                 "mode",
                 "model",
+                "policy_version",
                 "request_id",
                 "score",
+                "snapshot_id",
                 "ts"
             ]))
         );

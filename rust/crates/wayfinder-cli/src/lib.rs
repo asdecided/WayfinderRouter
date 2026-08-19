@@ -469,8 +469,7 @@ pub async fn run_serve_process(
             };
             let loaded = match loaded {
                 Ok(next) => match next
-                    .audit_log()
-                    .record(
+                    .record_audit(
                         "system",
                         "config.reload",
                         None,
@@ -490,8 +489,7 @@ pub async fn run_serve_process(
                     eprintln!("wayfinder-router: config reload rejected: {error}");
                     let _ = current.metrics().record_reload_failure();
                     if let Err(error) = current
-                        .audit_log()
-                        .record(
+                        .record_audit(
                             "system",
                             "config.reload_failed",
                             None,
