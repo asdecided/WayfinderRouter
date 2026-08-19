@@ -366,12 +366,9 @@ impl AuditEvent {
                 .map_or(0, |duration| duration.as_secs()),
             actor,
             action,
-            policy_version: policy_version.map(|value| {
-                bounded_label(value, "unknown", MAX_ACTION_BYTES)
-            }),
-            snapshot_id: snapshot_id.map(|value| {
-                bounded_label(value, "unknown", MAX_ACTION_BYTES)
-            }),
+            policy_version: policy_version
+                .map(|value| bounded_label(value, "unknown", MAX_ACTION_BYTES)),
+            snapshot_id: snapshot_id.map(|value| bounded_label(value, "unknown", MAX_ACTION_BYTES)),
             before,
             after,
         };
