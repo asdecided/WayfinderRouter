@@ -26,6 +26,9 @@ pub struct RecentEntry {
     /// Immutable activation snapshot identity used for this decision.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
+    /// Resolved reusable profile identity for managed policy requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_profile: Option<String>,
     /// Unix timestamp supplied by the invocation boundary.
     pub ts: f64,
     /// Optional realized turn-cost metadata, nested as in the Python API.
@@ -172,6 +175,7 @@ mod tests {
             mode: "scored".to_owned(),
             policy_version: None,
             snapshot_id: None,
+            policy_profile: None,
             ts: 1_700_000_000.0,
             cost: None,
             key: None,
