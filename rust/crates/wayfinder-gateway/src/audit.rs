@@ -653,6 +653,8 @@ mod tests {
             Some("wps1-example"),
         )?;
         assert!(Uuid::parse_str(&event.event_id).is_ok());
+        assert_eq!(event.policy_version.as_deref(), Some("wpv1-example"));
+        assert_eq!(event.snapshot_id.as_deref(), Some("wps1-example"));
         assert_eq!(event.content_sha256.len(), 64);
         assert_eq!(event.content_sha256, event_content_sha256(&event)?);
         let mut changed = event.clone();

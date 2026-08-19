@@ -21,9 +21,11 @@ pub struct RecentEntry {
     /// Policy mode such as `scored` or `pinned`.
     pub mode: String,
     /// Immutable policy content identity used for this decision.
-    pub policy_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_version: Option<String>,
     /// Immutable activation snapshot identity used for this decision.
-    pub snapshot_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
     /// Unix timestamp supplied by the invocation boundary.
     pub ts: f64,
     /// Optional realized turn-cost metadata, nested as in the Python API.
@@ -168,8 +170,8 @@ mod tests {
             model: model.to_owned(),
             score,
             mode: "scored".to_owned(),
-            policy_version: "wpv1-test".to_owned(),
-            snapshot_id: "wps1-test".to_owned(),
+            policy_version: None,
+            snapshot_id: None,
             ts: 1_700_000_000.0,
             cost: None,
             key: None,
