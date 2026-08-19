@@ -66,10 +66,8 @@ pub trait PolicyRepository: Send + Sync {
     fn store_draft(&self, draft: &DraftPolicyVersion) -> Result<(), PolicyRepositoryError>;
 
     /// Persist an immutable validated version.
-    fn store_validated(
-        &self,
-        policy: &ValidatedPolicyVersion,
-    ) -> Result<(), PolicyRepositoryError>;
+    fn store_validated(&self, policy: &ValidatedPolicyVersion)
+    -> Result<(), PolicyRepositoryError>;
 
     /// Load and verify an immutable draft by content identity.
     fn load_draft(
@@ -208,7 +206,10 @@ impl FilePolicyRepository {
         }
     }
 
-    fn load_head(&self, path: &Path) -> Result<Option<PolicyRepositoryHead>, PolicyRepositoryError> {
+    fn load_head(
+        &self,
+        path: &Path,
+    ) -> Result<Option<PolicyRepositoryHead>, PolicyRepositoryError> {
         if !path.exists() {
             return Ok(None);
         }
@@ -248,7 +249,9 @@ impl FilePolicyRepository {
         let Some((generation, path)) = self.head_candidates()?.into_iter().next() else {
             return Ok(None);
         };
-        let head = self.load_head(&path)?.ok_or(PolicyRepositoryError::InvalidHead)?;
+        let head = self
+            .load_head(&path)?
+            .ok_or(PolicyRepositoryError::InvalidHead)?;
         if head.generation != generation {
             return Err(PolicyRepositoryError::InvalidHead);
         }
@@ -440,15 +443,15 @@ impl PolicyRepository for FilePolicyRepository {
                     *last_good_generation,
                     PolicyRecoverySource::LastGood,
                 ) {
-                Ok(Some(recovered)) => Ok(Some(recovered)),
+                    Ok(Some(recovered)) => Ok(Some(recovered)),
                     Ok(None) => Err(primary),
-                Err(last_good) => Err(PolicyRepositoryError::RecoveryUnavailable {
-                    primary: primary.to_string(),
-                    last_good: last_good.to_string(),
-                }),
+                    Err(last_good) => Err(PolicyRepositoryError::RecoveryUnavailable {
+                        primary: primary.to_string(),
+                        last_good: last_good.to_string(),
+                    }),
                 },
                 None => Err(primary),
-            }
+            },
         }
     }
 }
@@ -668,7 +671,10 @@ fn atomic_create(path: &Path, bytes: &[u8]) -> Result<(), PolicyRepositoryError>
         path: parent.to_path_buf(),
         source,
     })?;
-    let filename = path.file_name().and_then(|name| name.to_str()).unwrap_or("policy");
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("policy");
     let stage = parent.join(format!(".{filename}.stage-{}", Uuid::new_v4()));
     let result = (|| {
         let mut options = OpenOptions::new();
