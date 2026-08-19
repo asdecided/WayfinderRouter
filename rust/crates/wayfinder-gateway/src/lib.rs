@@ -11136,33 +11136,16 @@ mod tests {
         let base = AppState::new(
             RoutingConfig::binary(0.5),
             vec![
-                ConfiguredModel::new(
-                    "local",
-                    "http://127.0.0.1:11434/v1",
-                    "local",
-                    None,
-                    true,
-                ),
-                ConfiguredModel::new(
-                    "cloud",
-                    "https://cloud.example/v1",
-                    "cloud",
-                    None,
-                    true,
-                ),
+                ConfiguredModel::new("local", "http://127.0.0.1:11434/v1", "local", None, true),
+                ConfiguredModel::new("cloud", "https://cloud.example/v1", "cloud", None, true),
             ],
             false,
             "test",
         )
         .with_access_policy(access_policy)
         .with_dry_run(true);
-        let lifecycle = PolicyLifecycle::bootstrap(
-            &policy,
-            |_| Ok(base),
-            &actor,
-            AuditLog::disabled(),
-        )
-        .await?;
+        let lifecycle =
+            PolicyLifecycle::bootstrap(&policy, |_| Ok(base), &actor, AuditLog::disabled()).await?;
         let state = lifecycle.runtime_holder().current()?;
         let payload = json!({"messages": [{"role": "user", "content": "hi"}]});
 
@@ -11194,8 +11177,18 @@ mod tests {
                     .and_then(|value| value.to_str().ok()),
                 Some(model)
             );
-            assert!(response.headers().get("x-wayfinder-policy-version").is_some());
-            assert!(response.headers().get("x-wayfinder-policy-snapshot").is_some());
+            assert!(
+                response
+                    .headers()
+                    .get("x-wayfinder-policy-version")
+                    .is_some()
+            );
+            assert!(
+                response
+                    .headers()
+                    .get("x-wayfinder-policy-snapshot")
+                    .is_some()
+            );
         }
         Ok(())
     }
