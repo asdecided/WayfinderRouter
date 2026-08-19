@@ -3124,8 +3124,10 @@ pub(crate) async fn chat_completions(
         model: chosen.clone(),
         score: python_round(decision.score, 2),
         mode: mode.to_owned(),
-        policy_version: state.policy_version().to_owned(),
-        snapshot_id: state.policy_snapshot_id().to_owned(),
+        policy_version: (state.policy_version() != UNMANAGED_POLICY_ID)
+            .then(|| state.policy_version().to_owned()),
+        snapshot_id: (state.policy_snapshot_id() != UNMANAGED_SNAPSHOT_ID)
+            .then(|| state.policy_snapshot_id().to_owned()),
         ts: timestamp,
         cost: None,
         key: key_id.map(str::to_owned),
@@ -5944,8 +5946,10 @@ fn decision_headers(
     insert_header(&mut headers, ROUTER_SCORE_HEADER, &format!("{score:.2}"))?;
     insert_header(&mut headers, ROUTER_MODE_HEADER, mode)?;
     insert_header(&mut headers, ROUTER_REQUEST_ID_HEADER, request_id)?;
-    insert_header(&mut headers, ROUTER_POLICY_VERSION_HEADER, policy_version)?;
-    insert_header(&mut headers, ROUTER_SNAPSHOT_ID_HEADER, snapshot_id)?;
+    if policy_version != UNMANAGED_POLICY_ID {
+        insert_header(&mut headers, ROUTER_POLICY_VERSION_HEADER, policy_version)?;
+        insert_header(&mut headers, ROUTER_SNAPSHOT_ID_HEADER, snapshot_id)?;
+    }
     if offline {
         headers.insert(ROUTER_OFFLINE_HEADER, HeaderValue::from_static("true"));
     }
@@ -8125,10 +8129,8 @@ mod tests {
             Some(std::collections::BTreeSet::from([
                 "mode",
                 "model",
-                "policy_version",
                 "request_id",
                 "score",
-                "snapshot_id",
                 "ts"
             ]))
         );
