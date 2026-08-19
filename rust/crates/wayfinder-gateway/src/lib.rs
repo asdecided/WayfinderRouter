@@ -3048,9 +3048,11 @@ pub(crate) async fn chat_completions(
         mode,
         &request_id,
         offline,
-        state.policy_version(),
-        state.policy_snapshot_id(),
-        policy_profile_id,
+        DecisionPolicyReceipt {
+            version: state.policy_version(),
+            snapshot_id: state.policy_snapshot_id(),
+            profile_id: policy_profile_id,
+        },
     ) {
         Ok(headers) => headers,
         Err(message) => {
@@ -5964,25 +5966,30 @@ fn utc_date_from_unix_days(days: i64) -> Result<UtcDate, LedgerError> {
     )
 }
 
+#[derive(Clone, Copy)]
+struct DecisionPolicyReceipt<'a> {
+    version: &'a str,
+    snapshot_id: &'a str,
+    profile_id: Option<&'a str>,
+}
+
 fn decision_headers(
     chosen: &str,
     score: f64,
     mode: &str,
     request_id: &str,
     offline: bool,
-    policy_version: &str,
-    snapshot_id: &str,
-    policy_profile_id: Option<&str>,
+    policy: DecisionPolicyReceipt<'_>,
 ) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
     insert_header(&mut headers, ROUTER_MODEL_HEADER, chosen)?;
     insert_header(&mut headers, ROUTER_SCORE_HEADER, &format!("{score:.2}"))?;
     insert_header(&mut headers, ROUTER_MODE_HEADER, mode)?;
     insert_header(&mut headers, ROUTER_REQUEST_ID_HEADER, request_id)?;
-    if policy_version != UNMANAGED_POLICY_ID {
-        insert_header(&mut headers, ROUTER_POLICY_VERSION_HEADER, policy_version)?;
-        insert_header(&mut headers, ROUTER_SNAPSHOT_ID_HEADER, snapshot_id)?;
-        if let Some(profile_id) = policy_profile_id {
+    if policy.version != UNMANAGED_POLICY_ID {
+        insert_header(&mut headers, ROUTER_POLICY_VERSION_HEADER, policy.version)?;
+        insert_header(&mut headers, ROUTER_SNAPSHOT_ID_HEADER, policy.snapshot_id)?;
+        if let Some(profile_id) = policy.profile_id {
             insert_header(&mut headers, ROUTER_POLICY_PROFILE_HEADER, profile_id)?;
         }
     }
