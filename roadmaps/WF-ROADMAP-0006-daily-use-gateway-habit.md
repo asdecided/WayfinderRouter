@@ -155,6 +155,9 @@ design reference.
     Ops · workflow. *Job:* create keys, teams, budgets, and routing config at runtime. *Core:*
     deterministic config management. *Effort:* L. *Closes:* admin UIs (LiteLLM, Portkey,
     Vercel, Cloudflare) vs Wayfinder's read-only dashboard. *Longer bet.*
+    **Foundation shipped:** WF-ADR-0071 defines the versioned profile, binding,
+    activation, rollback, receipt, audit, and last-known-good contracts. Issue
+    #160 remains the interface over those contracts.
 
 13. **Showback / chargeback export + a metrics API.**
     Fin · observability. *Job:* feed Wayfinder's cost & savings into a central FinOps tool.

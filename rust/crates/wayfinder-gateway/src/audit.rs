@@ -85,6 +85,12 @@ pub struct AuditEvent {
     pub actor: String,
     /// Stable action name.
     pub action: String,
+    /// Immutable policy content identity active for this event, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_version: Option<String>,
+    /// Immutable runtime snapshot identity active for this event, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
     /// Sanitized state before an operator action, when applicable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub before: Option<Value>,
@@ -100,6 +106,10 @@ struct HashableAuditEvent<'a> {
     timestamp: u64,
     actor: &'a str,
     action: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_version: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     before: Option<&'a Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -206,10 +216,51 @@ impl AuditLog {
         before: Option<Value>,
         after: Option<Value>,
     ) -> Result<(), AuditError> {
+        self.record_optional_policy(actor, action, before, after, None, None)
+            .await
+    }
+
+    /// Queue one event with the active policy and snapshot identities.
+    pub async fn record_with_policy(
+        &self,
+        actor: impl AsRef<str>,
+        action: impl AsRef<str>,
+        before: Option<Value>,
+        after: Option<Value>,
+        policy_version: impl AsRef<str>,
+        snapshot_id: impl AsRef<str>,
+    ) -> Result<(), AuditError> {
+        self.record_optional_policy(
+            actor,
+            action,
+            before,
+            after,
+            Some(policy_version.as_ref()),
+            Some(snapshot_id.as_ref()),
+        )
+        .await
+    }
+
+    async fn record_optional_policy(
+        &self,
+        actor: impl AsRef<str>,
+        action: impl AsRef<str>,
+        before: Option<Value>,
+        after: Option<Value>,
+        policy_version: Option<&str>,
+        snapshot_id: Option<&str>,
+    ) -> Result<(), AuditError> {
         if self.sender.is_none() {
             return Ok(());
         }
-        let event = AuditEvent::new(actor.as_ref(), action.as_ref(), before, after)?;
+        let event = AuditEvent::new(
+            actor.as_ref(),
+            action.as_ref(),
+            before,
+            after,
+            policy_version,
+            snapshot_id,
+        )?;
         let encoded = serde_json::to_string(&event)?;
         let (acknowledge, acknowledged) = oneshot::channel();
         self.try_send(AuditCommand::Record {
@@ -296,6 +347,8 @@ impl AuditEvent {
         action: &str,
         before: Option<Value>,
         after: Option<Value>,
+        policy_version: Option<&str>,
+        snapshot_id: Option<&str>,
     ) -> Result<Self, AuditError> {
         let actor = bounded_label(actor, "unknown", MAX_ACTOR_BYTES);
         let action = bounded_label(action, "unknown", MAX_ACTION_BYTES);
@@ -305,7 +358,7 @@ impl AuditEvent {
             return Err(AuditError::MetadataTooLarge);
         }
         let mut event = Self {
-            schema_version: 1,
+            schema_version: 2,
             event_id: Uuid::new_v4().to_string(),
             content_sha256: String::new(),
             timestamp: SystemTime::now()
@@ -313,6 +366,12 @@ impl AuditEvent {
                 .map_or(0, |duration| duration.as_secs()),
             actor,
             action,
+            policy_version: policy_version.map(|value| {
+                bounded_label(value, "unknown", MAX_ACTION_BYTES)
+            }),
+            snapshot_id: snapshot_id.map(|value| {
+                bounded_label(value, "unknown", MAX_ACTION_BYTES)
+            }),
             before,
             after,
         };
@@ -507,6 +566,8 @@ fn event_content_sha256(event: &AuditEvent) -> Result<String, AuditError> {
         timestamp: event.timestamp,
         actor: &event.actor,
         action: &event.action,
+        policy_version: event.policy_version.as_deref(),
+        snapshot_id: event.snapshot_id.as_deref(),
         before: event.before.as_ref(),
         after: event.after.as_ref(),
     };
@@ -591,6 +652,8 @@ mod tests {
             "config.reload",
             None,
             Some(serde_json::json!({"version": "2"})),
+            Some("wpv1-example"),
+            Some("wps1-example"),
         )?;
         assert!(Uuid::parse_str(&event.event_id).is_ok());
         assert_eq!(event.content_sha256.len(), 64);
@@ -606,7 +669,14 @@ mod tests {
         let log = AuditLog::spawn(None, None, None)?;
         let mut acknowledgements = Vec::new();
         for index in 0..AUDIT_QUEUE_CAPACITY {
-            let event = AuditEvent::new("operator", &format!("action.{index}"), None, None)?;
+            let event = AuditEvent::new(
+                "operator",
+                &format!("action.{index}"),
+                None,
+                None,
+                None,
+                None,
+            )?;
             let (acknowledge, acknowledged) = oneshot::channel();
             log.try_send(AuditCommand::Record {
                 encoded: serde_json::to_string(&event)?,
@@ -614,7 +684,7 @@ mod tests {
             })?;
             acknowledgements.push(acknowledged);
         }
-        let event = AuditEvent::new("operator", "overflow", None, None)?;
+        let event = AuditEvent::new("operator", "overflow", None, None, None, None)?;
         let (acknowledge, _acknowledged) = oneshot::channel();
         assert!(matches!(
             log.try_send(AuditCommand::Record {
