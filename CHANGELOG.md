@@ -8,6 +8,15 @@ details, release history over commit history.
 
 ### Added
 
+- **Durable control-plane policy repository** (WF-ADR-0072). Immutable policy
+  versions can now be stored and verified by content identity before
+  activation. An immutable, generation-guarded activation head preserves
+  bounded rollback lineage, rejects stale administrative writers, and recovers
+  only the preceding verified activation when current state is corrupt. The
+  local file backend is a single-process reference implementation; it adds no
+  request-path storage call, administrative API, UI, provider credential store,
+  or runtime telemetry.
+
 - **Versioned control-plane policy lifecycle** (WF-ADR-0071). Secret-free
   `wf-policy-v1` contracts define reusable routing profiles and client,
   workspace, or virtual-key bindings. Drafts validate before activation;
