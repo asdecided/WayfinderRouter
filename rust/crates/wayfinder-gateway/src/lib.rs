@@ -3021,16 +3021,16 @@ pub(crate) async fn chat_completions(
         state.policy_version(),
         state.policy_snapshot_id(),
     ) {
-            Ok(headers) => headers,
-            Err(message) => {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "wayfinder_router_misconfigured",
-                    message,
-                    request_id_headers(&request_id),
-                );
-            }
-        };
+        Ok(headers) => headers,
+        Err(message) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "wayfinder_router_misconfigured",
+                message,
+                request_id_headers(&request_id),
+            );
+        }
+    };
     if let Err(message) = insert_header(
         &mut routing_headers,
         ROUTER_PRIVACY_POSTURE_HEADER,

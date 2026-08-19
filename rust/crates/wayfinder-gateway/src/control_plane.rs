@@ -417,9 +417,9 @@ impl PolicyLifecycle {
                 &receipt.snapshot_id,
             )
             .await?;
-        let outcome = self
-            .holder
-            .refresh(receipt.snapshot_id.clone(), || Ok::<_, String>(runtime.clone()))?;
+        let outcome = self.holder.refresh(receipt.snapshot_id.clone(), || {
+            Ok::<_, String>(runtime.clone())
+        })?;
         if !matches!(outcome, ReloadOutcome::Reloaded(_)) {
             return Err(PolicyError::SnapshotNotInstalled);
         }
@@ -606,7 +606,10 @@ mod tests {
         let version = draft.validate()?;
         assert_eq!(version.document().schema_version, POLICY_SCHEMA_VERSION);
         assert_eq!(version.drafted_by().issuer, "https://id.example");
-        assert_eq!(version.routing("default"), Some(&RoutingConfig::binary(0.5)));
+        assert_eq!(
+            version.routing("default"),
+            Some(&RoutingConfig::binary(0.5))
+        );
         Ok(())
     }
 
@@ -620,7 +623,9 @@ mod tests {
                 profile_id: "missing".to_owned(),
             }],
         );
-        assert!(matches!(invalid, Err(PolicyError::UnknownProfile(profile)) if profile == "missing"));
+        assert!(
+            matches!(invalid, Err(PolicyError::UnknownProfile(profile)) if profile == "missing")
+        );
         Ok(())
     }
 
@@ -677,8 +682,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn activate_observe_retain_and_rollback_without_restarting_data_plane(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn activate_observe_retain_and_rollback_without_restarting_data_plane()
+    -> Result<(), Box<dyn std::error::Error>> {
         let actor = actor()?;
         let first = PolicyLifecycle::draft(document(0.9)?, actor.clone())?.validate()?;
         let mut lifecycle = PolicyLifecycle::bootstrap(
