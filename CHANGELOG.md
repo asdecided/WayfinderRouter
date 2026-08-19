@@ -13,8 +13,11 @@ details, release history over commit history.
   workspace, or virtual-key bindings. Drafts validate before activation;
   immutable runtime snapshots expose policy and snapshot identities on request
   receipts and audit events; failed updates retain the last-known-good data
-  plane; and rollback restores the preceding version without a restart. This is
-  the contract beneath issue #160, not an administrative UI or hosted gateway.
+  plane; and rollback restores the preceding version without a restart.
+  Authenticated requests now resolve profiles deterministically by virtual key,
+  workspace, trusted client, then default, and managed receipts expose the
+  selected profile. This is the contract beneath issue #160, not an
+  administrative UI or hosted gateway.
 
 - **Native activation surface** (WF-ADR-0070). `wayfinder-router init` creates a
   no-clobber starter policy, `doctor` validates policy and credential references,

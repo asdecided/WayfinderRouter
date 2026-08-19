@@ -41,6 +41,11 @@ The Rust gateway owns a bounded `wf-policy-v1` lifecycle:
    to resolve only at the existing delivery boundary.
 6. Routed-request receipts and prompt-free audit events carry both the policy
    version and snapshot identity.
+7. Every policy has one explicit default profile. Request resolution is
+   deterministic: an authenticated virtual-key binding wins over an
+   authenticated workspace binding, which wins over a trusted host-supplied
+   client binding, followed by the default profile. The public HTTP gateway
+   does not accept caller-asserted client identity.
 
 No administrative HTTP API, UI, persistence engine, hosted execution path, or
 fleet rollout mechanism is added here. Issue #160 may become an interface over
@@ -52,6 +57,11 @@ One running data plane can activate a validated version, expose its identity on
 requests, survive a failed control-plane update, and roll back without being
 restarted. Version ids identify immutable content; snapshot ids distinguish
 separate activations, including rollback.
+
+Managed request receipts also identify the resolved profile. Existing
+single-profile documents infer that sole profile as their default; documents
+with multiple profiles must name the default explicitly. Unmanaged local
+configuration keeps its existing response shape and routing behaviour.
 
 The first implementation keeps lifecycle storage in process. A durable source
 may provide versions later, but it cannot become a request-path dependency.

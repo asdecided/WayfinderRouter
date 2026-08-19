@@ -94,7 +94,10 @@ use crate::cache::{
     is_storable,
 };
 use crate::canary::{CANARY_COHORT_HEADER, CANARY_IDENTITY_HEADER, CANARY_RESPONSE_HEADER};
-use crate::control_plane::{PolicyReceipt, UNMANAGED_POLICY_ID, UNMANAGED_SNAPSHOT_ID};
+use crate::control_plane::{
+    BindingContext, PolicyReceipt, ResolvedPolicyProfile, UNMANAGED_POLICY_ID,
+    UNMANAGED_SNAPSHOT_ID, ValidatedPolicyVersion,
+};
 use crate::decision_policy::{
     AUTO_MODEL, PREFER_HIGH, PREFER_HIGH_ALIAS, PREFER_LOW, ROUTE_ON_HEADER,
     STICKY_COOLDOWN_HEADER, STICKY_HEADER, THRESHOLD_HEADER, TUNING_FIELD, apply_scoring_overrides,
@@ -412,6 +415,7 @@ const ROUTER_MODE_HEADER: &str = "x-wayfinder-router-mode";
 const ROUTER_REQUEST_ID_HEADER: &str = "x-wayfinder-router-request-id";
 const ROUTER_POLICY_VERSION_HEADER: &str = "x-wayfinder-policy-version";
 const ROUTER_SNAPSHOT_ID_HEADER: &str = "x-wayfinder-policy-snapshot";
+const ROUTER_POLICY_PROFILE_HEADER: &str = "x-wayfinder-policy-profile";
 const ROUTER_WORKSPACE_HEADER: &str = "x-wayfinder-router-workspace";
 const ROUTER_OFFLINE_HEADER: &str = "x-wayfinder-router-offline";
 const ROUTER_DECISION_ONLY_HEADER: &str = "x-wayfinder-router-decision-only";
@@ -765,6 +769,7 @@ pub struct AppState {
     build_version: Arc<str>,
     policy_version: Arc<str>,
     policy_snapshot_id: Arc<str>,
+    policy: Option<Arc<ValidatedPolicyVersion>>,
     request_body_limit: usize,
     admission_policy: Arc<AdmissionPolicy>,
     recent: Arc<RecentRoutes>,
@@ -848,6 +853,7 @@ impl AppState {
             build_version,
             policy_version: Arc::from(UNMANAGED_POLICY_ID),
             policy_snapshot_id: Arc::from(UNMANAGED_SNAPSHOT_ID),
+            policy: None,
             request_body_limit: DEFAULT_REQUEST_BODY_LIMIT,
             admission_policy: Arc::new(AdmissionPolicy::default()),
             recent: Arc::new(RecentRoutes::default()),
@@ -908,6 +914,13 @@ impl AppState {
     pub fn with_policy_receipt(mut self, receipt: &PolicyReceipt) -> Self {
         self.policy_version = Arc::from(receipt.policy_version.clone());
         self.policy_snapshot_id = Arc::from(receipt.snapshot_id.clone());
+        self
+    }
+
+    /// Attach one semantically validated policy to this immutable snapshot.
+    #[must_use]
+    pub fn with_validated_policy(mut self, policy: ValidatedPolicyVersion) -> Self {
+        self.policy = Some(Arc::new(policy));
         self
     }
 
@@ -1325,6 +1338,15 @@ impl AppState {
     #[must_use]
     pub fn policy_snapshot_id(&self) -> &str {
         &self.policy_snapshot_id
+    }
+
+    /// Resolve the managed profile for authenticated request identities.
+    #[must_use]
+    pub fn resolve_policy_profile(
+        &self,
+        context: BindingContext<'_>,
+    ) -> Option<ResolvedPolicyProfile<'_>> {
+        self.policy.as_ref().map(|policy| policy.resolve(context))
     }
 
     /// Configured named routing presets in source insertion order.
@@ -1785,6 +1807,7 @@ impl fmt::Debug for AppState {
             .field("build_version", &self.build_version)
             .field("policy_version", &self.policy_version)
             .field("policy_snapshot_id", &self.policy_snapshot_id)
+            .field("managed_policy", &self.policy.is_some())
             .field("request_body_limit", &self.request_body_limit)
             .field("admission_policy", &self.admission_policy)
             .field("delivery_configured", &self.delivery.is_some())
@@ -2655,8 +2678,15 @@ pub(crate) async fn chat_completions(
     let workspace_id = state
         .access_policy()
         .and_then(|policy| access_grant.and_then(|grant| policy.workspace_id(grant)));
+    let resolved_profile = state.resolve_policy_profile(BindingContext {
+        client_id: None,
+        workspace_id,
+        key_id,
+    });
+    let policy_profile_id = resolved_profile.map(|profile| profile.profile_id);
+    let base_routing = resolved_profile.map_or_else(|| state.routing(), |profile| profile.routing);
     let tuning = body.remove(TUNING_FIELD);
-    let routing = match apply_scoring_overrides(state.routing(), tuning.as_ref()) {
+    let routing = match apply_scoring_overrides(base_routing, tuning.as_ref()) {
         Ok(routing) => routing,
         Err(error) => return bad_override_response(&request_id, error.to_string()),
     };
@@ -3020,6 +3050,7 @@ pub(crate) async fn chat_completions(
         offline,
         state.policy_version(),
         state.policy_snapshot_id(),
+        policy_profile_id,
     ) {
         Ok(headers) => headers,
         Err(message) => {
@@ -3128,6 +3159,7 @@ pub(crate) async fn chat_completions(
             .then(|| state.policy_version().to_owned()),
         snapshot_id: (state.policy_snapshot_id() != UNMANAGED_SNAPSHOT_ID)
             .then(|| state.policy_snapshot_id().to_owned()),
+        policy_profile: policy_profile_id.map(str::to_owned),
         ts: timestamp,
         cost: None,
         key: key_id.map(str::to_owned),
@@ -5940,6 +5972,7 @@ fn decision_headers(
     offline: bool,
     policy_version: &str,
     snapshot_id: &str,
+    policy_profile_id: Option<&str>,
 ) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
     insert_header(&mut headers, ROUTER_MODEL_HEADER, chosen)?;
@@ -5949,6 +5982,9 @@ fn decision_headers(
     if policy_version != UNMANAGED_POLICY_ID {
         insert_header(&mut headers, ROUTER_POLICY_VERSION_HEADER, policy_version)?;
         insert_header(&mut headers, ROUTER_SNAPSHOT_ID_HEADER, snapshot_id)?;
+        if let Some(profile_id) = policy_profile_id {
+            insert_header(&mut headers, ROUTER_POLICY_PROFILE_HEADER, profile_id)?;
+        }
     }
     if offline {
         headers.insert(ROUTER_OFFLINE_HEADER, HeaderValue::from_static("true"));
@@ -6173,8 +6209,13 @@ mod tests {
     use crate::{
         access::AccessPolicy,
         admission::{AdmissionError, AdmissionPolicy},
+        audit::AuditLog,
         auth,
         cache::{CacheSettings, CachedResponse, cache_key},
+        control_plane::{
+            AdministrativeIdentity, BindingKind, PolicyBinding, PolicyDocument, PolicyLifecycle,
+            PolicyProfile,
+        },
         server::serve_with_shutdown,
     };
 
@@ -11047,6 +11088,116 @@ mod tests {
             rate_limit: None,
             models: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn managed_policy_resolves_key_then_workspace_then_default_profile() -> TestResult {
+        let mut config = GatewayConfig::default();
+        config
+            .workspaces
+            .insert("engineering".to_owned(), Workspace::default());
+        config
+            .keys
+            .insert("default-key".to_owned(), access_key("wf-default"));
+
+        let mut workspace_key = access_key("wf-workspace");
+        workspace_key.workspace = Some("engineering".to_owned());
+        config
+            .keys
+            .insert("workspace-key".to_owned(), workspace_key);
+
+        let mut direct_key = access_key("wf-direct");
+        direct_key.workspace = Some("engineering".to_owned());
+        config.keys.insert("direct-key".to_owned(), direct_key);
+
+        let access_policy = AccessPolicy::from_gateway_config(&config)?;
+        let document = PolicyDocument::new_with_default(
+            vec![
+                PolicyProfile::new("default", &RoutingConfig::binary(1.0))?,
+                PolicyProfile::new("workspace", &RoutingConfig::binary(0.0))?,
+                PolicyProfile::new("key", &RoutingConfig::binary(1.0))?,
+            ],
+            vec![
+                PolicyBinding {
+                    kind: BindingKind::Workspace,
+                    subject: "engineering".to_owned(),
+                    profile_id: "workspace".to_owned(),
+                },
+                PolicyBinding {
+                    kind: BindingKind::Key,
+                    subject: "direct-key".to_owned(),
+                    profile_id: "key".to_owned(),
+                },
+            ],
+            Some("default".to_owned()),
+        )?;
+        let actor = AdministrativeIdentity::new("test", "operator")?;
+        let policy = PolicyLifecycle::draft(document, actor.clone())?.validate()?;
+        let base = AppState::new(
+            RoutingConfig::binary(0.5),
+            vec![
+                ConfiguredModel::new(
+                    "local",
+                    "http://127.0.0.1:11434/v1",
+                    "local",
+                    None,
+                    true,
+                ),
+                ConfiguredModel::new(
+                    "cloud",
+                    "https://cloud.example/v1",
+                    "cloud",
+                    None,
+                    true,
+                ),
+            ],
+            false,
+            "test",
+        )
+        .with_access_policy(access_policy)
+        .with_dry_run(true);
+        let lifecycle = PolicyLifecycle::bootstrap(
+            &policy,
+            |_| Ok(base),
+            &actor,
+            AuditLog::disabled(),
+        )
+        .await?;
+        let state = lifecycle.runtime_holder().current()?;
+        let payload = json!({"messages": [{"role": "user", "content": "hi"}]});
+
+        for (secret, profile, model) in [
+            ("wf-default", "default", "local"),
+            ("wf-workspace", "workspace", "cloud"),
+            ("wf-direct", "key", "local"),
+        ] {
+            let authorization = format!("Bearer {secret}");
+            let response = post_json(
+                &state,
+                "/v1/chat/completions",
+                &payload,
+                &[("authorization", authorization.as_str())],
+            )
+            .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response
+                    .headers()
+                    .get("x-wayfinder-policy-profile")
+                    .and_then(|value| value.to_str().ok()),
+                Some(profile)
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get("x-wayfinder-router-model")
+                    .and_then(|value| value.to_str().ok()),
+                Some(model)
+            );
+            assert!(response.headers().get("x-wayfinder-policy-version").is_some());
+            assert!(response.headers().get("x-wayfinder-policy-snapshot").is_some());
+        }
+        Ok(())
     }
 
     #[tokio::test]

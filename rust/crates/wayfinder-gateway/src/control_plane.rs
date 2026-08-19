@@ -108,7 +108,7 @@ impl PolicyProfile {
 }
 
 /// Entity class that can be attached to a reusable profile.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BindingKind {
     /// A named client or integration.
@@ -139,6 +139,9 @@ pub struct PolicyDocument {
     pub schema_version: String,
     /// Reusable routing profiles.
     pub profiles: Vec<PolicyProfile>,
+    /// Profile used when no more specific binding matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_profile_id: Option<String>,
     /// Entity-to-profile bindings.
     pub bindings: Vec<PolicyBinding>,
 }
@@ -149,9 +152,27 @@ impl PolicyDocument {
         profiles: Vec<PolicyProfile>,
         bindings: Vec<PolicyBinding>,
     ) -> Result<Self, PolicyError> {
+        let default_profile_id = if profiles.len() == 1 {
+            profiles.first().map(|profile| profile.id.clone())
+        } else {
+            profiles
+                .iter()
+                .find(|profile| profile.id == "default")
+                .map(|profile| profile.id.clone())
+        };
+        Self::new_with_default(profiles, bindings, default_profile_id)
+    }
+
+    /// Construct a document with an explicit default profile.
+    pub fn new_with_default(
+        profiles: Vec<PolicyProfile>,
+        bindings: Vec<PolicyBinding>,
+        default_profile_id: Option<String>,
+    ) -> Result<Self, PolicyError> {
         let document = Self {
             schema_version: POLICY_SCHEMA_VERSION.to_owned(),
             profiles,
+            default_profile_id,
             bindings,
         };
         document.validate_shape()?;
@@ -175,6 +196,12 @@ impl PolicyDocument {
                 return Err(PolicyError::DuplicateProfile(profile.id.clone()));
             }
         }
+        let default_profile_id = self.default_profile_id()?;
+        if !profile_ids.contains(default_profile_id) {
+            return Err(PolicyError::UnknownDefaultProfile(
+                default_profile_id.to_owned(),
+            ));
+        }
         let mut targets = BTreeSet::new();
         for binding in &self.bindings {
             validate_id("binding subject", &binding.subject)?;
@@ -182,13 +209,46 @@ impl PolicyDocument {
             if !profile_ids.contains(&binding.profile_id) {
                 return Err(PolicyError::UnknownProfile(binding.profile_id.clone()));
             }
-            let target = (binding.kind as u8, binding.subject.clone());
+            let target = (binding.kind, binding.subject.clone());
             if !targets.insert(target) {
                 return Err(PolicyError::DuplicateBinding(binding.subject.clone()));
             }
         }
         Ok(())
     }
+
+    fn default_profile_id(&self) -> Result<&str, PolicyError> {
+        match self.default_profile_id.as_deref() {
+            Some(profile_id) => {
+                validate_id("default profile id", profile_id)?;
+                Ok(profile_id)
+            }
+            None if self.profiles.len() == 1 => Ok(&self.profiles[0].id),
+            None => Err(PolicyError::MissingDefaultProfile),
+        }
+    }
+}
+
+/// Authenticated or host-supplied identities available for profile resolution.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BindingContext<'a> {
+    /// Stable client identity supplied by a trusted host adapter, when known.
+    pub client_id: Option<&'a str>,
+    /// Authenticated workspace identity, when known.
+    pub workspace_id: Option<&'a str>,
+    /// Authenticated virtual-key identity, never the credential value.
+    pub key_id: Option<&'a str>,
+}
+
+/// Deterministic result of resolving one request to a policy profile.
+#[derive(Clone, Copy, Debug)]
+pub struct ResolvedPolicyProfile<'a> {
+    /// Selected profile identity.
+    pub profile_id: &'a str,
+    /// Most-specific binding that selected the profile, or `None` for default.
+    pub binding_kind: Option<BindingKind>,
+    /// Parsed immutable routing configuration.
+    pub routing: &'a RoutingConfig,
 }
 
 /// Immutable draft produced before semantic validation.
@@ -225,11 +285,25 @@ impl DraftPolicyVersion {
         for profile in &self.document.profiles {
             routing.insert(profile.id.clone(), profile.validate()?);
         }
+        let bindings = self
+            .document
+            .bindings
+            .iter()
+            .map(|binding| {
+                (
+                    (binding.kind, binding.subject.clone()),
+                    binding.profile_id.clone(),
+                )
+            })
+            .collect();
+        let default_profile_id = Arc::from(self.document.default_profile_id()?.to_owned());
         Ok(ValidatedPolicyVersion {
             version_id: self.version_id,
             document: self.document,
             drafted_by: self.drafted_by,
             routing: Arc::new(routing),
+            bindings: Arc::new(bindings),
+            default_profile_id,
         })
     }
 }
@@ -241,6 +315,8 @@ pub struct ValidatedPolicyVersion {
     document: Arc<PolicyDocument>,
     drafted_by: AdministrativeIdentity,
     routing: Arc<BTreeMap<String, RoutingConfig>>,
+    bindings: Arc<BTreeMap<(BindingKind, String), String>>,
+    default_profile_id: Arc<str>,
 }
 
 impl ValidatedPolicyVersion {
@@ -266,6 +342,32 @@ impl ValidatedPolicyVersion {
     #[must_use]
     pub fn routing(&self, profile_id: &str) -> Option<&RoutingConfig> {
         self.routing.get(profile_id)
+    }
+
+    /// Resolve key, workspace, client, then default profile in that order.
+    #[must_use]
+    pub fn resolve(&self, context: BindingContext<'_>) -> ResolvedPolicyProfile<'_> {
+        for (kind, subject) in [
+            (BindingKind::Key, context.key_id),
+            (BindingKind::Workspace, context.workspace_id),
+            (BindingKind::Client, context.client_id),
+        ] {
+            let Some(subject) = subject else {
+                continue;
+            };
+            if let Some(profile_id) = self.bindings.get(&(kind, subject.to_owned())) {
+                return ResolvedPolicyProfile {
+                    profile_id,
+                    binding_kind: Some(kind),
+                    routing: &self.routing[profile_id],
+                };
+            }
+        }
+        ResolvedPolicyProfile {
+            profile_id: &self.default_profile_id,
+            binding_kind: None,
+            routing: &self.routing[&*self.default_profile_id],
+        }
     }
 }
 
@@ -341,6 +443,7 @@ impl PolicyLifecycle {
             .await?;
         let runtime = runtime
             .with_audit_log(audit_log.clone())
+            .with_validated_policy(policy.clone())
             .with_policy_receipt(&receipt);
         let mut runtimes = BTreeMap::new();
         runtimes.insert(receipt.snapshot_id.clone(), runtime.clone());
@@ -381,6 +484,7 @@ impl PolicyLifecycle {
                 let current = self.holder.current()?;
                 runtime
                     .with_runtime_state_from(&current)
+                    .with_validated_policy(policy.clone())
                     .with_policy_receipt(&receipt)
             }
             Err(error) => {
@@ -501,6 +605,12 @@ pub enum PolicyError {
     /// Profile identities must be unique.
     #[error("duplicate profile '{0}'")]
     DuplicateProfile(String),
+    /// Multi-profile policies require one explicit default.
+    #[error("multi-profile policy requires a default profile")]
+    MissingDefaultProfile,
+    /// The default referenced no defined profile.
+    #[error("default references unknown profile '{0}'")]
+    UnknownDefaultProfile(String),
     /// A binding referenced no defined profile.
     #[error("binding references unknown profile '{0}'")]
     UnknownProfile(String),
@@ -627,6 +737,74 @@ mod tests {
         assert!(
             matches!(invalid, Err(PolicyError::UnknownProfile(profile)) if profile == "missing")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn bindings_resolve_key_then_workspace_then_client_then_default() -> Result<(), PolicyError> {
+        let profiles = [
+            ("default", 0.9),
+            ("client", 0.7),
+            ("workspace", 0.5),
+            ("key", 0.1),
+        ]
+        .into_iter()
+        .map(|(id, threshold)| PolicyProfile::new(id, &RoutingConfig::binary(threshold)))
+        .collect::<Result<Vec<_>, _>>()?;
+        let bindings = vec![
+            PolicyBinding {
+                kind: BindingKind::Client,
+                subject: "codex".to_owned(),
+                profile_id: "client".to_owned(),
+            },
+            PolicyBinding {
+                kind: BindingKind::Workspace,
+                subject: "engineering".to_owned(),
+                profile_id: "workspace".to_owned(),
+            },
+            PolicyBinding {
+                kind: BindingKind::Key,
+                subject: "agent-1".to_owned(),
+                profile_id: "key".to_owned(),
+            },
+        ];
+        let policy = PolicyLifecycle::draft(
+            PolicyDocument::new_with_default(
+                profiles,
+                bindings,
+                Some("default".to_owned()),
+            )?,
+            actor()?,
+        )?
+        .validate()?;
+
+        let key = policy.resolve(BindingContext {
+            client_id: Some("codex"),
+            workspace_id: Some("engineering"),
+            key_id: Some("agent-1"),
+        });
+        assert_eq!(key.profile_id, "key");
+        assert_eq!(key.binding_kind, Some(BindingKind::Key));
+
+        let workspace = policy.resolve(BindingContext {
+            client_id: Some("codex"),
+            workspace_id: Some("engineering"),
+            key_id: None,
+        });
+        assert_eq!(workspace.profile_id, "workspace");
+        assert_eq!(workspace.binding_kind, Some(BindingKind::Workspace));
+
+        let client = policy.resolve(BindingContext {
+            client_id: Some("codex"),
+            workspace_id: None,
+            key_id: None,
+        });
+        assert_eq!(client.profile_id, "client");
+        assert_eq!(client.binding_kind, Some(BindingKind::Client));
+
+        let fallback = policy.resolve(BindingContext::default());
+        assert_eq!(fallback.profile_id, "default");
+        assert_eq!(fallback.binding_kind, None);
         Ok(())
     }
 
