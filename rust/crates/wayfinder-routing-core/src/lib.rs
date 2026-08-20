@@ -1357,7 +1357,13 @@ mod tests {
     #[test]
     fn scoring_is_deterministic_under_a_distilled_lexicon() -> Result<(), CoreError> {
         let lexicon = Lexicon::new(
-            ["asymptotic", "axiomatic", "conjecture", "convexity", "derivable"],
+            [
+                "asymptotic",
+                "axiomatic",
+                "conjecture",
+                "convexity",
+                "derivable",
+            ],
             ["exactly", "must"],
         );
         let mut weights = Weights::default();
@@ -1373,7 +1379,10 @@ mod tests {
         for _ in 0..64 {
             assert_eq!(score_complexity(prompt, &config)?, first);
         }
-        assert!(first.features.get(7).unwrap_or(0) > 0, "distilled terms must fire");
+        assert!(
+            first.features.get(7).unwrap_or(0) > 0,
+            "distilled terms must fire"
+        );
         Ok(())
     }
 }
