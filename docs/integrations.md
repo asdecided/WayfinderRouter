@@ -165,8 +165,10 @@ thinking are not translated yet (WF-DESIGN-0011).
 - **Streaming** works end to end: send `stream: true` and the gateway relays Server-Sent
   Events as they arrive.
 - **Responses API** clients may use `POST /v1/responses` (or `/responses`) with the bounded
-  `model`, `input`, `instructions`, `stream`, `max_output_tokens`, and `temperature` contract.
-  Unsupported fields fail specifically instead of being dropped; see
+  text and multi-turn contract. Function, custom/freeform, and namespaced tools are translated
+  to the selected OpenAI-compatible destination and restored to Responses output items. Codex
+  control fields are validated; only controls with a safe Chat Completions equivalent are
+  forwarded. Unsupported fields fail specifically instead of being dropped; see
   [WF-ADR-0066](../decisions/WF-ADR-0066-bounded-responses-api.md).
 - **Non-text surfaces** are currently fail-closed. Embeddings, image, audio, and batch payloads
   are not advertised or forwarded until their provider adapter, request/response bounds, usage

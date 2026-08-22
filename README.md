@@ -114,7 +114,8 @@ minimal `/livez`/`/readyz` probes only. See
 The gateway exposes:
 
 - OpenAI-compatible: `http://127.0.0.1:8088/v1`
-- OpenAI Responses compatibility: `POST /v1/responses` (bounded text and multi-turn contract)
+- OpenAI Responses compatibility: `POST /v1/responses` (bounded text, multi-turn, and
+  function/custom tool contract used by Codex)
 - Modality compatibility: explicit embeddings, image, audio, and batch capability contracts;
   non-text surfaces remain fail-closed until their reviewed adapters are enabled
 - Anthropic-compatible: `http://127.0.0.1:8088`

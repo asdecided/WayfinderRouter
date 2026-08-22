@@ -32,6 +32,10 @@ wayfinder-router connect codex
 Review the TOML, then add it to `~/.codex/config.toml`. It defines a Wayfinder
 model provider at `http://127.0.0.1:8088/v1` and uses the Responses API. It
 selects Wayfinder's reserved `auto` model, which applies the local policy.
+The bounded adapter accepts Codex's function, custom, and namespaced tool
+contract and restores tool calls to their Responses shape after routing through
+an eligible OpenAI-compatible destination. Hosted Responses-only tools,
+background jobs, and non-text inputs still fail closed.
 The fields follow the current
 [Codex configuration reference](https://developers.openai.com/codex/config-reference/).
 
