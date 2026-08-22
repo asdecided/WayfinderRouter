@@ -1315,4 +1315,74 @@ mod tests {
 
         assert!(matches!(result, Err(CoreError::InvalidContract(_))));
     }
+
+    /// Regression test for issue #171: a short semantically-hard prompt must be able to
+    /// outrank a long, well-structured, trivial one once the semantic features carry
+    /// weight. Under `Weights::default()` the four semantic features are weighted 0.0,
+    /// so the hard prompt scores below the easy one — the documented blind spot.
+    #[test]
+    fn distilled_weights_reverse_the_short_hard_inversion() -> Result<(), CoreError> {
+        let short_hard = "Prove the halting problem is undecidable";
+        let long_easy = concat!(
+            "# Grocery list\n\n",
+            "## Produce\n- apples\n- pears\n- carrots\n- onions\n- potatoes\n",
+            "## Dairy\n- milk\n- butter\n- cheese\n",
+            "## Other\n- bread\n- rice\n- pasta\n",
+        );
+
+        let structural = RoutingConfig::default();
+        assert!(
+            score_complexity(short_hard, &structural)?.score
+                <= score_complexity(long_easy, &structural)?.score,
+            "the structural default is expected to under-rate the short hard prompt",
+        );
+
+        let mut weights = Weights::default();
+        assert!(weights.set("reasoning_term_count", 5.0));
+        let distilled = RoutingConfig {
+            weights,
+            ..RoutingConfig::default()
+        };
+        assert!(
+            score_complexity(short_hard, &distilled)?.score
+                > score_complexity(long_easy, &distilled)?.score,
+            "weighting the distilled lexical feature must reverse the inversion",
+        );
+        Ok(())
+    }
+
+    /// The scored path stays deterministic and self-contained: repeated scoring of the
+    /// same input under the same config yields byte-identical results, with no model
+    /// call, network access or credential involved (WF-ADR-0001).
+    #[test]
+    fn scoring_is_deterministic_under_a_distilled_lexicon() -> Result<(), CoreError> {
+        let lexicon = Lexicon::new(
+            [
+                "asymptotic",
+                "axiomatic",
+                "conjecture",
+                "convexity",
+                "derivable",
+            ],
+            ["exactly", "must"],
+        );
+        let mut weights = Weights::default();
+        assert!(weights.set("reasoning_term_count", 5.0));
+        let config = RoutingConfig {
+            weights,
+            lexicon,
+            ..RoutingConfig::default()
+        };
+        let prompt = "Show the conjecture is derivable from an axiomatic base.";
+
+        let first = score_complexity(prompt, &config)?;
+        for _ in 0..64 {
+            assert_eq!(score_complexity(prompt, &config)?, first);
+        }
+        assert!(
+            first.features.get(7).unwrap_or(0) > 0,
+            "distilled terms must fire"
+        );
+        Ok(())
+    }
 }
