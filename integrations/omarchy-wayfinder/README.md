@@ -1,13 +1,13 @@
 # Wayfinder for Omarchy
 
-Wayfinder makes the existing Rust gateway feel native in Omarchy Quattro. The
-bar widget shows whether the local service is running and opens a compact panel
-with recent routes, local-versus-hosted distribution, model readiness, savings,
-and the OpenAI-compatible endpoint.
+Wayfinder is the model router built for Omarchy. One plugin installs the native
+Rust Router, gives supported coding agents a shared local endpoint, and exposes
+health, recent routes, local-versus-hosted distribution, model readiness, and
+savings in the Omarchy bar.
 
-The plugin is a control surface. Routing remains inside the independently
-supervised `wayfinder-router` process, so reloading or disabling the Omarchy
-shell does not interrupt requests.
+The plugin is the flagship product surface; the independently supervised
+`wayfinder-router` process remains the only routing authority. Reloading or
+disabling the Omarchy shell does not interrupt requests.
 
 ## Requirements
 

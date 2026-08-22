@@ -1,19 +1,20 @@
 # Wayfinder
 
-**Local execution policy for AI.**
+**The model router built for Omarchy.**
 
-Wayfinder sits between your AI clients and your local runtimes, account-backed
-models, and API providers. It decides on your machine which eligible destination
-should handle each request, then resolves credentials only for that delivery.
-The decision path is deterministic, offline, and implemented in Rust.
+Wayfinder gives Omarchy developers one local endpoint for the AI tools and
+models already on their machine. It selects an eligible local, account-backed,
+or API model for each request, then records a deterministic receipt explaining
+the choice.
 
-Build the current Router and create a no-clobber local policy:
+Install the flagship Omarchy experience:
 
 ```sh
-cargo install --path rust/crates/wayfinder-cli --locked
+omarchy plugin add https://github.com/asdecided/omarchy-wayfinder.git
+cd ~/.config/omarchy/plugins/io.github.asdecided.wayfinder
+./install.sh
 wayfinder-router init
 wayfinder-router doctor
-wayfinder-router serve
 ```
 
 Point Codex, Claude Code, or OpenCode at the same loopback policy with
@@ -21,10 +22,23 @@ Point Codex, Claude Code, or OpenCode at the same loopback policy with
 [verified coding-agent quick starts](docs/coding-agent-quickstarts.md), or run
 `wayfinder-router open` to inspect local routing decisions.
 
-Wayfinder Desktop embeds the same Router inside its signed application bundle;
-no Python runtime, package, or fallback is required.
+Underneath the plugin, Wayfinder Router remains a portable Rust project with no
+Omarchy runtime dependency. The scored decision path stays offline,
+deterministic, and keyless; credentials are resolved only for delivery.
 
 ## Products
+
+### Wayfinder for Omarchy
+
+The Omarchy plugin is Wayfinder's flagship product surface. It installs the
+checksum-verified Router release, manages its independent `systemd --user`
+service, and exposes health, recent routes, model readiness, local-versus-hosted
+usage, and savings in the native Omarchy bar.
+
+The shell never becomes the routing authority and never takes custody of
+provider credentials. Reloading or disabling the plugin does not interrupt the
+Router. See the [plugin source](https://github.com/asdecided/omarchy-wayfinder)
+and [Omarchy-first roadmap](roadmaps/WF-ROADMAP-0017-omarchy-first.md).
 
 ### Wayfinder Desktop
 
@@ -42,10 +56,10 @@ Desktop releases use SemVer and `desktop-v*` tags. See
 
 ### Wayfinder for iPhone and iPad
 
-Native standalone iPhone and iPad apps are planned for v0.2.0. They embed the
-same authoritative Rust routing core and execute approved on-device or direct
-cloud providers without requiring a Mac or localhost gateway. Optional Mac
-pairing follows in v0.2.1 as an additional provider.
+The native iPhone and iPad roadmap is paused while the project focuses on the
+Omarchy developer experience. Its accepted architecture remains recorded so
+work can resume without changing the portable routing core or weakening
+provider and privacy boundaries.
 
 The governing contracts are
 [`WF-ROADMAP-0016`](roadmaps/WF-ROADMAP-0016-native-mobile-v0.2.md),
@@ -56,7 +70,7 @@ Mobile conversation persistence is governed by
 The thread-first mobile interaction contract is
 [`WF-DESIGN-0020`](designs/WF-DESIGN-0020-mobile-chat-shell.md).
 
-### Rust gateway
+### Portable Router
 
 The Rust workspace contains the deterministic scoring core, configuration
 parser, provider clients, bounded HTTP gateway, service integration, native XPC

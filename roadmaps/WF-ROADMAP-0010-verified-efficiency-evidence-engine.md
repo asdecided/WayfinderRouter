@@ -2,6 +2,8 @@
 schema_version: 1
 id: WF-ROADMAP-0010
 type: roadmap
+status: maintenance-only
+updated: 2026-08-22
 tags: [evidence, shadow-mode, canary, rollout, enterprise, trust, redis, otel, oidc, audit, finops, benchmarks]
 ---
 
@@ -9,7 +11,10 @@ tags: [evidence, shadow-mode, canary, rollout, enterprise, trust, redis, otel, o
 
 ## Status
 
-Active — Rust enterprise substrate
+Maintenance-only since 2026-08-22 under WF-ADR-0073. Existing safety and
+portability contracts remain supported, but fleet evidence, OIDC, Redis,
+Kubernetes, and enterprise rollout work are no longer active product priorities.
+New work from this roadmap must directly support WF-ROADMAP-0017.
 
 ## Rust runtime amendment (2026-08-01)
 
