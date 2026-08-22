@@ -15,6 +15,7 @@ pub mod cache;
 pub mod canary;
 pub mod codex_control;
 pub mod control_plane;
+pub mod control_plane_repository;
 pub mod decision_policy;
 pub mod delivery;
 pub mod deployment_selection;
