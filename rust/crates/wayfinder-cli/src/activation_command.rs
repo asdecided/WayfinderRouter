@@ -1,27 +1,19 @@
 //! Explicit, no-clobber activation commands for the native Router.
 
-use std::collections::BTreeSet;
-use std::fs;
 use std::io::{self, Write};
-use std::net::{SocketAddr, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
-use std::time::Duration;
 
-use serde_json::json;
-use wayfinder_config::gateway::gateway_config_from_toml;
-use wayfinder_config::{
-    CONFIG_PATH_ENV, TierOrderPolicy, find_config_file, routing_config_from_toml,
-};
+#[cfg(test)]
+use std::fs;
 
 use crate::app_setup_command::{preset_config, write_new_config};
-use crate::{EXIT_CONFIG, EXIT_OK, EXIT_USAGE, expand_tilde, write_error, write_output};
+use crate::{EXIT_OK, EXIT_USAGE, expand_tilde, write_error, write_output};
 
 const DEFAULT_CONFIG: &str = "wayfinder-router.toml";
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8088";
 const INIT_HELP: &str =
     "usage: wayfinder-router init [--preset local|hybrid|openai|gemini|apple-local] [--path PATH]";
-const DOCTOR_HELP: &str = "usage: wayfinder-router doctor [--config PATH] [--json]";
 const CONNECT_HELP: &str =
     "usage: wayfinder-router connect codex|claude-code|opencode [--endpoint URL]";
 const OPEN_HELP: &str = "usage: wayfinder-router open [--print]";
@@ -77,127 +69,6 @@ pub(crate) fn run_init(
         ),
         Err(error) => usage_error(stderr, &format!("cannot write {}: {error}", path.display())),
     }
-}
-
-pub(crate) fn run_doctor(
-    arguments: &[String],
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> i32 {
-    if wants_help(arguments) {
-        write_output(stdout, DOCTOR_HELP);
-        return EXIT_OK;
-    }
-    let mut explicit = std::env::var_os(CONFIG_PATH_ENV)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .map(expand_tilde);
-    let mut json_output = false;
-    let mut index = 0;
-    while let Some(argument) = arguments.get(index) {
-        match argument.as_str() {
-            "--json" => json_output = true,
-            "--config" => match arguments.get(index + 1) {
-                Some(value) => {
-                    explicit = Some(expand_tilde(PathBuf::from(value)));
-                    index += 1;
-                }
-                None => return usage_error(stderr, "--config needs a value"),
-            },
-            value => return usage_error(stderr, &format!("unrecognized doctor argument: {value}")),
-        }
-        index += 1;
-    }
-    let path = find_config_file(Path::new("."), explicit.as_deref())
-        .or(explicit)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG));
-    let source = match fs::read_to_string(&path) {
-        Ok(source) => source,
-        Err(error) => {
-            write_error(
-                stderr,
-                &format!("wayfinder-router: cannot read {}: {error}", path.display()),
-            );
-            return EXIT_CONFIG;
-        }
-    };
-    if let Err(error) = routing_config_from_toml(
-        &source,
-        &path.display().to_string(),
-        None,
-        TierOrderPolicy::StrictInput,
-    ) {
-        write_error(stderr, &format!("wayfinder-router: {error}"));
-        return EXIT_CONFIG;
-    }
-    let gateway = match gateway_config_from_toml(&source, &path.display().to_string()) {
-        Ok(gateway) => gateway,
-        Err(error) => {
-            write_error(stderr, &format!("wayfinder-router: {error}"));
-            return EXIT_CONFIG;
-        }
-    };
-    let mut required = BTreeSet::new();
-    for model in gateway.models.values() {
-        if let Some(name) = &model.api_key_env {
-            required.insert(name.clone());
-        }
-        for deployment in &model.deployments {
-            if let Some(name) = &deployment.api_key_env {
-                required.insert(name.clone());
-            }
-        }
-    }
-    let missing = required
-        .into_iter()
-        .filter(|name| std::env::var_os(name).is_none_or(|value| value.is_empty()))
-        .collect::<Vec<_>>();
-    let gateway_reachable = SocketAddr::from(([127, 0, 0, 1], 8_088));
-    let gateway_reachable =
-        TcpStream::connect_timeout(&gateway_reachable, Duration::from_millis(200)).is_ok();
-    let healthy = !gateway.models.is_empty() && missing.is_empty();
-    if json_output {
-        let payload = json!({
-            "schema_version": "1",
-            "ok": healthy,
-            "config": path,
-            "destinations": gateway.models.len(),
-            "missing_environment": missing,
-            "gateway_reachable": gateway_reachable,
-            "gateway": DEFAULT_ENDPOINT,
-        });
-        if serde_json::to_writer_pretty(&mut *stdout, &payload).is_err()
-            || writeln!(stdout).is_err()
-        {
-            return EXIT_CONFIG;
-        }
-    } else {
-        write_output(stdout, &format!("policy     ok ({})", path.display()));
-        write_output(stdout, &format!("destinations {}", gateway.models.len()));
-        write_output(
-            stdout,
-            &format!(
-                "credentials {}",
-                if missing.is_empty() {
-                    "ok".to_owned()
-                } else {
-                    format!("missing {}", missing.join(", "))
-                }
-            ),
-        );
-        write_output(
-            stdout,
-            &format!(
-                "gateway    {} ({DEFAULT_ENDPOINT})",
-                if gateway_reachable {
-                    "reachable"
-                } else {
-                    "not running"
-                }
-            ),
-        );
-    }
-    if healthy { EXIT_OK } else { EXIT_CONFIG }
 }
 
 pub(crate) fn run_connect(
@@ -360,35 +231,6 @@ mod tests {
             ),
             EXIT_USAGE
         );
-    }
-
-    #[test]
-    fn doctor_reports_a_valid_local_policy_without_calling_a_provider()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!("wayfinder-doctor-{}", uuid::Uuid::new_v4()));
-        let path = root.join("wayfinder-router.toml");
-        fs::create_dir_all(&root)?;
-        fs::write(&path, preset_config("local").ok_or("missing local preset")?)?;
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        assert_eq!(
-            run_doctor(
-                &[
-                    "--config".to_owned(),
-                    path.display().to_string(),
-                    "--json".to_owned(),
-                ],
-                &mut stdout,
-                &mut stderr,
-            ),
-            EXIT_OK
-        );
-        let payload: serde_json::Value = serde_json::from_slice(&stdout)?;
-        assert_eq!(payload["ok"], true);
-        assert_eq!(payload["destinations"], 1);
-        assert_eq!(payload["missing_environment"], json!([]));
-        fs::remove_dir_all(root)?;
-        Ok(())
     }
 
     #[test]

@@ -2424,6 +2424,7 @@ name = "wayfinder-cli"
 version = "2026.8.0"
 dependencies = [
  "serde_json",
+ "sha2",
  "thiserror",
  "tokio",
  "uuid",
