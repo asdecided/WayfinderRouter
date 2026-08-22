@@ -2281,7 +2281,7 @@ async fn evidence_report_json(
 ) -> Response {
     let report = state.evidence_report();
     if let Err(error) = record_evidence_audit(&state, actor, "evidence.export.json").await {
-        return error;
+        return *error;
     }
     Json(report).into_response()
 }
@@ -2292,7 +2292,7 @@ async fn evidence_report_text(
 ) -> Response {
     let report = state.evidence_report();
     if let Err(error) = record_evidence_audit(&state, actor, "evidence.export.text").await {
-        return error;
+        return *error;
     }
     (
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -2336,7 +2336,7 @@ async fn canary_status(
         SharedCanarySnapshot::default()
     };
     if let Err(error) = record_evidence_audit(&state, actor, "canary.status").await {
-        return error;
+        return *error;
     }
     Json(json!({
         "schema_version": "wf-canary-v1",
@@ -2394,7 +2394,7 @@ async fn evidence_labels(
         }
     };
     if let Err(error) = record_evidence_audit(&state, actor, "evidence.labels").await {
-        return error;
+        return *error;
     }
     Json(json!({"accepted": accepted})).into_response()
 }
@@ -2403,12 +2403,12 @@ async fn record_evidence_audit(
     state: &AppState,
     actor: Option<Extension<audit::AuditActor>>,
     action: &str,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     let actor = actor.as_ref().map_or("local", |actor| actor.0.0.as_str());
     state
         .record_audit(actor, action, None, None)
         .await
-        .map_err(audit_unavailable_response)
+        .map_err(|error| Box::new(audit_unavailable_response(error)))
 }
 
 #[derive(Serialize)]
