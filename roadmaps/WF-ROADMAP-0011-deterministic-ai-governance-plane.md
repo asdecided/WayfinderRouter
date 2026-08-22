@@ -2,6 +2,8 @@
 schema_version: 1
 id: WF-ROADMAP-0011
 type: roadmap
+status: superseded
+updated: 2026-08-22
 tags: [governance, policy, identity, scim, agents, fleet, mdm, chargeback, audit, compliance, enterprise]
 ---
 
@@ -9,7 +11,9 @@ tags: [governance, policy, identity, scim, agents, fleet, mdm, chargeback, audit
 
 ## Status
 
-Proposed
+Superseded on 2026-08-22 by WF-ADR-0073 and WF-ROADMAP-0017. This document
+remains as historical design context; it is not an active source of product
+scope or pull-request priority.
 
 ## Context
 

@@ -2,8 +2,9 @@
 schema_version: 1
 id: WF-ROADMAP-0016
 type: roadmap
-status: accepted
+status: paused
 date: 2026-07-24
+updated: 2026-08-22
 tags: [ios, ipados, v0.2.0, v0.2.1, swiftui, rust, routing, providers, pairing]
 ---
 
@@ -21,8 +22,9 @@ optional trusted-host destinations.
 
 ## Status
 
-Accepted for phased implementation. Phase 0 documentation is the first pull
-request. No UI, provider, FFI, or pairing implementation belongs in that PR.
+Paused on 2026-08-22 by WF-ADR-0073 while Wayfinder focuses on Omarchy. The
+accepted mobile architecture and security boundaries remain valid, but this
+roadmap does not currently authorize implementation PRs.
 
 ## Releases
 
