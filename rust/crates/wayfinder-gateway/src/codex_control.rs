@@ -281,7 +281,7 @@ async fn login(State(state): State<AppState>, request: Request<Body>) -> Respons
     };
     let payload = match json_request::<LoginRequest>(&state, request).await {
         Ok(payload) => payload,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     account_result(control.login(payload.flow.into()).await)
 }
@@ -293,7 +293,7 @@ async fn cancel_login(State(state): State<AppState>, request: Request<Body>) -> 
     };
     let payload = match json_request::<CancelLoginRequest>(&state, request).await {
         Ok(payload) => payload,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if !valid_text(&payload.login_id, MAX_LOGIN_ID_BYTES) {
         return bad_json_response();
@@ -307,7 +307,7 @@ async fn logout(State(state): State<AppState>, request: Request<Body>) -> Respon
         Err(response) => return *response,
     };
     if let Err(response) = json_request::<EmptyRequest>(&state, request).await {
-        return response;
+        return *response;
     }
     account_result(control.logout().await)
 }
@@ -347,11 +347,11 @@ fn authorized_json_control(
 async fn json_request<T: for<'de> Deserialize<'de>>(
     state: &AppState,
     request: Request<Body>,
-) -> Result<T, Response> {
+) -> Result<T, Box<Response>> {
     let bytes = to_bytes(request.into_body(), state.request_body_limit())
         .await
-        .map_err(|_error| bad_json_response())?;
-    serde_json::from_slice(&bytes).map_err(|_error| bad_json_response())
+        .map_err(|_error| Box::new(bad_json_response()))?;
+    serde_json::from_slice(&bytes).map_err(|_error| Box::new(bad_json_response()))
 }
 
 fn account_result(result: Result<CodexAccountState, CodexControlError>) -> Response {
