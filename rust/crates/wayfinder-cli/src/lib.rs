@@ -8,6 +8,7 @@ mod apple_foundation_live;
 mod calibrate_command;
 mod codex_app_server;
 mod config_command;
+mod doctor_command;
 mod service_command;
 
 use std::collections::BTreeMap;
@@ -163,7 +164,7 @@ pub fn run(
         }
         "route" => run_route(&arguments[1..], stdin, stdout, stderr),
         "init" => activation_command::run_init(&arguments[1..], stdout, stderr),
-        "doctor" => activation_command::run_doctor(&arguments[1..], stdout, stderr),
+        "doctor" => doctor_command::run_doctor(&arguments[1..], stdout, stderr),
         "connect" => activation_command::run_connect(&arguments[1..], stdout, stderr),
         "open" => activation_command::run_open(&arguments[1..], stdout, stderr),
         "calibrate" => calibrate_command::run_calibrate(&arguments[1..], stdin, stdout, stderr),

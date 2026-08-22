@@ -633,6 +633,100 @@ trait ServiceOperations {
 
 struct RealServiceOperations;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ServiceInspection {
+    pub(crate) platform: &'static str,
+    pub(crate) unit_file: Option<PathBuf>,
+    pub(crate) installed: bool,
+    pub(crate) manager_available: bool,
+    pub(crate) state: String,
+}
+
+pub(crate) fn inspect_service() -> ServiceInspection {
+    let mut operations = RealServiceOperations;
+    let platform = operations.platform();
+    let platform_name = match platform {
+        ServicePlatform::MacOs => "launchd",
+        ServicePlatform::Linux => "systemd-user",
+        ServicePlatform::Other => "unsupported",
+    };
+    if platform == ServicePlatform::Other {
+        return ServiceInspection {
+            platform: platform_name,
+            unit_file: None,
+            installed: false,
+            manager_available: false,
+            state: "unsupported".to_owned(),
+        };
+    }
+    let Ok(home) = operations.home_dir() else {
+        return ServiceInspection {
+            platform: platform_name,
+            unit_file: None,
+            installed: false,
+            manager_available: false,
+            state: "home-unavailable".to_owned(),
+        };
+    };
+    let unit_file = match platform {
+        ServicePlatform::MacOs => agent_path(Some(home.as_path())).ok(),
+        ServicePlatform::Linux => systemd_unit_path(Some(home.as_path())).ok(),
+        ServicePlatform::Other => None,
+    };
+    let installed = unit_file
+        .as_deref()
+        .is_some_and(|path| operations.is_file(path));
+    let manager_name = match platform {
+        ServicePlatform::MacOs => "launchctl",
+        ServicePlatform::Linux => "systemctl",
+        ServicePlatform::Other => unreachable!("unsupported platform returned above"),
+    };
+    let manager = operations.which(manager_name);
+    let manager_available = manager.is_some();
+    let state = if !installed {
+        "absent".to_owned()
+    } else if let Some(manager) = manager {
+        match platform {
+            ServicePlatform::Linux => operations
+                .run_manager(
+                    &manager,
+                    &[
+                        "--user".to_owned(),
+                        "is-active".to_owned(),
+                        SYSTEMD_UNIT_NAME.to_owned(),
+                    ],
+                )
+                .ok()
+                .and_then(|output| output.stdout_detail())
+                .unwrap_or_else(|| "unknown".to_owned()),
+            ServicePlatform::MacOs => match operations.current_uid() {
+                Ok(uid) => {
+                    let target = format!("gui/{uid}/{LAUNCHD_LABEL}");
+                    if operations
+                        .run_manager(&manager, &["print".to_owned(), target])
+                        .is_ok_and(|output| output.success)
+                    {
+                        "active".to_owned()
+                    } else {
+                        "inactive".to_owned()
+                    }
+                }
+                Err(_) => "unknown".to_owned(),
+            },
+            ServicePlatform::Other => unreachable!("unsupported platform returned above"),
+        }
+    } else {
+        "manager-unavailable".to_owned()
+    };
+    ServiceInspection {
+        platform: platform_name,
+        unit_file,
+        installed,
+        manager_available,
+        state,
+    }
+}
+
 impl ServiceOperations for RealServiceOperations {
     fn platform(&self) -> ServicePlatform {
         detect_platform(None)
@@ -843,7 +937,7 @@ fn parse_health_response(response: &[u8]) -> String {
     }
 }
 
-fn find_executable(name: &str) -> Option<PathBuf> {
+pub(crate) fn find_executable(name: &str) -> Option<PathBuf> {
     let name = Path::new(name);
     if name.components().count() > 1 {
         return is_executable_file(name).then(|| name.to_path_buf());
