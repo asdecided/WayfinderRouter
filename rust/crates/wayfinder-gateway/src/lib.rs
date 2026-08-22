@@ -7863,12 +7863,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn responses_stream_restores_codex_custom_tool_calls() -> TestResult {
+        let chunks = vec![
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_patch\",\"function\":{\"name\":\"apply_patch\",\"arguments\":\"{\\\"input\\\":\\\"*** Begin\"}}]}}]}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\" Patch\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n",
+            )),
+        ];
+        let (state, _) = streaming_live_state(
+            &GatewayConfig::default(),
+            BTreeMap::from([(
+                "local".to_owned(),
+                VecDeque::from([ScriptedStreamOutcome::Chunks(chunks)]),
+            )]),
+        )?;
+        let response = post_json(
+            &state,
+            "/v1/responses",
+            &json!({
+                "model": "local",
+                "input": [{"type": "message", "role": "user", "content": "edit it"}],
+                "tools": [{
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "Apply a patch",
+                    "format": {"type": "grammar", "syntax": "lark", "definition": "start: /.+/"}
+                }],
+                "tool_choice": "auto",
+                "parallel_tool_calls": true,
+                "stream": true
+            }),
+            &[],
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let stream_text =
+            String::from_utf8(to_bytes(response.into_body(), usize::MAX).await?.to_vec())?;
+        assert_eq!(
+            stream_text
+                .matches("event: response.output_item.done")
+                .count(),
+            1
+        );
+        assert!(stream_text.contains("\"type\":\"custom_tool_call\""));
+        assert!(stream_text.contains("\"name\":\"apply_patch\""));
+        assert!(stream_text.contains("*** Begin Patch"));
+        assert_eq!(stream_text.matches("event: response.completed").count(), 1);
+        assert_eq!(stream_text.matches("event: response.failed").count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn responses_reject_unknown_fields_and_oversized_history_specifically() -> TestResult {
         let state = configured_state();
         let unknown = post_json(
             &state,
             "/v1/responses",
-            &json!({"model": "auto", "input": "hello", "tools": []}),
+            &json!({"model": "auto", "input": "hello", "background": true}),
             &[],
         )
         .await?;
@@ -7881,7 +7934,7 @@ mod tests {
         assert!(
             unknown_body["error"]["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("tools"))
+                .is_some_and(|message| message.contains("background"))
         );
 
         let oversized_state = AppState::new(RoutingConfig::binary(0.5), Vec::new(), false, "test")
