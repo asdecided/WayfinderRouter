@@ -23,6 +23,11 @@ live in `asdecided/WayfinderRouter`.
 The plugin never stores provider credentials. It reads only the gateway's
 prompt-free local status surfaces.
 
+See the exact [supported versions and evidence](docs/compatibility.md) before
+installing on a moving Quattro system. Support claims are pinned to reviewed
+Omarchy, Quickshell, Router, and coding-agent contracts rather than inferred
+from generic compatibility.
+
 ## Install
 
 ```sh
@@ -55,12 +60,28 @@ specific error and can be rechecked after repair. Missing provider environment
 is listed by variable name but does not prevent the local service from being
 installed. Interrupted setup is safe to resume from the bar.
 
+For bounded diagnostic commands, source update steps, and current rollback
+limits, use the [troubleshooting guide](docs/troubleshooting.md).
+
 The Router binary is installed to `~/.local/bin` by default. Set
 `WAYFINDER_BIN_DIR` before running the installer when another user-owned binary
 directory is required. Router upgrades remain explicit plugin changes: the
 release version and both architecture digests are reviewed before these pins
 move. The installer records the exact release, target, archive digest, binary
-digest, and user-owned path for a binary that it installs.
+digest, and user-owned path for a binary that it installs. When a later reviewed
+plugin pin changes, upgrade only that plugin-owned binary with:
+
+```sh
+./install.sh --upgrade-router
+```
+
+The installer verifies the active digest, stages the new binary on the target
+filesystem, preserves the previous verified binary as last known good, and
+atomically promotes it. Roll back with `./install.sh --rollback-router`.
+Interrupted transactions recover automatically; `./install.sh --recover-router`
+also makes that recovery explicit. Independently installed or modified Router
+binaries are never replaced. Promotion changes the on-disk executable; restart
+`wayfinder-router.service` from the panel after upgrade or rollback to run it.
 
 Omarchy clones third-party plugins disabled so their source can be reviewed
 before enablement. The script performs the explicit enable step.
@@ -203,7 +224,9 @@ binary that this plugin installed, use:
 
 Removal succeeds only when the recorded path is inside the current user's home
 directory and the executable still matches its installation digest. A missing,
-modified, symlinked, or independently installed Router is never deleted.
+modified, symlinked, or independently installed Router is never deleted. An
+explicit owned-Router removal also removes its plugin-owned last-known-good
+backup and transaction metadata.
 
 ## Validate
 
@@ -211,9 +234,10 @@ modified, symlinked, or independently installed Router is never deleted.
 node scripts/validate.mjs
 node test/model.test.mjs
 bash test/install.test.sh
+bash test/router-lifecycle.test.sh
 bash test/codex-smoke.sh        # Codex 0.149.0 + candidate Router
 bash test/claude-code-smoke.sh  # Claude Code 2.1.241 + candidate Router
-bash -n install.sh uninstall.sh
+bash -n install.sh uninstall.sh scripts/router-lifecycle.sh
 omarchy plugin validate  # when run on Omarchy Quattro
 ```
 

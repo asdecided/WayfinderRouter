@@ -133,10 +133,22 @@ jobs:
           node-version: "22"
       - name: Validate the Omarchy manifest and package
         run: node integrations/omarchy-wayfinder/scripts/validate.mjs
+      - name: Validate the Omarchy compatibility contract
+        run: node integrations/omarchy-wayfinder/scripts/validate-compatibility.mjs
       - name: Test the prompt-free presentation model
         run: node integrations/omarchy-wayfinder/test/model.test.mjs
+      - name: Test the pinned native Router installation
+        run: bash integrations/omarchy-wayfinder/test/install.test.sh
+      - name: Test atomic Router upgrade and rollback
+        run: integrations/omarchy-wayfinder/test/router-lifecycle.test.sh
       - name: Check install and removal scripts
-        run: bash -n integrations/omarchy-wayfinder/install.sh integrations/omarchy-wayfinder/uninstall.sh
+        run: >-
+          bash -n integrations/omarchy-wayfinder/install.sh
+          integrations/omarchy-wayfinder/uninstall.sh
+          integrations/omarchy-wayfinder/scripts/router-lifecycle.sh
+          integrations/omarchy-wayfinder/scripts/validate-omarchy-contract.sh
+          integrations/omarchy-wayfinder/test/install.test.sh
+          integrations/omarchy-wayfinder/test/router-lifecycle.test.sh
 
   linux-packaging:
     runs-on: ubuntu-24.04

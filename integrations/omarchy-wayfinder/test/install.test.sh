@@ -34,6 +34,22 @@ test -f "$provenance"
 grep -F "router_version=2026.8.0" "$provenance"
 grep -F "router_path=$router" "$provenance"
 
+HOME="$test_home" \
+XDG_CONFIG_HOME="$test_home/config" \
+WAYFINDER_BIN_DIR="$test_home/bin" \
+PATH="$test_home/bin:/usr/bin:/bin" \
+  bash "$repo_root/install.sh" --upgrade-router > "$test_home/upgrade.out"
+grep -F "already matches the reviewed plugin pin" "$test_home/upgrade.out"
+if HOME="$test_home" \
+  XDG_CONFIG_HOME="$test_home/config" \
+  PATH="$test_home/bin:/usr/bin:/bin" \
+  bash "$repo_root/install.sh" --rollback-router \
+    > "$test_home/rollback.out" 2> "$test_home/rollback.err"; then
+  printf '%s\n' "rollback succeeded without a last-known-good Router" >&2
+  exit 1
+fi
+grep -F "No verified last-known-good Router" "$test_home/rollback.err"
+
 plugin_dir="$test_home/config/omarchy/plugins/io.github.asdecided.wayfinder"
 test -f "$plugin_dir/manifest.json"
 
@@ -46,7 +62,7 @@ if HOME="$test_home" \
   printf '%s\n' "uninstaller removed a modified Router binary" >&2
   exit 1
 fi
-grep -F "binary changed after installation; refusing removal" "$test_home/modified.err"
+grep -F "binary changed after installation; refusing lifecycle action" "$test_home/modified.err"
 mv -- "$test_home/original-router" "$router"
 
 HOME="$test_home" \

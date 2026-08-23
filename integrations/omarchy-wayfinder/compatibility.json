@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "checkedAt": "2026-08-23",
+  "plugin": {
+    "id": "io.github.asdecided.wayfinder",
+    "version": "0.3.0"
+  },
+  "omarchy": {
+    "channel": "quattro",
+    "version": "4.0.0.alpha",
+    "commit": "f4f3d4c71a0a5c392b20ce05291531881a1b3bfe",
+    "manifestSchemaVersion": 1
+  },
+  "quickshell": {
+    "package": "quickshell",
+    "versionFloor": "0.3.1",
+    "contractCommit": "2c593dbbaad67698e7b9b0809d082d86540a7a1c"
+  },
+  "router": {
+    "release": "2026.8.0",
+    "architectures": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu"
+    ],
+    "libc": "glibc",
+    "projectProfiles": "unavailable"
+  },
+  "codingAgents": [
+    {
+      "id": "codex",
+      "version": "0.149.0",
+      "evidence": "real-tool-round-trip"
+    },
+    {
+      "id": "claude-code",
+      "version": "2.1.241",
+      "evidence": "real-tool-round-trip"
+    }
+  ],
+  "lifecycle": {
+    "freshInstall": "release-gated",
+    "existingRouterNoClobber": "release-gated",
+    "pluginSourceUpdate": "documented",
+    "pluginSourceRollback": "documented",
+    "routerUpgrade": "contract-validated",
+    "routerRollback": "contract-validated"
+  }
+}

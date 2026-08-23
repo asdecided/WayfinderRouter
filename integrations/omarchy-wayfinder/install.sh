@@ -12,6 +12,18 @@ plugin_dir="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/$plugin_id"
 router_bin_dir="${WAYFINDER_BIN_DIR:-$HOME/.local/bin}"
 router_provenance_dir="${XDG_STATE_HOME:-$HOME/.local/state}/wayfinder"
 router_provenance_file="$router_provenance_dir/omarchy-router-install"
+source "$source_dir/scripts/router-lifecycle.sh"
+
+case "${1:-}" in
+  "") router_action="install" ;;
+  --upgrade-router) router_action="upgrade" ;;
+  --rollback-router) router_action="rollback" ;;
+  --recover-router) router_action="recover" ;;
+  *)
+    printf 'usage: %s [--upgrade-router|--rollback-router|--recover-router]\n' "$0" >&2
+    exit 2
+    ;;
+esac
 
 runtime_files=(
   manifest.json
@@ -28,14 +40,7 @@ if [[ "$(realpath -m -- "$source_dir")" != "$(realpath -m -- "$plugin_dir")" ]];
   done
 fi
 
-if ! command -v wayfinder-router >/dev/null 2>&1; then
-  for command_name in curl tar sha256sum; do
-    command -v "$command_name" >/dev/null 2>&1 || {
-      printf 'Wayfinder installation requires %s.\n' "$command_name" >&2
-      exit 1
-    }
-  done
-
+select_router_release() {
   case "$(uname -m)" in
     x86_64)
       router_target="x86_64-unknown-linux-gnu"
@@ -47,20 +52,19 @@ if ! command -v wayfinder-router >/dev/null 2>&1; then
       ;;
     *)
       printf 'Wayfinder does not publish a Linux binary for architecture %s.\n' "$(uname -m)" >&2
-      exit 1
+      return 1
       ;;
   esac
+}
 
-  resolved_home="$(realpath -m -- "$HOME")"
-  resolved_router_bin_dir="$(realpath -m -- "$router_bin_dir")"
-  case "$resolved_router_bin_dir/" in
-    "$resolved_home"/*) ;;
-    *)
-      printf '%s\n' "Wayfinder must be installed to a user-owned path inside HOME." >&2
-      exit 1
-      ;;
-  esac
-
+download_router_release() {
+  for command_name in curl tar sha256sum; do
+    command -v "$command_name" >/dev/null 2>&1 || {
+      printf 'Wayfinder installation requires %s.\n' "$command_name" >&2
+      return 1
+    }
+  done
+  select_router_release || return $?
   router_package="wayfinder-router-${router_target}"
   router_archive="${router_package}.tar.gz"
   router_tmp_dir="$(mktemp -d)"
@@ -88,38 +92,68 @@ if ! command -v wayfinder-router >/dev/null 2>&1; then
   )
   if [[ "${router_entries[*]}" != "${expected_entries[*]}" ]]; then
     printf '%s\n' "Wayfinder release archive has an unexpected layout." >&2
-    exit 1
+    return 1
   fi
 
-  install -d -m 0755 "$router_tmp_dir/extracted" "$router_bin_dir"
+  install -d -m 0755 "$router_tmp_dir/extracted"
   tar -xzf "$router_tmp_dir/$router_archive" -C "$router_tmp_dir/extracted"
   router_binary="$router_tmp_dir/extracted/$router_package/wayfinder-router"
   if [[ ! -f "$router_binary" || -L "$router_binary" || ! -x "$router_binary" ]]; then
     printf '%s\n' "Wayfinder release archive does not contain the expected executable." >&2
-    exit 1
+    return 1
   fi
-  install -m 0755 "$router_binary" "$router_bin_dir/wayfinder-router"
-  "$router_bin_dir/wayfinder-router" --version
+}
 
-  installed_binary_sha256="$(sha256sum "$router_bin_dir/wayfinder-router" | cut -d ' ' -f 1)"
-  install -d -m 0700 "$router_provenance_dir"
-  provenance_tmp="$router_provenance_file.tmp.$$"
-  (
-    umask 077
-    printf '%s\n' \
-      "schema_version=1" \
-      "plugin_id=$plugin_id" \
-      "router_version=$router_version" \
-      "router_target=$router_target" \
-      "archive_sha256=$router_sha256" \
-      "binary_sha256=$installed_binary_sha256" \
-      "router_path=$resolved_router_bin_dir/wayfinder-router" \
-      > "$provenance_tmp"
-  )
-  mv -- "$provenance_tmp" "$router_provenance_file"
-else
-  printf '%s\n' "Using the existing wayfinder-router executable."
-fi
+install_router_release() {
+  local resolved_router_bin_dir installed_binary_sha256
+  resolved_router_bin_dir="$(realpath -m -- "$router_bin_dir")"
+  router_require_user_path "$resolved_router_bin_dir/wayfinder-router" || return $?
+  download_router_release || return $?
+  install -d -m 0755 "$resolved_router_bin_dir"
+  install -m 0755 "$router_binary" "$resolved_router_bin_dir/wayfinder-router"
+  "$resolved_router_bin_dir/wayfinder-router" --version
+
+  installed_binary_sha256="$(sha256sum "$resolved_router_bin_dir/wayfinder-router" | cut -d ' ' -f 1)"
+  router_write_current_metadata "$router_version" "$router_target" "$router_sha256" \
+    "$installed_binary_sha256" "$resolved_router_bin_dir/wayfinder-router"
+}
+
+router_acquire_lock
+had_transaction=false
+[[ -e "$router_transaction_file" ]] && had_transaction=true
+router_recover_transaction
+
+case "$router_action" in
+  install)
+    if command -v wayfinder-router >/dev/null 2>&1; then
+      printf '%s\n' "Using the existing wayfinder-router executable."
+    else
+      install_router_release
+    fi
+    ;;
+  upgrade)
+    router_load_current
+    select_router_release
+    if [[ "$current_router_version" == "$router_version" \
+        && "$current_router_target" == "$router_target" \
+        && "$current_router_archive_sha256" == "$router_sha256" ]]; then
+      printf 'Wayfinder Router %s already matches the reviewed plugin pin.\n' "$router_version"
+    else
+      download_router_release
+      router_promote_candidate "$router_binary" "$router_version" "$router_target" "$router_sha256"
+      printf '%s\n' "Restart wayfinder-router.service to run the promoted binary."
+    fi
+    ;;
+  rollback)
+    router_rollback
+    printf '%s\n' "Restart wayfinder-router.service to run the rolled-back binary."
+    ;;
+  recover)
+    if [[ "$had_transaction" == false ]]; then
+      printf '%s\n' "No pending Router transaction requires recovery."
+    fi
+    ;;
+esac
 
 if command -v omarchy-shell >/dev/null 2>&1; then
   omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true

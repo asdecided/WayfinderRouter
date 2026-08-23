@@ -26,7 +26,17 @@ for (const kind of manifest.kinds) {
   await access(path.join(root, entry), constants.R_OK);
 }
 
-for (const required of ["README.md", "LICENSE", "NOTICE", "Model.js", "RouteMark.qml", "install.sh", "uninstall.sh"]) {
+for (const required of [
+  "README.md",
+  "LICENSE",
+  "NOTICE",
+  "Model.js",
+  "RouteMark.qml",
+  "install.sh",
+  "uninstall.sh",
+  "scripts/router-lifecycle.sh",
+  "test/router-lifecycle.test.sh",
+]) {
   await access(path.join(root, required), constants.R_OK);
 }
 
@@ -87,8 +97,12 @@ assert.ok(installer.includes("--proto '=https'"), "installer must restrict relea
 assert.ok(!installer.includes("cargo install"), "native installation must not require Cargo");
 assert.ok(!service.includes("bash -lc \"wayfinder-router init"), "setup arguments must not use shell interpolation");
 assert.ok(installer.includes("binary_sha256="), "installer must record installed-binary provenance");
+assert.ok(installer.includes("--upgrade-router"), "installer must expose explicit Router upgrade");
+assert.ok(installer.includes("--rollback-router"), "installer must expose explicit Router rollback");
+assert.ok(installer.includes("router_promote_candidate"), "installer must use the reviewed promotion contract");
+assert.ok(installer.includes("router_acquire_lock"), "installer must serialize Router lifecycle actions");
 assert.ok(uninstaller.includes("--remove-owned-router"), "uninstaller must require an explicit binary-removal flag");
-assert.ok(uninstaller.includes("current_binary_sha256"), "uninstaller must verify binary ownership by digest");
+assert.ok(uninstaller.includes("router_load_current"), "uninstaller must verify binary ownership by digest");
 assert.ok(
   readme.includes("An existing\n`wayfinder-router` executable is never replaced."),
   "README must document existing-binary ownership"
