@@ -69,6 +69,43 @@ user `opencode.json`. Choose **Wayfinder Automatic** from `/models`.
 The provider object follows OpenCode's
 [custom provider contract](https://opencode.ai/docs/providers/).
 
+## Low-level project profiles
+
+Project-aware launch integration is built on authenticated local keys, not a
+caller-supplied repository header. The transparent core configuration looks
+like this:
+
+```toml
+[gateway.profiles.coding]
+routing_toml = '''
+[routing]
+threshold = 0.35
+'''
+
+[gateway.workspaces.wayfinder-router]
+profile = "coding"
+models = ["local", "cloud"]
+
+[gateway.keys.wayfinder-router]
+hash = "<SHA-256 printed by keys new>"
+workspace = "wayfinder-router"
+```
+
+Mint the local capability with:
+
+```sh
+wayfinder-router keys new --id wayfinder-router --workspace wayfinder-router
+```
+
+Add only the printed hashed TOML entry to the Router configuration. Keep the
+one-time plaintext token in the reviewed launch environment for that project
+and use it in place of the placeholder client token. An authenticated key with
+no profiled workspace continues to use the top-level `[routing]` default.
+Profile selection never trusts prompt content, working-directory strings, or a
+public HTTP header. The forthcoming project command and Omarchy surface will
+own canonical repository discovery and no-clobber setup; this section documents
+the portable core contract.
+
 ## Check the result
 
 Send a small request and a difficult request from the client. Then open the
