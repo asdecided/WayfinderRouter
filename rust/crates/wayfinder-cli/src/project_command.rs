@@ -1,7 +1,7 @@
 //! Canonical, no-clobber local project-profile lifecycle.
 
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -377,7 +377,7 @@ fn merge_owned_projects_from_dir(
     if !projects_dir.exists() {
         return Ok(0);
     }
-    let mut directories = fs::read_dir(&projects_dir)
+    let mut directories = fs::read_dir(projects_dir)
         .map_err(|error| format!("cannot read {}: {error}", projects_dir.display()))?
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
@@ -598,16 +598,12 @@ fn project_token(
         ));
     }
     write_error(stderr, "Wayfinder project token (input is not persisted):");
-    let mut bytes = Vec::new();
-    for byte in stdin.bytes().take(MAX_TOKEN_BYTES.saturating_add(2)) {
-        let byte = byte.map_err(|error| format!("cannot read project token: {error}"))?;
-        if matches!(byte, b'\n' | b'\r') {
-            break;
-        }
-        bytes.push(byte);
-    }
-    let token =
-        String::from_utf8(bytes).map_err(|_| "project token must be valid UTF-8".to_owned())?;
+    let mut token = String::new();
+    BufReader::new(stdin)
+        .take(u64::try_from(MAX_TOKEN_BYTES.saturating_add(2)).unwrap_or(u64::MAX))
+        .read_line(&mut token)
+        .map_err(|error| format!("cannot read project token: {error}"))?;
+    let token = token.trim_end_matches(['\n', '\r']).to_owned();
     validate_token(&token)?;
     Ok((token, TokenSource::Prompt))
 }

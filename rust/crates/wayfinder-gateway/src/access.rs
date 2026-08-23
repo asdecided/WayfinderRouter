@@ -920,8 +920,10 @@ mod tests {
     #[test]
     fn local_project_mode_accepts_a_missing_key_but_rejects_an_invalid_presented_key()
     -> Result<(), AccessPolicyError> {
-        let mut config = GatewayConfig::default();
-        config.allow_unauthenticated_default = true;
+        let mut config = GatewayConfig {
+            allow_unauthenticated_default: true,
+            ..GatewayConfig::default()
+        };
         config
             .keys
             .insert("project-a".to_owned(), virtual_key("wf-project"));
