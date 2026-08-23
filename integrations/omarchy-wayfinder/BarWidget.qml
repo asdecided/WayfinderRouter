@@ -10,6 +10,7 @@ BarWidget {
 
   readonly property var wayfinder: bar && bar.shell ? bar.shell.serviceFor(moduleName) : null
   property bool popupOpen: false
+  property bool rollbackArmed: false
   property double nowMs: Date.now()
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -17,7 +18,8 @@ BarWidget {
     ? Color.urgent
     : (wayfinder.degraded ? Color.urgent : Color.accent)
   readonly property var recentEntries: wayfinder && wayfinder.recentReport.valid
-    ? wayfinder.recentReport.recent.slice(0, 5) : []
+    ? wayfinder.recentReport.recent.slice(0, 4) : []
+  readonly property var actionableReceipt: Model.latestActionableReceipt(recentEntries)
   readonly property var visibleModels: wayfinder ? wayfinder.modelDetails.slice(0, 5) : []
 
   function configureService() {
@@ -30,7 +32,11 @@ BarWidget {
     if (wayfinder) wayfinder.refresh()
   }
 
-  function close() { popupOpen = false }
+  function close() {
+    popupOpen = false
+    rollbackArmed = false
+    projectToken.text = ""
+  }
   function toggle() { popupOpen ? close() : open() }
   readonly property bool opened: popupOpen
 
@@ -42,8 +48,26 @@ BarWidget {
 
   function primaryAction() {
     if (!wayfinder || !wayfinder.binaryInstalled || !wayfinder.localEndpoint) return
-    if (!wayfinder.unitInstalled) wayfinder.installService()
-    else wayfinder.startOrRestartService()
+    wayfinder.beginSetup()
+  }
+
+  function submitProjectToken() {
+    if (!wayfinder || !Model.validProjectToken(projectToken.text) || wayfinder.projectBusy) return
+    var token = projectToken.text
+    projectToken.text = ""
+    wayfinder.setupProject(token)
+  }
+
+  function requestProjectRollback() {
+    if (!wayfinder || wayfinder.projectBusy || !wayfinder.projectReport.owned) return
+    if (!rollbackArmed) {
+      rollbackArmed = true
+      rollbackReset.restart()
+      return
+    }
+    rollbackArmed = false
+    rollbackReset.stop()
+    wayfinder.rollbackProject()
   }
 
   function modelFor(name) {
@@ -59,14 +83,26 @@ BarWidget {
     return model && Model.isLocalModel(model) ? Color.accent : foreground
   }
 
+  function receiptColor(entry) {
+    return Model.receiptNeedsAttention(entry) ? Color.urgent : routeColor(entry.servedBy || entry.model)
+  }
+
   function actionDetail() {
     if (!wayfinder) return ""
     if (wayfinder.actionError !== "") return wayfinder.actionError
     if (wayfinder.actionMessage !== "") return wayfinder.actionMessage
     if (!wayfinder.localEndpoint) return "This remote endpoint is observed but not managed."
     if (!wayfinder.binaryInstalled) return "Install the Rust router to activate this control surface."
+    if (wayfinder.setupDetail !== "") return wayfinder.setupDetail
     if (wayfinder.operatorError !== "" && wayfinder.reachable) return wayfinder.operatorError
     return ""
+  }
+
+  function projectDetail() {
+    if (!wayfinder) return ""
+    if (wayfinder.projectError !== "") return wayfinder.projectError
+    if (wayfinder.projectMessage !== "") return wayfinder.projectMessage
+    return wayfinder.projectState.detail
   }
 
   onSettingsChanged: configureService()
@@ -79,6 +115,14 @@ BarWidget {
     repeat: true
     triggeredOnStart: true
     onTriggered: root.nowMs = Date.now()
+  }
+
+
+  Timer {
+    id: rollbackReset
+    interval: 8000
+    repeat: false
+    onTriggered: root.rollbackArmed = false
   }
 
   implicitWidth: button.implicitWidth
@@ -113,7 +157,7 @@ BarWidget {
     owner: root
     open: root.popupOpen
     contentWidth: fittedContentWidth(Style.space(370), Style.space(430))
-    contentHeight: fittedContentHeight(content.implicitHeight, Style.space(650))
+    contentHeight: fittedContentHeight(content.implicitHeight, Style.space(760))
 
     Column {
       id: content
@@ -169,6 +213,160 @@ BarWidget {
       }
 
       PanelSeparator { foreground: root.foreground }
+
+      Column {
+        width: parent.width
+        visible: !!root.wayfinder && !root.wayfinder.setupState.ready
+        spacing: Style.space(4)
+
+        Text {
+          text: "FIRST RUN"
+          color: Qt.darker(root.foreground, 1.5)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          font.letterSpacing: 1.1
+        }
+        Text {
+          width: parent.width
+          text: root.wayfinder ? root.wayfinder.setupState.title : "Check setup"
+          color: root.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.subtitle
+          font.bold: true
+          wrapMode: Text.Wrap
+        }
+        Text {
+          width: parent.width
+          text: root.wayfinder ? root.wayfinder.effectiveConfigPath : ""
+          color: Qt.darker(root.foreground, 1.55)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideMiddle
+        }
+      }
+
+      Column {
+        width: parent.width
+        visible: !!root.wayfinder && root.wayfinder.localEndpoint
+          && root.wayfinder.setupState.ready
+          && (root.wayfinder.projectSupported || root.wayfinder.projectRoot !== "")
+        spacing: Style.space(5)
+
+        Row {
+          width: parent.width
+
+          Text {
+            text: "PROJECT PROFILE"
+            color: Qt.darker(root.foreground, 1.5)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            font.letterSpacing: 1.1
+          }
+
+          Item {
+            width: Math.max(0, parent.width - parent.children[0].implicitWidth
+              - projectStatusLabel.implicitWidth)
+            height: 1
+          }
+
+          Text {
+            id: projectStatusLabel
+            text: root.wayfinder ? root.wayfinder.projectState.status : ""
+            color: root.wayfinder && root.wayfinder.projectState.urgent
+              ? Color.urgent : root.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+          }
+        }
+
+        Text {
+          width: parent.width
+          text: root.wayfinder ? root.wayfinder.projectState.title : ""
+          color: root.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+          elide: Text.ElideRight
+        }
+
+        Text {
+          width: parent.width
+          visible: !!root.wayfinder && root.wayfinder.projectRoot !== ""
+          text: root.wayfinder && root.wayfinder.projectReport.canonicalRepository !== ""
+            ? root.wayfinder.projectReport.canonicalRepository + " · " + root.wayfinder.projectRoot
+            : (root.wayfinder ? root.wayfinder.projectRoot : "")
+          color: Qt.darker(root.foreground, 1.55)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideMiddle
+        }
+
+        Text {
+          width: parent.width
+          text: root.projectDetail()
+          color: root.wayfinder && (root.wayfinder.projectError !== ""
+            || root.wayfinder.projectState.urgent) ? Color.urgent : Qt.darker(root.foreground, 1.45)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.Wrap
+        }
+
+        TextField {
+          id: projectToken
+          visible: !!root.wayfinder && root.wayfinder.projectState.step === "setup"
+          width: parent.width
+          password: true
+          placeholderText: "Project token · passed once over stdin"
+          enabled: !!root.wayfinder && !root.wayfinder.projectBusy
+          onAccepted: root.submitProjectToken()
+        }
+
+        Row {
+          width: parent.width
+          spacing: Style.space(6)
+          visible: !!root.wayfinder && root.wayfinder.projectRoot !== ""
+
+          Button {
+            id: projectSetupButton
+            visible: !!root.wayfinder && root.wayfinder.projectState.step === "setup"
+            text: root.wayfinder && root.wayfinder.projectActionKind === "project-setup"
+              && root.wayfinder.projectBusy ? "Setting up…" : "Set up project"
+            foreground: root.foreground
+            bordered: true
+            enabled: !!root.wayfinder && Model.validProjectToken(projectToken.text)
+              && !root.wayfinder.projectBusy
+            onClicked: root.submitProjectToken()
+          }
+
+          Button {
+            id: projectRollbackButton
+            visible: !!root.wayfinder && root.wayfinder.projectReport.owned
+            text: root.rollbackArmed ? "Confirm rollback" : "Roll back"
+            foreground: root.rollbackArmed ? Color.urgent : root.foreground
+            bordered: root.rollbackArmed
+            enabled: !!root.wayfinder && !root.wayfinder.projectBusy
+            onClicked: root.requestProjectRollback()
+          }
+
+          Item { width: Math.max(0, parent.width
+            - (projectSetupButton.visible ? projectSetupButton.width : 0)
+            - (projectRollbackButton.visible ? projectRollbackButton.width : 0)
+            - projectRefresh.width - Style.space(18)); height: 1 }
+
+          Button {
+            id: projectRefresh
+            iconText: "↻"
+            tooltipText: "Refresh repository profile"
+            foreground: root.foreground
+            enabled: !!root.wayfinder && root.wayfinder.projectSupported
+              && !root.wayfinder.projectBusy
+            onClicked: root.wayfinder.refreshProject()
+          }
+        }
+      }
 
       Column {
         width: parent.width
@@ -231,7 +429,7 @@ BarWidget {
       Column {
         width: parent.width
         visible: root.recentEntries.length > 0
-        spacing: Style.space(4)
+        spacing: Style.space(7)
 
         Repeater {
           model: root.recentEntries
@@ -239,34 +437,85 @@ BarWidget {
           Row {
             required property var modelData
             width: parent.width
-            height: Style.space(22)
+            height: Style.space(42)
             spacing: Style.space(8)
 
             Rectangle {
               width: Style.space(6)
               height: width
               radius: width / 2
-              color: root.routeColor(modelData.model)
+              color: root.receiptColor(modelData)
               anchors.verticalCenter: parent.verticalCenter
             }
-            Text {
-              width: Math.max(0, parent.width - routeAge.implicitWidth - Style.space(20))
-              text: Model.shortModel(modelData.model) + "  ·  " + modelData.mode
-              color: root.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              elide: Text.ElideRight
+
+            Column {
+              width: Math.max(0, parent.width - receiptState.implicitWidth - Style.space(28))
+              spacing: Style.space(1)
               anchors.verticalCenter: parent.verticalCenter
+
+              Text {
+                width: parent.width
+                text: Model.routeTitle(modelData)
+                color: root.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
+                elide: Text.ElideRight
+              }
+              Text {
+                width: parent.width
+                text: Model.receiptContext(modelData)
+                color: Qt.darker(root.foreground, 1.55)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+              }
+              Text {
+                width: parent.width
+                text: Model.routeReason(modelData)
+                color: Qt.darker(root.foreground, 1.55)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+              }
             }
-            Text {
-              id: routeAge
-              text: Model.relativeTime(modelData.timestamp, root.nowMs)
-              color: Qt.darker(root.foreground, 1.55)
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
+
+            Column {
+              id: receiptState
               anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(1)
+
+              Text {
+                text: Model.outcomeLabel(modelData.outcome)
+                  + (modelData.httpStatus !== null ? " " + modelData.httpStatus : "")
+                color: root.receiptColor(modelData)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                anchors.right: parent.right
+              }
+              Text {
+                text: Model.relativeTime(modelData.timestamp, root.nowMs)
+                color: Qt.darker(root.foreground, 1.55)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                anchors.right: parent.right
+              }
             }
           }
+        }
+
+        Text {
+          width: parent.width
+          visible: root.actionableReceipt !== null
+          text: root.actionableReceipt
+            ? Model.routeTitle(root.actionableReceipt) + ": "
+              + Model.receiptRemediation(root.actionableReceipt)
+            : ""
+          color: Color.urgent
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.Wrap
         }
       }
 
@@ -383,7 +632,8 @@ BarWidget {
           foreground: root.foreground
           bordered: true
           enabled: !!root.wayfinder && root.wayfinder.binaryInstalled
-            && root.wayfinder.localEndpoint && !root.wayfinder.busy
+            && root.wayfinder.localEndpoint && root.wayfinder.effectiveConfigPath !== ""
+            && root.wayfinder.setupState.actionable && !root.wayfinder.busy
           onClicked: root.primaryAction()
         }
 

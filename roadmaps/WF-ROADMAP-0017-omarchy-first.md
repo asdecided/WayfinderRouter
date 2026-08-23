@@ -160,6 +160,7 @@ If the answer is no to all four, the work remains outside the active roadmap.
 ## Related
 
 - WF-ADR-0073 (Omarchy-first, portable-core strategy)
+- WF-ADR-0077 (standalone plugin release authority and verified mirror)
 - WF-ADR-0068 (Omarchy shell/runtime separation)
 - WF-ADR-0069 (native Linux distribution)
 - WF-ADR-0070 (activation surface)

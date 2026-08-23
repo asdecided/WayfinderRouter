@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate manifest and package
+        run: node scripts/validate.mjs
+      - name: Test presentation model
+        run: node test/model.test.mjs
+      - name: Test pinned native Router installation
+        run: bash test/install.test.sh
+      - name: Check install and removal scripts
+        run: bash -n install.sh uninstall.sh
+
+  coding-agent-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: asdecided/WayfinderRouter
+          ref: a7599064af9fc85ce0389ebdf5859731b34e4df6
+          path: .router-source
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install coding-agent contract versions
+        run: npm install --global @openai/codex@0.149.0 @anthropic-ai/claude-code@2.1.241
+      - name: Build the candidate Router contract
+        run: cargo build --locked --manifest-path .router-source/rust/Cargo.toml --bin wayfinder-router
+      - name: Run a real Codex tool round-trip
+        env:
+          WAYFINDER_ROUTER_BIN: ${{ github.workspace }}/.router-source/rust/target/debug/wayfinder-router
+          WAYFINDER_CODEX_SANDBOX: danger-full-access
+        run: bash test/codex-smoke.sh
+      - name: Run a real Claude Code tool round-trip
+        env:
+          WAYFINDER_ROUTER_BIN: ${{ github.workspace }}/.router-source/rust/target/debug/wayfinder-router
+        run: bash test/claude-code-smoke.sh
