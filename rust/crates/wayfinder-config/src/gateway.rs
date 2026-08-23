@@ -9,8 +9,12 @@ use std::fmt;
 
 use indexmap::IndexMap;
 use toml::Value;
+use wayfinder_routing_core::RoutingConfig;
 
-use super::{ConfigError, format_number, invalid};
+use super::{
+    ConfigError, TierOrderPolicy, dump_routing_toml, format_number, invalid,
+    routing_config_from_toml,
+};
 
 /// Supported portions of a chat transcript that may be scored.
 pub const ROUTE_ON_SCOPES: [&str; 4] = ["turn", "last_user", "user", "all"];
@@ -62,6 +66,10 @@ pub const DEPLOYMENT_SELECTION_STRATEGIES: [&str; 6] = [
 pub const MAX_ROUTE_PRESETS: usize = 64;
 /// Maximum number of ordered model aliases in one routing preset.
 pub const MAX_ROUTE_PRESET_MODELS: usize = 32;
+/// Maximum number of local routing-only profiles in one gateway configuration.
+pub const MAX_ROUTING_PROFILES: usize = 64;
+/// Maximum encoded routing fragment accepted for one local profile.
+pub const MAX_ROUTING_PROFILE_BYTES: usize = 64 * 1024;
 /// Supported operator authentication modes.
 pub const OPERATOR_AUTH_MODES: [&str; 3] = ["vkeys", "oidc", "both"];
 /// Default shadow-routing sample rate. Shadow routing is opt-in.
@@ -511,6 +519,8 @@ impl Default for StateConfig {
 pub struct Workspace {
     /// Configured-model allowlist; empty means unrestricted.
     pub models: Vec<String>,
+    /// Optional routing-only profile selected by authenticated keys in this workspace.
+    pub profile: Option<String>,
     /// Optional workspace-wide spend cap.
     pub budget: Option<Budget>,
     /// Optional workspace-wide request/token limit.
@@ -599,6 +609,8 @@ pub struct GatewayConfig {
     pub canary: CanaryConfig,
     /// Workspace policy namespaces keyed by operator-selected identifier.
     pub workspaces: IndexMap<String, Workspace>,
+    /// Routing-only project profiles keyed by user-selected identifier.
+    pub profiles: IndexMap<String, RoutingConfig>,
     /// Named ordered routing presets keyed by operator-selected identifier.
     pub routes: IndexMap<String, RoutePreset>,
     /// Virtual credentials keyed by operator-selected identifier.
@@ -627,6 +639,7 @@ impl Default for GatewayConfig {
             shadow: ShadowConfig::default(),
             canary: CanaryConfig::default(),
             workspaces: IndexMap::new(),
+            profiles: IndexMap::new(),
             routes: IndexMap::new(),
             keys: IndexMap::new(),
         }
@@ -708,6 +721,7 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
     }
     let auth = parse_auth(gateway.get("auth"), where_)?;
     let workspaces = parse_workspaces(gateway.get("workspaces"), where_)?;
+    let profiles = parse_profiles(gateway.get("profiles"), where_)?;
     let keys = parse_keys(gateway.get("keys"), where_)?;
     let models = parse_models(gateway.get("models"), where_)?;
     let routes = parse_routes(gateway.get("routes"), where_)?;
@@ -716,6 +730,7 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
 
     validate_model_fallbacks(&models, where_)?;
     validate_workspace_models(&workspaces, &models, where_)?;
+    validate_workspace_profiles(&workspaces, &profiles, where_)?;
     validate_route_presets(&routes, &models, where_)?;
     validate_keys(&keys, &workspaces, &models, where_)?;
 
@@ -739,6 +754,7 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
         shadow,
         canary,
         workspaces,
+        profiles,
         routes,
         keys,
     })
@@ -1021,6 +1037,9 @@ fn render_gateway_toml(gateway: &GatewayConfig) -> String {
     for (workspace_id, workspace) in &gateway.workspaces {
         let segment = quote_toml_key_segment(workspace_id);
         let mut lines = vec![format!("[gateway.workspaces.{segment}]")];
+        if let Some(profile) = &workspace.profile {
+            lines.push(format!("profile = {}", quote_toml_string(profile)));
+        }
         if !workspace.models.is_empty() {
             lines.push(format!(
                 "models = {}",
@@ -1040,6 +1059,20 @@ fn render_gateway_toml(gateway: &GatewayConfig) -> String {
                 rate_limit,
             ));
         }
+    }
+
+    for (profile_id, routing) in &gateway.profiles {
+        let segment = quote_toml_key_segment(profile_id);
+        blocks.push(
+            [
+                format!("[gateway.profiles.{segment}]"),
+                format!(
+                    "routing_toml = {}",
+                    quote_toml_string(&dump_routing_toml(routing))
+                ),
+            ]
+            .join("\n"),
+        );
     }
 
     for (key_id, key) in &gateway.keys {
@@ -1555,6 +1588,11 @@ fn parse_workspaces(
             &format!("gateway.workspaces.{workspace_id}.models"),
             "a list of model names",
         )?;
+        let profile = optional_non_empty_string(
+            entry.get("profile"),
+            where_,
+            &format!("gateway.workspaces.{workspace_id}.profile"),
+        )?;
         let nested_where = format!("{where_} [gateway.workspaces.{workspace_id}]");
         let budget = parse_budget(entry.get("budget"), &nested_where)?;
         let rate_limit = parse_rate_limit(entry.get("rate_limit"), &nested_where)?;
@@ -1562,12 +1600,87 @@ fn parse_workspaces(
             workspace_id.clone(),
             Workspace {
                 models,
+                profile,
                 budget,
                 rate_limit,
             },
         );
     }
     Ok(workspaces)
+}
+
+fn parse_profiles(
+    value: Option<&Value>,
+    where_: &str,
+) -> Result<IndexMap<String, RoutingConfig>, ConfigError> {
+    let Some(value) = value else {
+        return Ok(IndexMap::new());
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| invalid(where_, "'[gateway.profiles]' must be a table"))?;
+    if table.len() > MAX_ROUTING_PROFILES {
+        return Err(invalid(
+            where_,
+            format!("'[gateway.profiles]' may contain at most {MAX_ROUTING_PROFILES} profiles"),
+        ));
+    }
+    let mut profiles = IndexMap::new();
+    for (profile_id, value) in table {
+        if !valid_policy_id(profile_id) || profile_id == "default" {
+            return Err(invalid(
+                where_,
+                format!(
+                    "'gateway.profiles.{profile_id}' must use a non-default 1-128 character visible ASCII id"
+                ),
+            ));
+        }
+        let entry = value.as_table().ok_or_else(|| {
+            invalid(
+                where_,
+                format!("'[gateway.profiles.{profile_id}]' must be a table"),
+            )
+        })?;
+        let unknown = entry
+            .keys()
+            .filter(|key| key.as_str() != "routing_toml")
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unknown.is_empty() {
+            return Err(invalid(
+                where_,
+                format!(
+                    "'gateway.profiles.{profile_id}' is routing-only and does not accept {}",
+                    unknown.join(", ")
+                ),
+            ));
+        }
+        let routing_toml = entry
+            .get("routing_toml")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                invalid(
+                    where_,
+                    format!("'gateway.profiles.{profile_id}.routing_toml' must be a string"),
+                )
+            })?;
+        if routing_toml.len() > MAX_ROUTING_PROFILE_BYTES {
+            return Err(invalid(
+                where_,
+                format!(
+                    "'gateway.profiles.{profile_id}.routing_toml' exceeds {MAX_ROUTING_PROFILE_BYTES} bytes"
+                ),
+            ));
+        }
+        let routing = routing_config_from_toml(
+            routing_toml,
+            &format!("{where_} [gateway.profiles.{profile_id}]"),
+            None,
+            TierOrderPolicy::StrictInput,
+        )?;
+        profiles.insert(profile_id.clone(), routing);
+    }
+    Ok(profiles)
 }
 
 fn parse_routes(
@@ -2335,6 +2448,26 @@ fn validate_workspace_models(
                     where_,
                     format!(
                         "'gateway.workspaces.{workspace_id}.models' names unknown model '{model}'"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_workspace_profiles(
+    workspaces: &IndexMap<String, Workspace>,
+    profiles: &IndexMap<String, RoutingConfig>,
+    where_: &str,
+) -> Result<(), ConfigError> {
+    for (workspace_id, workspace) in workspaces {
+        if let Some(profile) = workspace.profile.as_deref() {
+            if !profiles.contains_key(profile) {
+                return Err(invalid(
+                    where_,
+                    format!(
+                        "'gateway.workspaces.{workspace_id}.profile' names unknown profile '{profile}'"
                     ),
                 ));
             }
@@ -3166,6 +3299,13 @@ model = "deep-upstream"
 
 [gateway.workspaces.production]
 models = ["fast", "deep"]
+profile = "coding"
+
+[gateway.profiles.coding]
+routing_toml = '''
+[routing]
+threshold = 0.2
+'''
 
 [gateway.workspaces.production.budget]
 limit = 12.5
@@ -3189,6 +3329,11 @@ models = ["fast"]
         );
         assert_eq!(config.workspaces["production"].models, ["fast", "deep"]);
         assert_eq!(
+            config.workspaces["production"].profile.as_deref(),
+            Some("coding")
+        );
+        assert_eq!(config.profiles["coding"].tiers[1].min_score, 0.2);
+        assert_eq!(
             config.workspaces["production"].budget,
             Some(Budget {
                 limit: 12.5,
@@ -3198,6 +3343,8 @@ models = ["fast"]
         );
         let dumped = dump_gateway_toml(&config)?;
         assert!(dumped.contains("[gateway.workspaces.production]"));
+        assert!(dumped.contains("profile = \"coding\""));
+        assert!(dumped.contains("[gateway.profiles.coding]"));
         assert!(dumped.contains("workspace = \"production\""));
         assert_eq!(parse(&dumped)?, config);
 
@@ -3222,6 +3369,21 @@ models = ["fast"]
             .err()
             .ok_or_else(|| invalid("test", "unknown workspace was accepted"))?;
         assert!(error.to_string().contains("unknown workspace 'missing'"));
+
+        let unknown_profile = text.replace("profile = \"coding\"", "profile = \"missing\"");
+        let error = parse(&unknown_profile)
+            .err()
+            .ok_or_else(|| invalid("test", "unknown workspace profile was accepted"))?;
+        assert!(error.to_string().contains("unknown profile 'missing'"));
+
+        let credential_field = text.replace(
+            "routing_toml = '''",
+            "api_key = \"must-not-enter-policy\"\nrouting_toml = '''",
+        );
+        let error = parse(&credential_field)
+            .err()
+            .ok_or_else(|| invalid("test", "profile credential field was accepted"))?;
+        assert!(error.to_string().contains("routing-only"));
         Ok(())
     }
 

@@ -7260,6 +7260,7 @@ mod tests {
             "production".to_owned(),
             Workspace {
                 models: vec!["local".to_owned()],
+                profile: None,
                 budget: None,
                 rate_limit: Some(RateLimit {
                     rpm: Some(100),
@@ -11516,6 +11517,7 @@ mod tests {
             "mobile".to_owned(),
             Workspace {
                 models: vec!["local".to_owned()],
+                profile: None,
                 budget: None,
                 rate_limit: None,
             },

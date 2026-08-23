@@ -916,6 +916,7 @@ mod tests {
             "production".to_owned(),
             Workspace {
                 models: vec!["fast".to_owned(), "deep".to_owned()],
+                profile: None,
                 budget: None,
                 rate_limit: Some(RateLimit {
                     rpm: Some(2),
@@ -1062,6 +1063,7 @@ mod tests {
             "production".to_owned(),
             Workspace {
                 models: Vec::new(),
+                profile: None,
                 budget: None,
                 rate_limit: Some(RateLimit {
                     rpm: None,
@@ -1114,6 +1116,7 @@ mod tests {
             "production".to_owned(),
             Workspace {
                 models: Vec::new(),
+                profile: None,
                 budget: None,
                 rate_limit: Some(RateLimit {
                     rpm: None,

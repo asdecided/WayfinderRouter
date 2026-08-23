@@ -8,6 +8,16 @@ details, release history over commit history.
 
 ### Added
 
+- **Authenticated local project profiles** (WF-ADR-0075). Local gateway TOML
+  can define bounded routing-only profiles and attach one to a workspace. A
+  successfully authenticated project key supplies the workspace identity;
+  request headers, prompt content, and repository-path claims cannot select a
+  profile. The global route remains the immutable default, project profiles
+  cannot broaden model/privacy/capability eligibility, successful loads expose
+  content-addressed policy and snapshot receipts, and invalid hot reloads retain
+  the last-known-good runtime. Canonical repository discovery, no-clobber setup,
+  and explicit rollback remain in the following CLI/Omarchy slice.
+
 - **Versioned control-plane policy lifecycle** (WF-ADR-0071). Secret-free
   `wf-policy-v1` contracts define reusable routing profiles and client,
   workspace, or virtual-key bindings. Drafts validate before activation;

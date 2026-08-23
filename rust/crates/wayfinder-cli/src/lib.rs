@@ -30,6 +30,10 @@ use wayfinder_config::{
     routing_config_from_toml,
 };
 use wayfinder_gateway::audit::AuditLog;
+use wayfinder_gateway::control_plane::{
+    AdministrativeIdentity, BindingKind, PolicyBinding, PolicyDocument, PolicyLifecycle,
+    PolicyProfile, PolicyReceipt,
+};
 use wayfinder_gateway::delivery::{
     AppleFoundationModelDelivery, BufferedProviderDelivery, CodexAppServerDelivery,
     CredentialError, CredentialSource, OpenAiCompatibleDelivery, ProviderDelivery,
@@ -788,6 +792,7 @@ async fn build_serve_state<W: Write>(
         .with_audit_log(audit_log)
         .with_gateway_operator_auth(&gateway)
         .map_err(|error| error.to_string())?;
+    state = with_local_project_profiles(state, &gateway)?;
     let savings_path = std::env::var_os(SAVINGS_FILE_ENV)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -863,6 +868,59 @@ async fn build_serve_state<W: Write>(
         )));
     }
     Ok(state)
+}
+
+fn with_local_project_profiles(
+    state: AppState,
+    gateway: &GatewayConfig,
+) -> Result<AppState, String> {
+    if gateway.profiles.is_empty()
+        && gateway
+            .workspaces
+            .values()
+            .all(|workspace| workspace.profile.is_none())
+    {
+        return Ok(state);
+    }
+
+    let mut profiles = Vec::with_capacity(gateway.profiles.len().saturating_add(1));
+    profiles.push(
+        PolicyProfile::new("default", state.routing()).map_err(|error| error.to_string())?,
+    );
+    for (profile_id, routing) in &gateway.profiles {
+        profiles.push(
+            PolicyProfile::new(profile_id, routing).map_err(|error| error.to_string())?,
+        );
+    }
+    let bindings = gateway
+        .workspaces
+        .iter()
+        .filter_map(|(workspace_id, workspace)| {
+            workspace.profile.as_ref().map(|profile_id| PolicyBinding {
+                kind: BindingKind::Workspace,
+                subject: workspace_id.clone(),
+                profile_id: profile_id.clone(),
+            })
+        })
+        .collect();
+    let document = PolicyDocument::new_with_default(
+        profiles,
+        bindings,
+        Some("default".to_owned()),
+    )
+    .map_err(|error| error.to_string())?;
+    let actor = AdministrativeIdentity::new("local", "wayfinder-router-config")
+        .map_err(|error| error.to_string())?;
+    let draft = PolicyLifecycle::draft(document, actor).map_err(|error| error.to_string())?;
+    let policy_version = draft.version_id().to_owned();
+    let policy = draft.validate().map_err(|error| error.to_string())?;
+    let receipt = PolicyReceipt {
+        policy_version,
+        snapshot_id: format!("wps1-{}", Uuid::new_v4().simple()),
+    };
+    Ok(state
+        .with_validated_policy(policy)
+        .with_policy_receipt(&receipt))
 }
 
 fn configured_models(
@@ -1598,6 +1656,59 @@ mod tests {
         assert_eq!(payload["workspace"], "production");
         assert!(toml.contains("workspace = \"production\""));
         assert!(!toml.contains(key));
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_workspaces_select_versioned_local_profiles_without_changing_default()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut gateway = GatewayConfig::default();
+        gateway
+            .profiles
+            .insert("coding".to_owned(), RoutingConfig::binary(0.2));
+        gateway
+            .profiles
+            .insert("review".to_owned(), RoutingConfig::binary(0.8));
+        gateway.workspaces.insert(
+            "repo-a".to_owned(),
+            wayfinder_config::gateway::Workspace {
+                models: Vec::new(),
+                profile: Some("coding".to_owned()),
+                budget: None,
+                rate_limit: None,
+            },
+        );
+        gateway.workspaces.insert(
+            "repo-b".to_owned(),
+            wayfinder_config::gateway::Workspace {
+                models: Vec::new(),
+                profile: Some("review".to_owned()),
+                budget: None,
+                rate_limit: None,
+            },
+        );
+        let state = with_local_project_profiles(
+            AppState::new(RoutingConfig::binary(0.5), Vec::new(), false, "test"),
+            &gateway,
+        )?;
+
+        for (workspace_id, profile_id, threshold) in [
+            ("repo-a", "coding", 0.2),
+            ("repo-b", "review", 0.8),
+            ("unbound", "default", 0.5),
+        ] {
+            let resolved = state
+                .resolve_policy_profile(wayfinder_gateway::control_plane::BindingContext {
+                    client_id: None,
+                    workspace_id: Some(workspace_id),
+                    key_id: None,
+                })
+                .ok_or("managed profile was not installed")?;
+            assert_eq!(resolved.profile_id, profile_id);
+            assert_eq!(resolved.routing.tiers[1].min_score, threshold);
+        }
+        assert!(state.policy_version().starts_with("wpv1-"));
+        assert!(state.policy_snapshot_id().starts_with("wps1-"));
         Ok(())
     }
 
