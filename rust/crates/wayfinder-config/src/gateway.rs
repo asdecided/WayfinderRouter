@@ -571,6 +571,11 @@ impl fmt::Debug for VirtualKey {
 /// Complete semantic contents of the optional `[gateway]` table.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GatewayConfig {
+    /// Internal local-project mode in which a missing credential retains the global default.
+    ///
+    /// This field is never parsed from TOML. The trusted CLI loader enables it
+    /// only for owned project manifests and rejects non-loopback listeners.
+    pub allow_unauthenticated_default: bool,
     /// Upstream endpoints keyed by routing model name.
     pub models: IndexMap<String, GatewayModel>,
     /// Transcript scope selected for routing.
@@ -620,6 +625,7 @@ pub struct GatewayConfig {
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
+            allow_unauthenticated_default: false,
             models: IndexMap::new(),
             route_on: "turn".to_owned(),
             sticky: false,
@@ -735,6 +741,7 @@ pub fn gateway_config_from_toml(text: &str, where_: &str) -> Result<GatewayConfi
     validate_keys(&keys, &workspaces, &models, where_)?;
 
     Ok(GatewayConfig {
+        allow_unauthenticated_default: false,
         models,
         route_on,
         sticky,

@@ -80,6 +80,7 @@ pub struct AccessPolicy {
     keys: Arc<[VirtualKeyPolicy]>,
     clock: Clock,
     shared: Option<Arc<SharedAccessPolicy>>,
+    allow_unauthenticated_default: bool,
 }
 
 impl AccessPolicy {
@@ -153,6 +154,7 @@ impl AccessPolicy {
             keys: Arc::from(keys),
             clock: Arc::new(clock),
             shared: None,
+            allow_unauthenticated_default: config.allow_unauthenticated_default,
         })
     }
 
@@ -180,7 +182,7 @@ impl AccessPolicy {
     /// distinction to fail closed before accepting traffic.
     #[must_use]
     pub fn requires_authentication(&self) -> bool {
-        !self.keys.is_empty()
+        !self.keys.is_empty() && !self.allow_unauthenticated_default
     }
 
     pub(crate) fn admit_global(&self) -> Result<Option<RateResult>, AccessPolicyError> {
@@ -193,6 +195,9 @@ impl AccessPolicy {
 
     pub(crate) fn authenticate(&self, authorization: Option<&str>) -> Option<AccessGrant> {
         if self.keys.is_empty() {
+            return Some(AccessGrant { key_index: None });
+        }
+        if authorization.is_none() && self.allow_unauthenticated_default {
             return Some(AccessGrant { key_index: None });
         }
         let presented = auth::extract_bearer(authorization);
@@ -513,6 +518,10 @@ impl fmt::Debug for AccessPolicy {
                 &self.global_limiter.is_some(),
             )
             .field("virtual_key_count", &self.keys.len())
+            .field(
+                "allow_unauthenticated_default",
+                &self.allow_unauthenticated_default,
+            )
             .field("state_backend", &self.state_backend_name())
             .field("state_degraded", &self.state_degraded())
             .finish_non_exhaustive()
@@ -905,6 +914,22 @@ mod tests {
         let rendered = format!("{policy:?}");
         assert!(!rendered.contains(&digest));
         assert!(!rendered.contains("wf-secret"));
+        Ok(())
+    }
+
+    #[test]
+    fn local_project_mode_accepts_a_missing_key_but_rejects_an_invalid_presented_key()
+    -> Result<(), AccessPolicyError> {
+        let mut config = GatewayConfig::default();
+        config.allow_unauthenticated_default = true;
+        config
+            .keys
+            .insert("project-a".to_owned(), virtual_key("wf-project"));
+        let policy = AccessPolicy::from_gateway_config(&config)?;
+        assert!(!policy.requires_authentication());
+        assert!(policy.authenticate(None).is_some());
+        assert!(policy.authenticate(Some("Bearer wf-project")).is_some());
+        assert!(policy.authenticate(Some("Bearer wrong")).is_none());
         Ok(())
     }
 

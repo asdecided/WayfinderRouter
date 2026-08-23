@@ -102,9 +102,36 @@ one-time plaintext token in the reviewed launch environment for that project
 and use it in place of the placeholder client token. An authenticated key with
 no profiled workspace continues to use the top-level `[routing]` default.
 Profile selection never trusts prompt content, working-directory strings, or a
-public HTTP header. The forthcoming project command and Omarchy surface will
-own canonical repository discovery and no-clobber setup; this section documents
-the portable core contract.
+public HTTP header. The project command owns canonical repository discovery and
+no-clobber setup:
+
+```sh
+cd /path/to/repository
+export WAYFINDER_PROJECT_TOKEN="$(openssl rand -hex 32)"
+wayfinder-router project setup --json
+wayfinder-router project status --json
+```
+
+`setup` accepts either the Git origin it discovers or an explicit
+`--repository owner/name` / `https://github.com/owner/name`. GitHub's repository
+API supplies the canonical identity. The token is accepted only through
+`WAYFINDER_PROJECT_TOKEN` or `--prompt-token`; only its SHA-256 hash is stored.
+Generated state lives under
+`${XDG_CONFIG_HOME:-$HOME/.config}/wayfinder/projects`, not in the repository or
+the user's main Router TOML. The supervised Router watches the owned directory
+and reloads it through the last-known-good path. Launch the coding agent from
+that repository with the same project token in the client's reviewed
+authentication environment.
+
+Inspect the exact owned directory and whether its generated profile has been
+edited with `project status`. Remove only that repository's owned state with:
+
+```sh
+wayfinder-router project rollback --json
+```
+
+Rollback refuses directories without the Wayfinder ownership marker and never
+touches files outside the matching project directory.
 
 ## Check the result
 
