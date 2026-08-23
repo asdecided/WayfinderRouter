@@ -69,13 +69,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: asdecided/WayfinderRouter
-          ref: a7599064af9fc85ce0389ebdf5859731b34e4df6
+          ref: 07834d7bebb7788ed47fd7e79c90ec9832c15180
           path: .router-source
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
       - name: Install coding-agent contract versions
-        run: npm install --global @openai/codex@0.149.0 @anthropic-ai/claude-code@2.1.241
+        run: |
+          npm install --global @openai/codex@0.149.0 @anthropic-ai/claude-code@2.1.241
+          npm install --prefix "$RUNNER_TEMP/opencode" opencode-linux-x64@1.18.21
       - name: Build the candidate Router contract
         run: cargo build --locked --manifest-path .router-source/rust/Cargo.toml --bin wayfinder-router
       - name: Run a real Codex tool round-trip
@@ -87,3 +89,8 @@ jobs:
         env:
           WAYFINDER_ROUTER_BIN: ${{ github.workspace }}/.router-source/rust/target/debug/wayfinder-router
         run: bash test/claude-code-smoke.sh
+      - name: Run a real OpenCode tool round-trip
+        env:
+          WAYFINDER_ROUTER_BIN: ${{ github.workspace }}/.router-source/rust/target/debug/wayfinder-router
+          OPENCODE_BIN: ${{ runner.temp }}/opencode/node_modules/opencode-linux-x64/bin/opencode
+        run: bash test/opencode-smoke.sh

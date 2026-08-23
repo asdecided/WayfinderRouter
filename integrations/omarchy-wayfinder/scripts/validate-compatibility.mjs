@@ -50,11 +50,13 @@ for (const target of compatibility.router.architectures) {
 }
 
 const agents = new Map(compatibility.codingAgents.map(agent => [agent.id, agent]));
-assert.equal(agents.size, 2);
+assert.equal(agents.size, 3);
 assert.equal(agents.get("codex")?.evidence, "real-tool-round-trip");
 assert.equal(agents.get("claude-code")?.evidence, "real-tool-round-trip");
+assert.equal(agents.get("opencode")?.evidence, "real-stream-tool-error-cancel");
 assert.ok(workflow.includes(`@openai/codex@${agents.get("codex")?.version}`));
 assert.ok(workflow.includes(`@anthropic-ai/claude-code@${agents.get("claude-code")?.version}`));
+assert.ok(workflow.includes(`opencode-linux-x64@${agents.get("opencode")?.version}`));
 assert.ok(workflow.includes("compatibility.json"), "CI must read the Omarchy compatibility pin");
 
 assert.equal(compatibility.lifecycle.freshInstall, "release-gated");
@@ -69,6 +71,7 @@ for (const value of [
   compatibility.router.release,
   agents.get("codex")?.version,
   agents.get("claude-code")?.version,
+  agents.get("opencode")?.version,
 ]) {
   assert.ok(matrix.includes(value), `compatibility matrix must include ${value}`);
 }

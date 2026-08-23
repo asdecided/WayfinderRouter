@@ -51,9 +51,9 @@ First-run setup is resumable. Reopening the panel continues from the first incom
 
 ## Coding agent does not route
 
-Reprint the reviewed recipe with `wayfinder-router connect codex` or `wayfinder-router connect claude-code`. Confirm the exact client version in the compatibility matrix and the loopback endpoint. The placeholder local token is not a provider credential.
+Reprint the reviewed recipe with `wayfinder-router connect codex`, `wayfinder-router connect claude-code`, or `wayfinder-router connect opencode`. Confirm the exact client version in the compatibility matrix and the loopback endpoint. The placeholder local token is not a provider credential.
 
-For Codex, review `~/.codex/config.toml` and remove the `wayfinder` provider/model selection to reverse the connection. For Claude Code, unset the four variables listed in the main README. Wayfinder never silently edits either client.
+For Codex, review `~/.codex/config.toml` and remove the `wayfinder` provider/model selection to reverse the connection. For Claude Code, unset the four variables listed in the main README. For OpenCode, remove the `provider.wayfinder` object and any `wayfinder/auto` selection from the project or user `opencode.json`. Wayfinder never silently edits a client or imports its provider credentials.
 
 ## Project profile controls are unavailable
 

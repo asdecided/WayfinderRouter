@@ -13,6 +13,7 @@ Checked: 2026-08-23.
 | Linux | glibc `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` | Both release archives are pinned by digest; Router release CI builds and smokes both targets |
 | Codex | `0.149.0` | Real streaming `/v1/responses` tool round-trip through a candidate Router |
 | Claude Code | `2.1.241` | Real streaming `/v1/messages` tool round-trip through the same candidate Router |
+| OpenCode | `1.18.21` | Real streaming `/v1/chat/completions` `bash` round-trip, upstream error propagation, and disconnect cancellation through the same candidate Router, with its auxiliary title requests counted separately |
 
 ## Evidence levels
 

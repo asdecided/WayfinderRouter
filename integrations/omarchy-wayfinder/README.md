@@ -147,12 +147,14 @@ candidate Router build:
 | --- | --- | --- | --- | --- |
 | Codex | 0.149.0 | `/v1/responses` | `model = "auto"` in reviewed TOML | Streaming `exec_command` call and returned tool output |
 | Claude Code | 2.1.241 | `/v1/messages` | `ANTHROPIC_MODEL=auto` | Streaming `Bash` call and returned tool output |
+| OpenCode | 1.18.21 | `/v1/chat/completions` | `wayfinder/auto` in reviewed JSON | Streaming `bash` round-trip, upstream error, and disconnect cancellation |
 
-Print the bounded connection recipe for either client with the Router CLI:
+Print the bounded connection recipe for any supported client with the Router CLI:
 
 ```sh
 wayfinder-router connect codex
 wayfinder-router connect claude-code
+wayfinder-router connect opencode
 ```
 
 The Codex recipe is a manual addition to `~/.codex/config.toml`; remove its
@@ -164,15 +166,21 @@ unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL
 unset CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY
 ```
 
+The OpenCode recipe is a manual merge of the `provider.wayfinder` object into
+the project or user `opencode.json`. Remove that provider object and any
+`wayfinder/auto` model selection to reverse it. Wayfinder never reads or
+imports OpenCode's provider credentials.
+
 The printed `wayfinder-local` token is only a loopback placeholder and is not a
 provider credential.
 
-Both release-gate smokes use Server-Sent Events and require one real client
-tool round-trip through the Router. The harness terminates a stuck client at a
-bounded timeout and prints client, Router, and provider diagnostics on failure.
-Router unit and integration contracts cover disconnect cancellation and
-Anthropic/OpenAI error-envelope translation; those are not claimed as separate
-real-client smoke scenarios yet.
+All three release-gate smokes use Server-Sent Events and require one real client
+tool round-trip through the Router. The OpenCode contract additionally proves
+that an upstream error reaches the real client and terminating that client
+closes the provider stream through the Router. The harness terminates a stuck
+client at a bounded timeout and prints client, Router, and provider diagnostics
+on failure. Router unit and integration contracts continue to cover the wider
+disconnect-cancellation and Anthropic/OpenAI error-envelope matrix.
 
 ## Controls
 
@@ -239,6 +247,7 @@ bash test/install.test.sh
 bash test/router-lifecycle.test.sh
 bash test/codex-smoke.sh        # Codex 0.149.0 + candidate Router
 bash test/claude-code-smoke.sh  # Claude Code 2.1.241 + candidate Router
+bash test/opencode-smoke.sh     # OpenCode 1.18.21 + candidate Router
 bash -n install.sh uninstall.sh scripts/router-lifecycle.sh
 omarchy plugin validate  # when run on Omarchy Quattro
 ```
@@ -248,7 +257,7 @@ The coding-agent smokes are release-gate harnesses, not installer pins. Set
 local provider, runs the real client through Wayfinder, requires one read-only
 shell tool, and verifies that the tool result returns before the final response.
 CI pins both client contract versions and one reviewed Router commit, then
-builds that Router once for both agents. Codex explicitly disables Responses
+builds that Router once for all three agents. Codex explicitly disables Responses
 server-side web search because a generic Chat Completions backend cannot provide
 that hosted capability. The plugin's downloadable Router version and checksums
 move only in the later coordinated release PR.
@@ -263,6 +272,14 @@ Claude Code runs with only its built-in `Bash` tool enabled and allowlisted,
 inside a temporary workspace and temporary home/config directories. The smoke
 uses the same `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, and
 `ANTHROPIC_MODEL=auto` values printed by `wayfinder-router connect claude-code`.
+
+OpenCode runs in an isolated home, cache, data directory, and workspace with
+automatic updates, external skills, default plugins, and LSP downloads
+disabled. Its project configuration enables only the exact no-write `printf`
+used by the smoke, selects `wayfinder/auto`, and points the custom
+`@ai-sdk/openai-compatible` provider at the candidate Router. The harness also
+handles OpenCode's auxiliary title request separately so it cannot be mistaken
+for the two-request tool round-trip.
 
 ## License
 

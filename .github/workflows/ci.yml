@@ -143,6 +143,13 @@ jobs:
         run: integrations/omarchy-wayfinder/test/router-lifecycle.test.sh
       - name: Test native Omarchy smoke harness
         run: integrations/omarchy-wayfinder/test/omarchy-native-smoke.test.sh
+      - name: Check coding-agent smoke harnesses
+        run: |
+          bash -n \
+            integrations/omarchy-wayfinder/test/codex-smoke.sh \
+            integrations/omarchy-wayfinder/test/claude-code-smoke.sh \
+            integrations/omarchy-wayfinder/test/opencode-smoke.sh
+          node --check integrations/omarchy-wayfinder/test/coding-agent-mock-provider.mjs
       - name: Check install and removal scripts
         run: >-
           bash -n integrations/omarchy-wayfinder/install.sh
