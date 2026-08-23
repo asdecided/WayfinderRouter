@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 use thiserror::Error;
+use wayfinder_routing_core::ExecutionBoundary;
 
 /// Python compatibility bound for `/router/recent`.
 pub const MAX_RECENT_ENTRIES: usize = 200;
@@ -29,6 +30,21 @@ pub struct RecentEntry {
     /// Resolved reusable profile identity for managed policy requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policy_profile: Option<String>,
+    /// Public route that actually served the request after failover.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub served_by: Option<String>,
+    /// Actual content execution boundary for the selected concrete deployment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_boundary: Option<ExecutionBoundary>,
+    /// Latest bounded delivery state observed for this request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<RecentOutcome>,
+    /// Upstream HTTP status when one was observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    /// Stable Wayfinder error type for a failed delivery, never provider content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_type: Option<String>,
     /// Unix timestamp supplied by the invocation boundary.
     pub ts: f64,
     /// Optional realized turn-cost metadata, nested as in the Python API.
@@ -40,6 +56,22 @@ pub struct RecentEntry {
     /// Optional exact-cache outcome (`hit` or `miss`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache: Option<String>,
+}
+
+/// Prompt-free lifecycle state for one selected delivery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecentOutcome {
+    /// A streaming upstream accepted the request and may still be producing data.
+    Streaming,
+    /// Delivery completed successfully.
+    Succeeded,
+    /// Delivery failed after the route decision was recorded.
+    Failed,
+    /// The downstream client disconnected before stream completion.
+    Cancelled,
+    /// The response was served from Wayfinder's local exact cache.
+    CacheHit,
 }
 
 /// Prompt-free realized cost metadata attached after a successful delivery.
@@ -140,6 +172,54 @@ impl RecentRoutes {
         Ok(true)
     }
 
+    /// Attach the actual prompt-free delivery receipt after target selection.
+    pub fn update_delivery(
+        &self,
+        request_id: &str,
+        served_by: &str,
+        execution_boundary: ExecutionBoundary,
+        outcome: RecentOutcome,
+        http_status: Option<u16>,
+        error_type: Option<&str>,
+    ) -> Result<bool, RecentError> {
+        let mut entries = self.entries.lock().map_err(|_| RecentError::LockPoisoned)?;
+        let Some(entry) = entries
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.request_id == request_id)
+        else {
+            return Ok(false);
+        };
+        entry.served_by = Some(served_by.to_owned());
+        entry.execution_boundary = Some(execution_boundary);
+        entry.outcome = Some(outcome);
+        entry.http_status = http_status;
+        entry.error_type = error_type.map(str::to_owned);
+        Ok(true)
+    }
+
+    /// Advance a previously selected delivery without changing its target.
+    pub fn update_outcome(
+        &self,
+        request_id: &str,
+        outcome: RecentOutcome,
+        http_status: Option<u16>,
+        error_type: Option<&str>,
+    ) -> Result<bool, RecentError> {
+        let mut entries = self.entries.lock().map_err(|_| RecentError::LockPoisoned)?;
+        let Some(entry) = entries
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.request_id == request_id)
+        else {
+            return Ok(false);
+        };
+        entry.outcome = Some(outcome);
+        entry.http_status = http_status;
+        entry.error_type = error_type.map(str::to_owned);
+        Ok(true)
+    }
+
     /// Snapshot current metadata with the Python `1..=200` query clamp.
     pub fn report(&self, requested_limit: i64) -> Result<RecentReport, RecentError> {
         let entries = self.entries.lock().map_err(|_| RecentError::LockPoisoned)?;
@@ -176,6 +256,11 @@ mod tests {
             policy_version: None,
             snapshot_id: None,
             policy_profile: None,
+            served_by: None,
+            execution_boundary: None,
+            outcome: None,
+            http_status: None,
+            error_type: None,
             ts: 1_700_000_000.0,
             cost: None,
             key: None,
@@ -222,6 +307,38 @@ mod tests {
         let disabled = RecentRoutes::new(0);
         disabled.record(entry("x", "cloud", 0.9))?;
         assert_eq!(disabled.report(50)?.total, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn delivery_receipt_tracks_actual_boundary_and_bounded_outcome() -> Result<(), RecentError> {
+        let recent = RecentRoutes::new(1);
+        recent.record(entry("request", "cloud", 0.8))?;
+        assert!(recent.update_delivery(
+            "request",
+            "local",
+            ExecutionBoundary::OnDevice,
+            RecentOutcome::Streaming,
+            Some(200),
+            None,
+        )?);
+        assert!(recent.update_outcome(
+            "request",
+            RecentOutcome::Failed,
+            None,
+            Some("wayfinder_router_upstream_error"),
+        )?);
+
+        let report = recent.report(1)?;
+        let entry = &report.recent[0];
+        assert_eq!(entry.served_by.as_deref(), Some("local"));
+        assert_eq!(entry.execution_boundary, Some(ExecutionBoundary::OnDevice));
+        assert_eq!(entry.outcome, Some(RecentOutcome::Failed));
+        assert_eq!(entry.http_status, None);
+        assert_eq!(
+            entry.error_type.as_deref(),
+            Some("wayfinder_router_upstream_error")
+        );
         Ok(())
     }
 

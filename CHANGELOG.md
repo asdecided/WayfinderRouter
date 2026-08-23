@@ -106,6 +106,13 @@ details, release history over commit history.
 
 ### Changed
 
+- **Bounded daily route receipts** (WF-ADR-0074, WF-ROADMAP-0017). The
+  prompt-free `/router/recent` ring now distinguishes the selected route from
+  the destination that actually served it, records the concrete execution
+  boundary, and tracks buffered, streaming, failed, cancelled, and exact-cache
+  outcomes with bounded status/error metadata. Prompts, provider bodies,
+  credentials, and raw errors remain excluded.
+
 - **Deterministic Claude Code model selection** (WF-ADR-0073,
   WF-ROADMAP-0017). The reviewable `connect claude-code` recipe now exports
   `ANTHROPIC_MODEL=auto`, so Claude Code selects Wayfinder's automatic-routing
