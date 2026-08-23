@@ -747,7 +747,8 @@ async fn build_serve_state<W: Write>(
         development_tier_policy(),
     )
     .map_err(|error| error.to_string())?;
-    let mut gateway = gateway_config_from_toml(&text, &where_).map_err(|error| error.to_string())?;
+    let mut gateway =
+        gateway_config_from_toml(&text, &where_).map_err(|error| error.to_string())?;
     let project_count = project_command::merge_owned_projects(&mut gateway)?;
     if project_count > 0 && !host_is_literal_loopback(&options.host) {
         return Err(
