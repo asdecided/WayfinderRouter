@@ -18,12 +18,46 @@ jobs:
           node-version: "22"
       - name: Validate manifest and package
         run: node scripts/validate.mjs
+      - name: Validate compatibility contract
+        run: node scripts/validate-compatibility.mjs
       - name: Test presentation model
         run: node test/model.test.mjs
       - name: Test pinned native Router installation
         run: bash test/install.test.sh
+      - name: Test atomic Router upgrade and rollback
+        run: test/router-lifecycle.test.sh
       - name: Check install and removal scripts
-        run: bash -n install.sh uninstall.sh
+        run: >-
+          bash -n install.sh uninstall.sh scripts/router-lifecycle.sh
+          scripts/validate-omarchy-contract.sh test/install.test.sh
+          test/router-lifecycle.test.sh
+
+  omarchy-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: plugin
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Read the reviewed Omarchy source pin
+        id: omarchy-ref
+        working-directory: plugin
+        run: |
+          commit="$(node -p 'require("./compatibility.json").omarchy.commit')"
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+      - name: Check out the supported Omarchy contract
+        uses: actions/checkout@v4
+        with:
+          repository: basecamp/omarchy
+          ref: ${{ steps.omarchy-ref.outputs.commit }}
+          fetch-depth: 0
+          path: omarchy-source
+          persist-credentials: false
+      - name: Validate against the official Omarchy contract
+        run: plugin/scripts/validate-omarchy-contract.sh omarchy-source
 
   coding-agent-contracts:
     runs-on: ubuntu-latest
