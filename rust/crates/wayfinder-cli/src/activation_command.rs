@@ -109,7 +109,7 @@ pub(crate) fn run_connect(
             "# Add to ~/.codex/config.toml\nmodel_provider = \"wayfinder\"\nmodel = \"auto\"\n\n[model_providers.wayfinder]\nname = \"Wayfinder\"\nbase_url = \"{endpoint}/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false"
         ),
         "claude-code" => format!(
-            "# Set these variables before starting Claude Code\nexport ANTHROPIC_BASE_URL=\"{endpoint}\"\nexport ANTHROPIC_AUTH_TOKEN=\"wayfinder-local\"\nexport CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1"
+            "# Set these variables before starting Claude Code\nexport ANTHROPIC_BASE_URL=\"{endpoint}\"\nexport ANTHROPIC_AUTH_TOKEN=\"wayfinder-local\"\nexport ANTHROPIC_MODEL=\"auto\"\nexport CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1"
         ),
         "opencode" => format!(
             "{{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {{\n    \"wayfinder\": {{\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"name\": \"Wayfinder\",\n      \"options\": {{ \"baseURL\": \"{endpoint}/v1\" }},\n      \"models\": {{ \"auto\": {{ \"name\": \"Wayfinder Automatic\" }} }}\n    }}\n  }}\n}}"
@@ -194,7 +194,7 @@ mod tests {
     fn connect_only_accepts_loopback_and_renders_each_client() {
         for (client, marker) in [
             ("codex", "wire_api"),
-            ("claude-code", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            ("claude-code", "export ANTHROPIC_MODEL=\"auto\""),
             ("opencode", "@ai-sdk/openai-compatible"),
         ] {
             let mut stdout = Vec::new();
@@ -205,6 +205,7 @@ mod tests {
             );
             assert!(String::from_utf8_lossy(&stdout).contains(marker));
         }
+
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         assert_eq!(

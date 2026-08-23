@@ -47,13 +47,16 @@ wayfinder-router connect claude-code
 
 Review and export the printed variables in the shell that starts Claude
 Code. Wayfinder accepts the Anthropic Messages request at its loopback address.
-The third printed variable lets Claude Code discover Wayfinder's configured
-model names. Select `auto` from `/model` after it starts.
+`ANTHROPIC_MODEL=auto` selects Wayfinder's reserved automatic-routing directive.
+The discovery variable also lets Claude Code discover configured model names
+that use its supported `claude` or `anthropic` prefixes. Wayfinder's routing
+directives do not use those prefixes, so the explicit model variable is what
+makes `auto` available to Claude Code.
 The placeholder local token is not a provider credential; if you configure
 Wayfinder virtual keys, replace it with a key minted by `wayfinder-router keys
 new`.
 These variables follow Claude Code's
-[LLM gateway connection contract](https://code.claude.com/docs/en/llm-gateway-connect).
+[LLM gateway connection contract](https://code.claude.com/docs/en/llm-gateway).
 
 ## OpenCode
 

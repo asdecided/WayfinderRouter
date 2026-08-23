@@ -106,6 +106,12 @@ details, release history over commit history.
 
 ### Changed
 
+- **Deterministic Claude Code model selection** (WF-ADR-0073,
+  WF-ROADMAP-0017). The reviewable `connect claude-code` recipe now exports
+  `ANTHROPIC_MODEL=auto`, so Claude Code selects Wayfinder's automatic-routing
+  directive even though its gateway discovery deliberately hides model IDs
+  without a `claude` or `anthropic` prefix.
+
 - **Bounded deterministic shadow routing** (WF-ADR-0063, issue #150). The Rust
   gateway can now opt into prompt-free, deterministically sampled counterfactual
   route evaluation without changing the production response. Candidate routes,
