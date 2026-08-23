@@ -884,13 +884,10 @@ fn with_local_project_profiles(
     }
 
     let mut profiles = Vec::with_capacity(gateway.profiles.len().saturating_add(1));
-    profiles.push(
-        PolicyProfile::new("default", state.routing()).map_err(|error| error.to_string())?,
-    );
+    profiles
+        .push(PolicyProfile::new("default", state.routing()).map_err(|error| error.to_string())?);
     for (profile_id, routing) in &gateway.profiles {
-        profiles.push(
-            PolicyProfile::new(profile_id, routing).map_err(|error| error.to_string())?,
-        );
+        profiles.push(PolicyProfile::new(profile_id, routing).map_err(|error| error.to_string())?);
     }
     let bindings = gateway
         .workspaces
@@ -903,12 +900,8 @@ fn with_local_project_profiles(
             })
         })
         .collect();
-    let document = PolicyDocument::new_with_default(
-        profiles,
-        bindings,
-        Some("default".to_owned()),
-    )
-    .map_err(|error| error.to_string())?;
+    let document = PolicyDocument::new_with_default(profiles, bindings, Some("default".to_owned()))
+        .map_err(|error| error.to_string())?;
     let actor = AdministrativeIdentity::new("local", "wayfinder-router-config")
         .map_err(|error| error.to_string())?;
     let draft = PolicyLifecycle::draft(document, actor).map_err(|error| error.to_string())?;
