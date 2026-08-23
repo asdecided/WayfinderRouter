@@ -24,6 +24,214 @@ function parsedObject(raw) {
   }
 }
 
+function doctor(raw) {
+  var value = parsedObject(raw)
+  if (!value || String(value.schema_version || "") !== "1"
+      || typeof value.ok !== "boolean" || !isFinite(Number(value.destinations))) {
+    return {
+      valid: false,
+      ok: false,
+      config: "",
+      destinations: 0,
+      missingEnvironment: [],
+      gatewayReachable: false
+    }
+  }
+  return {
+    valid: true,
+    ok: value.ok === true,
+    config: String(value.config || ""),
+    destinations: Math.max(0, Number(value.destinations || 0)),
+    missingEnvironment: Array.isArray(value.missing_environment)
+      ? value.missing_environment.map(String) : [],
+    gatewayReachable: value.gateway_reachable === true
+  }
+}
+
+function capabilities(raw) {
+  var value = parsedObject(raw)
+  var nativeCommands = value && Array.isArray(value.native_commands)
+    ? value.native_commands.map(String) : []
+  if (!value || String(value.schema_version || "") !== "1"
+      || String(value.implementation || "") === "" || !Array.isArray(value.native_commands)) {
+    return { valid: false, version: "", nativeCommands: [], projectSupported: false }
+  }
+  return {
+    valid: true,
+    version: String(value.version || ""),
+    nativeCommands: nativeCommands,
+    projectSupported: nativeCommands.indexOf("project setup") !== -1
+      && nativeCommands.indexOf("project status") !== -1
+      && nativeCommands.indexOf("project rollback") !== -1
+  }
+}
+
+function emptyProjectStatus() {
+  return {
+    valid: false,
+    status: "unknown",
+    canonicalRepository: "",
+    repositoryUrl: "",
+    repositoryRoot: "",
+    profileDirectory: "",
+    profileId: "",
+    workspaceId: "",
+    keyId: "",
+    owned: false,
+    tokenSource: "",
+    tokenMatches: null,
+    setupRequired: false,
+    profileModified: false
+  }
+}
+
+function projectStatus(raw) {
+  var value = parsedObject(raw)
+  if (!value || Number(value.schema_version) !== 1 || typeof value.status !== "string"
+      || typeof value.owned !== "boolean" || typeof value.setup_required !== "boolean"
+      || typeof value.profile_modified !== "boolean") {
+    return emptyProjectStatus()
+  }
+  return {
+    valid: true,
+    status: String(value.status),
+    canonicalRepository: String(value.canonical_repository || ""),
+    repositoryUrl: String(value.repository_url || ""),
+    repositoryRoot: String(value.repository_root || ""),
+    profileDirectory: String(value.profile_directory || ""),
+    profileId: String(value.profile_id || ""),
+    workspaceId: String(value.workspace_id || ""),
+    keyId: String(value.key_id || ""),
+    owned: value.owned === true,
+    tokenSource: String(value.token_source || ""),
+    tokenMatches: typeof value.token_matches === "boolean" ? value.token_matches : null,
+    setupRequired: value.setup_required === true,
+    profileModified: value.profile_modified === true
+  }
+}
+
+function projectState(state) {
+  var input = state || {}
+  var report = input.report && typeof input.report === "object"
+    ? input.report : emptyProjectStatus()
+  var error = String(input.error || "")
+  if (!input.configured) {
+    return { ready: false, actionable: false, step: "root", urgent: false,
+      status: "No repository selected", title: "Choose a repository",
+      action: "Choose project", detail: "Set a local repository root in the plugin settings." }
+  }
+  if (input.capabilityChecked && !input.supported) {
+    return { ready: false, actionable: false, step: "unsupported", urgent: true,
+      status: "Router update required", title: "Project profiles unavailable",
+      action: "Update Router", detail: "The installed Router does not advertise the project lifecycle contract." }
+  }
+  if (!input.capabilityChecked || !input.checked) {
+    return { ready: false, actionable: false, step: "checking", urgent: false,
+      status: "Checking repository", title: "Inspecting project context",
+      action: "Checking…", detail: "Wayfinder is resolving owned project state without changing the repository." }
+  }
+  if (error !== "" || !report.valid) {
+    return { ready: false, actionable: false, step: "error", urgent: true,
+      status: "Project needs attention", title: "Repository could not be inspected",
+      action: "Retry", detail: error || "The Router returned an invalid project status." }
+  }
+  if (report.setupRequired || !report.owned) {
+    return { ready: false, actionable: true, step: "setup", urgent: false,
+      status: "Project setup required", title: "Add a repository profile",
+      action: "Set up project",
+      detail: "Enter a token you keep. Only its SHA-256 hash is stored outside the repository." }
+  }
+  if (report.tokenMatches === false) {
+    return { ready: true, actionable: false, step: "ready", urgent: true,
+      status: "Project token mismatch", title: report.canonicalRepository || "Project profile active",
+      action: "Profile active", detail: "The loaded project token does not match this owned profile." }
+  }
+  var detail = report.profileModified
+    ? "The owned routing profile has transparent user changes."
+    : "The deterministic routing scaffold is unchanged."
+  if (report.tokenMatches === true) detail += " The project token matches."
+  else detail += " Supply the same token when launching a supported coding agent."
+  return { ready: true, actionable: false, step: "ready", urgent: false,
+    status: report.profileModified ? "Custom project profile" : "Project profile active",
+    title: report.canonicalRepository || "Project profile active",
+    action: "Profile active", detail: detail }
+}
+
+function projectError(raw) {
+  return String(raw || "")
+    .replace(/Wayfinder project token \(input is not persisted\):/g, "")
+    .replace(/\s+/g, " ").trim()
+}
+
+function validProjectToken(value) {
+  var token = String(value || "")
+  return token.length > 0 && token.length <= 512 && !/[\u0000-\u001f\u007f]/.test(token)
+}
+
+function setupState(state) {
+  var input = state || {}
+  var missing = Array.isArray(input.missingEnvironment)
+    ? input.missingEnvironment.map(String) : []
+  var missingDetail = missing.length > 0
+    ? " Missing environment: " + missing.join(", ") + "."
+    : ""
+
+  if (!input.localEndpoint) {
+    return { ready: false, actionable: false, step: "remote", status: "",
+      title: "Remote endpoint", action: "Remote endpoint",
+      detail: "This endpoint is observed but not managed." }
+  }
+  if (!input.binaryInstalled) {
+    return { ready: false, actionable: false, step: "binary", status: "Router not installed",
+      title: "Install the Router", action: "Router missing",
+      detail: "Run the plugin installer to add the checksum-verified native Router." }
+  }
+  if (String(input.configPath || "") === "") {
+    return { ready: false, actionable: false, step: "path", status: "Preparing setup",
+      title: "Resolve the policy path", action: "Preparing…",
+      detail: "Wayfinder is resolving a user-owned configuration path." }
+  }
+  if (!input.configChecked) {
+    return { ready: false, actionable: false, step: "probe", status: "Checking setup",
+      title: "Check existing setup", action: "Checking…",
+      detail: "Wayfinder is checking for an existing policy without changing it." }
+  }
+  if (!input.configExists) {
+    return { ready: false, actionable: true, step: "policy", status: "Setup required",
+      title: "Create a local policy", action: "Set up Wayfinder",
+      detail: "Creates a no-clobber local policy, validates it, and installs the user service." }
+  }
+  if (!input.doctorChecked) {
+    return { ready: false, actionable: true, step: "doctor", status: "Checking policy",
+      title: "Validate the policy", action: "Check policy",
+      detail: "Runs the native doctor against the existing policy before service installation." }
+  }
+  if (!input.configValid) {
+    return { ready: false, actionable: true, step: "repair", status: "Policy needs attention",
+      title: "Repair the existing policy", action: "Recheck policy",
+      detail: "Existing policies are never overwritten. Fix this one, then run the check again." }
+  }
+  if (!input.unitInstalled) {
+    return { ready: false, actionable: true, step: "service", status: "Service not installed",
+      title: "Install the user service", action: "Install service",
+      detail: "The policy is valid." + missingDetail
+        + " Installation uses the reviewed systemd user-service boundary." }
+  }
+  if (!input.systemdActive) {
+    return { ready: true, actionable: true, step: "start", status: "",
+      title: "Start the Router", action: "Start service",
+      detail: "The service is installed but stopped." + missingDetail }
+  }
+  if (!input.reachable) {
+    return { ready: true, actionable: true, step: "restart", status: "",
+      title: "Recover the Router", action: "Restart service",
+      detail: "The service is active but its loopback gateway is not reachable." + missingDetail }
+  }
+  return { ready: true, actionable: true, step: "ready", status: "",
+    title: "Wayfinder is ready", action: "Restart service",
+    detail: missingDetail.trim() }
+}
+
 function health(raw) {
   var value = parsedObject(raw)
   if (!value || (value.status !== "ok" && value.status !== "degraded")) {
@@ -69,6 +277,15 @@ function recent(raw) {
       model: String(item.model || "unknown"),
       score: Number(item.score || 0),
       mode: String(item.mode || "scored"),
+      policyVersion: String(item.policy_version || ""),
+      snapshotId: String(item.snapshot_id || ""),
+      policyProfile: String(item.policy_profile || ""),
+      servedBy: String(item.served_by || ""),
+      executionBoundary: String(item.execution_boundary || ""),
+      outcome: String(item.outcome || ""),
+      httpStatus: item.http_status !== null && item.http_status !== undefined
+        && isFinite(Number(item.http_status)) ? Number(item.http_status) : null,
+      errorType: String(item.error_type || ""),
       timestamp: Number(item.ts || 0),
       saved: item.cost && isFinite(Number(item.cost.saved)) ? Number(item.cost.saved) : null,
       unit: item.cost ? String(item.cost.unit || "") : "",
@@ -82,6 +299,110 @@ function recent(raw) {
     byModel: value.by_model && typeof value.by_model === "object" ? value.by_model : {},
     recent: entries
   }
+}
+
+function routeTitle(entry) {
+  if (!entry) return "unknown"
+  return shortModel(String(entry.servedBy || entry.model || "unknown"))
+}
+
+function routeReason(entry) {
+  if (!entry) return "Route details unavailable"
+  var mode = String(entry.mode || "")
+  var reason = ""
+  if (mode === "scored") reason = "Automatic · score " + fixed(entry.score, 2)
+  else if (mode === "pinned") reason = "Pinned by request"
+  else if (mode === "slash-pinned") reason = "Pinned by route"
+  else if (mode !== "") reason = mode.replace(/[-_]+/g, " ")
+  else reason = "Routing mode unavailable"
+
+  var selected = String(entry.model || "")
+  var served = String(entry.servedBy || "")
+  if (selected !== "" && served !== "" && selected !== served) {
+    reason = "Selected " + shortModel(selected) + " · " + reason
+  }
+  return reason
+}
+
+function boundaryLabel(value) {
+  var boundary = String(value || "")
+  if (boundary === "on-device") return "ON DEVICE"
+  if (boundary === "local-network") return "LOCAL NET"
+  if (boundary === "hosted") return "HOSTED"
+  return "BOUNDARY ?"
+}
+
+function outcomeLabel(value) {
+  var outcome = String(value || "")
+  if (outcome === "succeeded") return "DONE"
+  if (outcome === "streaming") return "LIVE"
+  if (outcome === "failed") return "FAILED"
+  if (outcome === "cancelled") return "CANCELLED"
+  if (outcome === "cache-hit") return "CACHE"
+  return "PENDING"
+}
+
+function receiptDetail(entry) {
+  if (!entry) return ""
+  return receiptContext(entry) + " · " + routeReason(entry)
+}
+
+function receiptContext(entry) {
+  if (!entry) return ""
+  var parts = [boundaryLabel(entry.executionBoundary)]
+  if (String(entry.policyProfile || "") !== "") parts.push("PROFILE " + entry.policyProfile)
+  return parts.join(" · ")
+}
+
+function receiptNeedsAttention(entry) {
+  return !!entry && String(entry.outcome || "") === "failed"
+}
+
+function receiptRemediation(entry) {
+  if (!entry) return ""
+  var outcome = String(entry.outcome || "")
+  if (outcome === "cancelled") return "Client disconnected before completion."
+  if (outcome !== "failed") return ""
+
+  var errorType = String(entry.errorType || "")
+  var httpStatus = Number(entry.httpStatus)
+  if (errorType === "wayfinder_router_unauthorized" || httpStatus === 401 || httpStatus === 403) {
+    return "Check the provider credential."
+  }
+  if (errorType === "wayfinder_router_rate_limited"
+      || errorType === "wayfinder_router_usage_limited"
+      || errorType === "wayfinder_router_budget_exhausted" || httpStatus === 429) {
+    return "Check provider limits or budget, then retry."
+  }
+  if (errorType === "wayfinder_router_circuit_open") {
+    return "The provider circuit is open; retry shortly."
+  }
+  if (errorType === "wayfinder_router_not_ready"
+      || errorType === "wayfinder_router_misconfigured"
+      || errorType === "wayfinder_router_destination_ineligible"
+      || errorType === "wayfinder_router_offline_unavailable") {
+    return "Run wayfinder-router doctor and repair the policy."
+  }
+  if (errorType === "wayfinder_router_busy"
+      || errorType === "wayfinder_router_overloaded") {
+    return "The Router is busy; retry shortly."
+  }
+  if (errorType === "wayfinder_router_state_error") {
+    return "Restart the Router, then run wayfinder-router doctor."
+  }
+  if (errorType === "wayfinder_router_request_too_large"
+      || errorType === "wayfinder_router_token_bound_required") {
+    return "Reduce the request context or configure a token limit."
+  }
+  return "Retry, then inspect Router logs if it repeats."
+}
+
+function latestActionableReceipt(entries) {
+  var values = Array.isArray(entries) ? entries : []
+  for (var i = 0; i < values.length; i++) {
+    if (receiptNeedsAttention(values[i])) return values[i]
+  }
+  return null
 }
 
 function savings(raw) {

@@ -111,6 +111,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Read the reviewed standalone plugin commit
+        id: omarchy-plugin-ref
+        run: |
+          commit="$(tr -d '[:space:]' < packaging/linux/omarchy-wayfinder-commit.txt)"
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+      - name: Check out the standalone plugin release authority
+        uses: actions/checkout@v4
+        with:
+          repository: asdecided/omarchy-wayfinder
+          ref: ${{ steps.omarchy-plugin-ref.outputs.commit }}
+          path: .omarchy-wayfinder-upstream
+          persist-credentials: false
+      - name: Verify the complete in-tree plugin mirror
+        run: packaging/linux/check_omarchy_mirror.sh .omarchy-wayfinder-upstream
+      - name: Test the mirror drift guard
+        run: packaging/linux/test_omarchy_mirror.sh
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
