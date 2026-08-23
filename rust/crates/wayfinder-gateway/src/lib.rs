@@ -9302,14 +9302,15 @@ mod tests {
         assert_eq!(bytes, Bytes::from_static(b"{\"id\":\"provider-response\"}"));
         assert!(!String::from_utf8_lossy(&bytes).contains("wayfinder"));
 
-        let captured = seen
-            .lock()
-            .map_err(|_| std::io::Error::other("fake delivery lock poisoned"))?;
-        assert_eq!(captured.len(), 1);
-        assert_eq!(captured[0].0, "upstream-small");
-        assert_eq!(captured[0].1["messages"][0]["content"], "hi");
-        assert!(captured[0].1.get("wayfinder_tuning").is_none());
-        drop(captured);
+        {
+            let captured = seen
+                .lock()
+                .map_err(|_| std::io::Error::other("fake delivery lock poisoned"))?;
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].0, "upstream-small");
+            assert_eq!(captured[0].1["messages"][0]["content"], "hi");
+            assert!(captured[0].1.get("wayfinder_tuning").is_none());
+        }
         let recent = json_body(get(&state, "/router/recent?limit=1").await?).await?;
         assert_eq!(recent["recent"][0]["served_by"], "local");
         assert_eq!(recent["recent"][0]["execution_boundary"], "on-device");
