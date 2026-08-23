@@ -2423,6 +2423,7 @@ dependencies = [
 name = "wayfinder-cli"
 version = "2026.8.0"
 dependencies = [
+ "reqwest",
  "serde_json",
  "sha2",
  "thiserror",

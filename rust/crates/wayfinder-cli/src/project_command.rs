@@ -81,7 +81,10 @@ pub(crate) fn run_project(
         return EXIT_OK;
     }
     let Some(action) = arguments.first().map(String::as_str) else {
-        write_error(stderr, "wayfinder-router: project needs setup, status, or rollback");
+        write_error(
+            stderr,
+            "wayfinder-router: project needs setup, status, or rollback",
+        );
         return EXIT_USAGE;
     };
     let options = match parse_options(&arguments[1..], action) {
@@ -162,11 +165,7 @@ fn options_json(arguments: &[String]) -> bool {
     arguments.iter().any(|argument| argument == "--json")
 }
 
-fn setup(
-    options: Options,
-    stdin: &mut dyn Read,
-    stderr: &mut dyn Write,
-) -> Result<Value, String> {
+fn setup(options: Options, stdin: &mut dyn Read, stderr: &mut dyn Write) -> Result<Value, String> {
     let root = canonical_repository_root(options.root.as_deref())?;
     let candidate = repository_candidate(options.repository.as_deref(), &root)?;
     let github_token = github_token();
@@ -181,11 +180,10 @@ fn setup(
         let manifest = read_owned_manifest(&profile_dir)?;
         ensure_matches(&manifest, &repository.full_name, &root)?;
         if let Some(requested) = options.profile.as_deref() {
-            let suffix = format!("-{}", short_digest(&format!(
-                "{}\0{}",
-                repository.full_name,
-                root.display()
-            )));
+            let suffix = format!(
+                "-{}",
+                short_digest(&format!("{}\0{}", repository.full_name, root.display()))
+            );
             if manifest.profile_id != format!("{requested}{suffix}") {
                 return Err(
                     "owned project already uses a different profile id; roll it back explicitly before changing identity"
@@ -349,9 +347,7 @@ pub(crate) fn projects_source_version() -> u128 {
     let mut hasher = Sha256::new();
     hasher.update(projects_dir.as_os_str().to_string_lossy().as_bytes());
     let Ok(entries) = fs::read_dir(&projects_dir) else {
-        return u128::from_be_bytes(
-            hasher.finalize()[..16].try_into().unwrap_or([0_u8; 16]),
-        );
+        return u128::from_be_bytes(hasher.finalize()[..16].try_into().unwrap_or([0_u8; 16]));
     };
     let mut paths = entries
         .filter_map(Result::ok)
@@ -371,9 +367,7 @@ pub(crate) fn projects_source_version() -> u128 {
             }
         }
     }
-    u128::from_be_bytes(
-        hasher.finalize()[..16].try_into().unwrap_or([0_u8; 16]),
-    )
+    u128::from_be_bytes(hasher.finalize()[..16].try_into().unwrap_or([0_u8; 16]))
 }
 
 fn merge_owned_projects_from_dir(
@@ -413,7 +407,9 @@ fn merge_owned_projects_from_dir(
                 manifest.canonical_repository
             ));
         }
-        gateway.profiles.insert(manifest.profile_id.clone(), routing);
+        gateway
+            .profiles
+            .insert(manifest.profile_id.clone(), routing);
         gateway.workspaces.insert(
             manifest.workspace_id.clone(),
             Workspace {
@@ -495,13 +491,17 @@ fn parse_repository_input(value: &str) -> Result<(String, String), String> {
     let slug = if let Some(slug) = trimmed.strip_prefix("https://github.com/") {
         slug
     } else if trimmed.contains("://") || trimmed.starts_with("git@") {
-        return Err("repository must be OWNER/NAME or an https://github.com/OWNER/NAME URL".to_owned());
+        return Err(
+            "repository must be OWNER/NAME or an https://github.com/OWNER/NAME URL".to_owned(),
+        );
     } else {
         trimmed
     };
     let parts = slug.split('/').collect::<Vec<_>>();
     if parts.len() != 2 || parts.iter().any(|part| !valid_repository_segment(part)) {
-        return Err("repository must identify exactly one unambiguous GitHub OWNER/NAME".to_owned());
+        return Err(
+            "repository must identify exactly one unambiguous GitHub OWNER/NAME".to_owned(),
+        );
     }
     Ok((parts[0].to_owned(), parts[1].to_owned()))
 }
@@ -530,8 +530,8 @@ fn repository_candidate(explicit: Option<&str>, root: &Path) -> Result<String, S
     if !output.status.success() {
         return Err("cannot discover repository; pass --repository OWNER/NAME".to_owned());
     }
-    let origin = String::from_utf8(output.stdout)
-        .map_err(|_| "git origin is not valid UTF-8".to_owned())?;
+    let origin =
+        String::from_utf8(output.stdout).map_err(|_| "git origin is not valid UTF-8".to_owned())?;
     let origin = origin.trim();
     if let Some(slug) = origin.strip_prefix("git@github.com:") {
         let slug = slug.trim_end_matches(".git");
@@ -579,7 +579,9 @@ fn projects_dir() -> Result<PathBuf, String> {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .map(|home| home.join(".config/wayfinder/projects"))
-        .ok_or_else(|| "cannot locate project directory; set WAYFINDER_ROUTER_PROJECTS_DIR".to_owned())
+        .ok_or_else(|| {
+            "cannot locate project directory; set WAYFINDER_ROUTER_PROJECTS_DIR".to_owned()
+        })
 }
 
 fn project_token(
@@ -604,7 +606,8 @@ fn project_token(
         }
         bytes.push(byte);
     }
-    let token = String::from_utf8(bytes).map_err(|_| "project token must be valid UTF-8".to_owned())?;
+    let token =
+        String::from_utf8(bytes).map_err(|_| "project token must be valid UTF-8".to_owned())?;
     validate_token(&token)?;
     Ok((token, TokenSource::Prompt))
 }
@@ -641,7 +644,9 @@ fn validate_visible_id(value: &str, label: &str) -> Result<(), String> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
-        return Err(format!("{label} id must use 1-64 ASCII letters, digits, '-' or '_'"));
+        return Err(format!(
+            "{label} id must use 1-64 ASCII letters, digits, '-' or '_'"
+        ));
     }
     Ok(())
 }
@@ -651,7 +656,14 @@ fn generated_profile() -> String {
 }
 
 fn directory_id(repository: &str, root: &Path) -> String {
-    format!("project-{}", short_digest(&format!("{}\0{}", repository.to_ascii_lowercase(), root.display())))
+    format!(
+        "project-{}",
+        short_digest(&format!(
+            "{}\0{}",
+            repository.to_ascii_lowercase(),
+            root.display()
+        ))
+    )
 }
 
 fn short_digest(value: &str) -> String {
@@ -806,7 +818,9 @@ fn read_owned_manifest(profile_dir: &Path) -> Result<ProjectManifest, String> {
 }
 
 fn ensure_matches(manifest: &ProjectManifest, repository: &str, root: &Path) -> Result<(), String> {
-    if !manifest.canonical_repository.eq_ignore_ascii_case(repository)
+    if !manifest
+        .canonical_repository
+        .eq_ignore_ascii_case(repository)
         || manifest.repository_root != root
     {
         return Err("owned project directory identity does not match; no changes made".to_owned());
@@ -834,15 +848,16 @@ fn find_project(
         }
         let manifest = read_owned_manifest(&entry.path())?;
         if manifest.repository_root == root
-            && expected_repository.is_none_or(|expected| {
-                manifest.canonical_repository.eq_ignore_ascii_case(expected)
-            })
+            && expected_repository
+                .is_none_or(|expected| manifest.canonical_repository.eq_ignore_ascii_case(expected))
         {
             matches.push((entry.path(), manifest));
         }
     }
     if matches.len() > 1 {
-        return Err("multiple owned project profiles match this repository; refusing ambiguity".to_owned());
+        return Err(
+            "multiple owned project profiles match this repository; refusing ambiguity".to_owned(),
+        );
     }
     Ok(matches.pop())
 }
@@ -875,7 +890,10 @@ fn status_payload(
 }
 
 fn write_human(stdout: &mut dyn Write, payload: &Value) {
-    let status = payload.get("status").and_then(Value::as_str).unwrap_or("unknown");
+    let status = payload
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
     write_output(stdout, &format!("Project status: {status}"));
     for (label, key) in [
         ("Repository", "canonical_repository"),
@@ -947,8 +965,8 @@ mod tests {
     }
 
     #[test]
-    fn atomic_setup_never_clobbers_an_existing_directory()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn atomic_setup_never_clobbers_an_existing_directory() -> Result<(), Box<dyn std::error::Error>>
+    {
         let root = std::env::temp_dir().join(format!("wayfinder-no-clobber-{}", Uuid::new_v4()));
         let profile_dir = root.join("project-existing");
         fs::create_dir_all(&profile_dir)?;
@@ -1003,7 +1021,10 @@ mod tests {
         let mut gateway = GatewayConfig::default();
         assert_eq!(merge_owned_projects_from_dir(&mut gateway, &root)?, 1);
         assert!(gateway.allow_unauthenticated_default);
-        assert_eq!(gateway.workspaces["project-abc"].profile.as_deref(), Some("project-abc"));
+        assert_eq!(
+            gateway.workspaces["project-abc"].profile.as_deref(),
+            Some("project-abc")
+        );
         let mut collision = GatewayConfig::default();
         collision.profiles.insert(
             "project-abc".to_owned(),
