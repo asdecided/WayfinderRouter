@@ -114,7 +114,7 @@ use crate::deployment_selection::{
 use crate::evidence::{EvidenceError, EvidenceLabel, EvidenceReport, EvidenceStore};
 use crate::metrics::{DEFAULT_MAX_LABEL_SERIES, GatewayMetrics};
 use crate::rate_limit::{RateResult, RateSnapshot};
-use crate::recent::{RecentCost, RecentEntry, RecentRoutes};
+use crate::recent::{RecentCost, RecentEntry, RecentOutcome, RecentRoutes};
 use crate::reliability::{ReliabilityAttempt, ReliabilityError, ReliabilityPolicy, sleep_retry};
 use crate::reload::LastGood;
 use crate::shadow::{ShadowJob, ShadowSnapshot, ShadowStore};
@@ -3162,6 +3162,11 @@ pub(crate) async fn chat_completions(
         snapshot_id: (state.policy_snapshot_id() != UNMANAGED_SNAPSHOT_ID)
             .then(|| state.policy_snapshot_id().to_owned()),
         policy_profile: policy_profile_id.map(str::to_owned),
+        served_by: None,
+        execution_boundary: None,
+        outcome: None,
+        http_status: None,
+        error_type: None,
         ts: timestamp,
         cost: None,
         key: key_id.map(str::to_owned),
@@ -3307,6 +3312,14 @@ pub(crate) async fn chat_completions(
             .map_or(0.0, |cost| cost.realized);
             let _ = state.metrics().observe_cache_hit(avoided);
             let _ = state.recent().update_cache(&request_id, "hit");
+            let _ = state.recent().update_delivery(
+                &request_id,
+                &delivery_name,
+                ExecutionBoundary::OnDevice,
+                RecentOutcome::CacheHit,
+                Some(cached.status),
+                None,
+            );
 
             let status = match StatusCode::from_u16(cached.status) {
                 Ok(status) => status,
@@ -3607,9 +3620,22 @@ pub(crate) async fn chat_completions(
     };
     let served_by = delivery_outcome.served_by;
     let served_by_id = delivery_outcome.served_by_id;
+    let execution_boundary = delivery_outcome.execution_boundary;
     let selection_reason = delivery_outcome.selection_reason;
     let response = delivery_outcome.response;
     let status = response.status();
+    let _ = state.recent().update_delivery(
+        &request_id,
+        &served_by,
+        execution_boundary,
+        if status.is_success() {
+            RecentOutcome::Succeeded
+        } else {
+            RecentOutcome::Failed
+        },
+        Some(status.as_u16()),
+        (!status.is_success()).then_some("wayfinder_router_upstream_error"),
+    );
     let response_content_type = response.content_type().to_owned();
     let content_type = HeaderValue::from_str(&response_content_type)
         .unwrap_or_else(|_| HeaderValue::from_static("application/json"));
@@ -4130,6 +4156,19 @@ struct StreamRelayContext {
     canary_guard: Option<CanaryObservationGuard>,
 }
 
+impl Drop for StreamRelayContext {
+    fn drop(&mut self) {
+        if !self.signal_recorded {
+            let _ = self.state.recent().update_outcome(
+                &self.request_id,
+                RecentOutcome::Cancelled,
+                None,
+                Some("wayfinder_router_cancelled"),
+            );
+        }
+    }
+}
+
 struct StreamingChatInput {
     state: AppState,
     headers: HeaderMap,
@@ -4255,6 +4294,7 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                         established = Some((
                             target_name.clone(),
                             target_id.clone(),
+                            model_execution_boundary(&target),
                             selection.reason,
                             response,
                             attempt,
@@ -4275,6 +4315,14 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                     }
                     Ok(response) => {
                         let status = response.status();
+                        let _ = state.recent().update_delivery(
+                            &request_id,
+                            target_name,
+                            model_execution_boundary(&target),
+                            RecentOutcome::Failed,
+                            Some(status.as_u16()),
+                            Some("wayfinder_router_upstream_error"),
+                        );
                         state.observe_deployment(
                             &target_id,
                             DeploymentObservation::failure(
@@ -4369,14 +4417,29 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
     let Some((
         served_by,
         served_by_id,
+        execution_boundary,
         selection_reason,
         response,
         reliability_attempt,
         attempt_started,
     )) = established
     else {
+        let _ = state.recent().update_outcome(
+            &request_id,
+            RecentOutcome::Failed,
+            None,
+            Some(last_failure.1),
+        );
         return error_response(last_failure.0, last_failure.1, last_error, headers);
     };
+    let _ = state.recent().update_delivery(
+        &request_id,
+        &served_by,
+        execution_boundary,
+        RecentOutcome::Streaming,
+        Some(StatusCode::OK.as_u16()),
+        None,
+    );
     if let Err(message) = insert_header(&mut headers, "x-wayfinder-router-served-by", &served_by) {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -4561,6 +4624,12 @@ async fn finish_stream_success(context: &mut StreamRelayContext) {
     if let Some(mut guard) = context.canary_guard.take() {
         guard.finish(true, &context.target_name, usage).await;
     }
+    let _ = context.state.recent().update_outcome(
+        &context.request_id,
+        RecentOutcome::Succeeded,
+        Some(StatusCode::OK.as_u16()),
+        None,
+    );
 }
 
 fn stream_failure_type(error: &DeliveryError) -> &'static str {
@@ -4607,6 +4676,12 @@ fn stream_failure_chunk(
     error_type: &str,
     affects_reliability: bool,
 ) -> Bytes {
+    let _ = context.state.recent().update_outcome(
+        &context.request_id,
+        RecentOutcome::Failed,
+        None,
+        Some(error_type),
+    );
     if !context.signal_recorded {
         let elapsed = context
             .started
@@ -4849,6 +4924,7 @@ enum ReliableDeliveryFailure {
 struct BufferedDeliveryOutcome {
     served_by: String,
     served_by_id: String,
+    execution_boundary: ExecutionBoundary,
     selection_reason: &'static str,
     response: BufferedDeliveryResponse,
 }
@@ -4975,6 +5051,7 @@ async fn deliver_with_reliability(
                             return Ok(BufferedDeliveryOutcome {
                                 served_by: target_name.clone(),
                                 served_by_id: target_id,
+                                execution_boundary: model_execution_boundary(&target),
                                 selection_reason: selection.reason,
                                 response,
                             });
@@ -9232,6 +9309,12 @@ mod tests {
         assert_eq!(captured[0].0, "upstream-small");
         assert_eq!(captured[0].1["messages"][0]["content"], "hi");
         assert!(captured[0].1.get("wayfinder_tuning").is_none());
+        drop(captured);
+        let recent = json_body(get(&state, "/router/recent?limit=1").await?).await?;
+        assert_eq!(recent["recent"][0]["served_by"], "local");
+        assert_eq!(recent["recent"][0]["execution_boundary"], "on-device");
+        assert_eq!(recent["recent"][0]["outcome"], "succeeded");
+        assert_eq!(recent["recent"][0]["http_status"], 201);
         Ok(())
     }
 
@@ -10246,7 +10329,15 @@ mod tests {
         assert_eq!(savings["tokens"], 2);
         let recent = json_body(get(&state, "/router/recent?limit=2").await?).await?;
         assert!(recent["recent"][0]["cost"].is_object());
+        assert_eq!(recent["recent"][0]["served_by"], "local");
+        assert_eq!(recent["recent"][0]["execution_boundary"], "on-device");
+        assert_eq!(recent["recent"][0]["outcome"], "succeeded");
         assert!(recent["recent"][1].get("cost").is_none());
+        assert_eq!(recent["recent"][1]["outcome"], "cancelled");
+        assert_eq!(
+            recent["recent"][1]["error_type"],
+            "wayfinder_router_cancelled"
+        );
         Ok(())
     }
 
