@@ -35,6 +35,11 @@
       "id": "claude-code",
       "version": "2.1.241",
       "evidence": "real-tool-round-trip"
+    },
+    {
+      "id": "opencode",
+      "version": "1.18.21",
+      "evidence": "real-stream-tool-error-cancel"
     }
   ],
   "lifecycle": {

@@ -21,6 +21,14 @@ const contracts = {
     toolMarker: "WAYFINDER_CLAUDE_TOOL_ROUNDTRIP",
     finalMarker: "WAYFINDER_CLAUDE_SMOKE_OK",
   },
+  "opencode-1.18.21": {
+    agent: "opencode",
+    version: "1.18.21",
+    preferredTool: "bash",
+    argumentName: "command",
+    toolMarker: "WAYFINDER_OPENCODE_TOOL_ROUNDTRIP",
+    finalMarker: "WAYFINDER_OPENCODE_SMOKE_OK",
+  },
 };
 const selected = contracts[contract];
 const maxRequestBytes = 2 * 1024 * 1024;
@@ -28,13 +36,35 @@ const toolCallId = "call_wayfinder_smoke";
 
 if (!Number.isInteger(port) || port < 1024 || port > 65535 || !evidencePath || !selected) {
   process.stderr.write(
-    "usage: node coding-agent-mock-provider.mjs PORT EVIDENCE_PATH codex-0.149.0|claude-code-2.1.241\n",
+    "usage: node coding-agent-mock-provider.mjs PORT EVIDENCE_PATH codex-0.149.0|claude-code-2.1.241|opencode-1.18.21\n",
   );
   process.exit(2);
 }
 
 let requestCount = 0;
+let auxiliaryRequestCount = 0;
 let translatedToolName = "";
+let toolOutputSeen = false;
+let errorRequestSeen = false;
+let cancellationStarted = false;
+let cancellationObserved = false;
+
+function persistEvidence() {
+  writeFileSync(evidencePath, `${JSON.stringify({
+    schema_version: 1,
+    agent: selected.agent,
+    client_version: selected.version,
+    requests: requestCount,
+    auxiliary_requests: auxiliaryRequestCount,
+    tool_name: translatedToolName,
+    tool_call_id: toolCallId,
+    tool_output_seen: toolOutputSeen,
+    final_marker: selected.finalMarker,
+    error_request_seen: errorRequestSeen,
+    cancellation_started: cancellationStarted,
+    cancellation_observed: cancellationObserved,
+  }, null, 2)}\n`, { mode: 0o600 });
+}
 
 function json(response, status, value) {
   const body = JSON.stringify(value);
@@ -104,10 +134,63 @@ const server = createServer((request, response) => {
       return json(response, 400, { error: { message: "unexpected model or stream mode" } });
     }
 
-    requestCount += 1;
     const result = toolResult(body);
+    const tool = result ? undefined : requestedTool(body);
+    const requestText = JSON.stringify(body);
+    if (selected.agent === "opencode" && !result && !tool) {
+      auxiliaryRequestCount += 1;
+      persistEvidence();
+      return sse(response, [
+        {
+          id: "chatcmpl-wayfinder-smoke-title",
+          object: "chat.completion.chunk",
+          model: "smoke-model",
+          choices: [{
+            index: 0,
+            delta: { content: "Wayfinder smoke" },
+            finish_reason: "stop",
+          }],
+          usage: { prompt_tokens: 12, completion_tokens: 3 },
+        },
+      ]);
+    }
+
+    if (selected.agent === "opencode"
+        && requestText.includes("WAYFINDER_OPENCODE_ERROR_PROBE")) {
+      errorRequestSeen = true;
+      persistEvidence();
+      return json(response, 400, {
+        error: { message: "WAYFINDER_OPENCODE_UPSTREAM_ERROR" },
+      });
+    }
+    if (selected.agent === "opencode"
+        && requestText.includes("WAYFINDER_OPENCODE_CANCELLATION_PROBE")) {
+      cancellationStarted = true;
+      persistEvidence();
+      response.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+      });
+      response.write(`data: ${JSON.stringify({
+        id: "chatcmpl-wayfinder-smoke-cancellation",
+        object: "chat.completion.chunk",
+        model: "smoke-model",
+        choices: [{
+          index: 0,
+          delta: { content: "waiting" },
+          finish_reason: null,
+        }],
+      })}\n\n`);
+      response.on("close", () => {
+        cancellationObserved = true;
+        persistEvidence();
+      });
+      return;
+    }
+
+    requestCount += 1;
     if (!result) {
-      const tool = requestedTool(body);
       if (!tool) {
         return json(response, 400, {
           error: { message: `${selected.preferredTool} was not translated for ${selected.agent}` },
@@ -150,16 +233,8 @@ const server = createServer((request, response) => {
         },
       });
     }
-    writeFileSync(evidencePath, `${JSON.stringify({
-      schema_version: 1,
-      agent: selected.agent,
-      client_version: selected.version,
-      requests: requestCount,
-      tool_name: translatedToolName,
-      tool_call_id: toolCallId,
-      tool_output_seen: true,
-      final_marker: selected.finalMarker,
-    }, null, 2)}\n`, { mode: 0o600 });
+    toolOutputSeen = true;
+    persistEvidence();
     return sse(response, [
       {
         id: "chatcmpl-wayfinder-smoke-2",
