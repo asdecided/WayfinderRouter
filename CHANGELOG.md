@@ -8,6 +8,14 @@ details, release history over commit history.
 
 ### Added
 
+- **Owned project profile lifecycle** (WF-ADR-0076). Canonical GitHub
+  repository discovery now feeds an XDG-owned, no-clobber
+  `project setup|status|rollback` contract. Project capabilities enter only
+  through environment or stdin and persist only as SHA-256 hashes. Owned
+  profiles merge into the versioned policy and last-known-good path while
+  unrelated loopback clients retain the global default; non-loopback project
+  mode and identifier collisions fail closed.
+
 - **Authenticated local project profiles** (WF-ADR-0075). Local gateway TOML
   can define bounded routing-only profiles and attach one to a workspace. A
   successfully authenticated project key supplies the workspace identity;

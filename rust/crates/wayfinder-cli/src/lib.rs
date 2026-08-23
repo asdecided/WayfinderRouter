@@ -9,6 +9,7 @@ mod calibrate_command;
 mod codex_app_server;
 mod config_command;
 mod doctor_command;
+mod project_command;
 mod service_command;
 
 use std::collections::BTreeMap;
@@ -171,6 +172,7 @@ pub fn run(
         "doctor" => doctor_command::run_doctor(&arguments[1..], stdout, stderr),
         "connect" => activation_command::run_connect(&arguments[1..], stdout, stderr),
         "open" => activation_command::run_open(&arguments[1..], stdout, stderr),
+        "project" => project_command::run_project(&arguments[1..], stdin, stdout, stderr),
         "calibrate" => calibrate_command::run_calibrate(&arguments[1..], stdin, stdout, stderr),
         "keys" => run_keys(&arguments[1..], stdout, stderr),
         "app-setup-init" => app_setup_command::run_app_setup(&arguments[1..], stdout, stderr),
@@ -339,8 +341,8 @@ fn run_capabilities(arguments: &[String], stdout: &mut dyn Write, stderr: &mut d
         "implementation": "rust",
         "version": product_version(),
         "target_architecture": target_architecture(),
-        "commands": ["init", "doctor", "connect", "open", "route", "calibrate", "serve", "service", "keys", "capabilities", "app-setup-init", "app-configure-chatgpt", "config", "apple-foundation-live-smoke"],
-        "native_commands": ["init", "doctor", "connect", "open", "route", "calibrate", "serve", "service", "keys new", "capabilities", "app-setup-init", "app-configure-chatgpt", "config read-routing", "config apply-routing", "apple-foundation-live-smoke"],
+        "commands": ["init", "doctor", "connect", "open", "project", "route", "calibrate", "serve", "service", "keys", "capabilities", "app-setup-init", "app-configure-chatgpt", "config", "apple-foundation-live-smoke"],
+        "native_commands": ["init", "doctor", "connect", "open", "project setup", "project status", "project rollback", "route", "calibrate", "serve", "service", "keys new", "capabilities", "app-setup-init", "app-configure-chatgpt", "config read-routing", "config apply-routing", "apple-foundation-live-smoke"],
         "delegated_commands": [],
         "delegation": null,
         "decision_schema_versions": ["3"],
@@ -428,7 +430,7 @@ pub async fn run_serve_process(
         }
     };
     let reload_path = selected_config_path(&options);
-    let initial_version = config_source_version(&reload_path);
+    let initial_version = combined_config_source_version(&reload_path);
     let audit_log = state.audit_log().clone();
     let holder = Arc::new(LastGood::new(state, initial_version));
     let reload_holder = Arc::clone(&holder);
@@ -438,7 +440,7 @@ pub async fn run_serve_process(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            let version = config_source_version(&reload_path);
+            let version = combined_config_source_version(&reload_path);
             if reload_holder.version().ok() == Some(version) {
                 continue;
             }
@@ -569,6 +571,10 @@ fn config_source_version(path: &Path) -> u128 {
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |duration| duration.as_nanos());
     modified ^ u128::from(metadata.len())
+}
+
+fn combined_config_source_version(path: &Path) -> u128 {
+    config_source_version(path) ^ project_command::projects_source_version().rotate_left(1)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -741,7 +747,13 @@ async fn build_serve_state<W: Write>(
         development_tier_policy(),
     )
     .map_err(|error| error.to_string())?;
-    let gateway = gateway_config_from_toml(&text, &where_).map_err(|error| error.to_string())?;
+    let mut gateway = gateway_config_from_toml(&text, &where_).map_err(|error| error.to_string())?;
+    let project_count = project_command::merge_owned_projects(&mut gateway)?;
+    if project_count > 0 && !host_is_literal_loopback(&options.host) {
+        return Err(
+            "owned local project profiles require an explicit loopback gateway host".to_owned(),
+        );
+    }
 
     let codex_provider_configured = gateway
         .models
@@ -1454,7 +1466,7 @@ fn write_error(stream: &mut dyn Write, message: &str) {
 }
 
 const TOP_LEVEL_USAGE: &str = "usage: wayfinder-router [-h] [--version] COMMAND ...";
-const TOP_LEVEL_HELP: &str = "usage: wayfinder-router [-h] [--version] COMMAND ...\n\nLocal execution policy for AI.\n\nStart here:\n  init           Create a no-clobber starter policy.\n  doctor         Check policy, credential references, and local gateway reachability.\n  connect        Print a verified client configuration for Codex, Claude Code, or OpenCode.\n  open           Open the local decision dashboard.\n\nCommands:\n  route          Score a prompt and recommend a model.\n  calibrate      Fit a price-sensitive min-cost threshold from labelled JSONL.\n  serve          Run the bounded HTTP gateway.\n  service        Manage the always-on launchd/systemd user service.\n  keys new       Mint a virtual gateway key and its hashed config entry.\n  capabilities   Emit the versioned helper capability handshake.\n  app-setup-init Create a bounded desktop setup config.\n  app-configure-chatgpt\n                 Add a bounded ChatGPT account route for Desktop.\n  config read-routing | apply-routing\n                 Read or replace the desktop-owned routing fragment.\n  apple-foundation-live-smoke\n                 Exercise the bounded Apple Foundation Models delivery path.";
+const TOP_LEVEL_HELP: &str = "usage: wayfinder-router [-h] [--version] COMMAND ...\n\nLocal execution policy for AI.\n\nStart here:\n  init           Create a no-clobber starter policy.\n  doctor         Check policy, credential references, and local gateway reachability.\n  connect        Print a verified client configuration for Codex, Claude Code, or OpenCode.\n  project        Set up, inspect, or roll back a repository profile.\n  open           Open the local decision dashboard.\n\nCommands:\n  route          Score a prompt and recommend a model.\n  calibrate      Fit a price-sensitive min-cost threshold from labelled JSONL.\n  serve          Run the bounded HTTP gateway.\n  service        Manage the always-on launchd/systemd user service.\n  keys new       Mint a virtual gateway key and its hashed config entry.\n  capabilities   Emit the versioned helper capability handshake.\n  app-setup-init Create a bounded desktop setup config.\n  app-configure-chatgpt\n                 Add a bounded ChatGPT account route for Desktop.\n  config read-routing | apply-routing\n                 Read or replace the desktop-owned routing fragment.\n  apple-foundation-live-smoke\n                 Exercise the bounded Apple Foundation Models delivery path.";
 const ROUTE_HELP: &str = "usage: wayfinder-router route [-h] [--threshold THRESHOLD] [--json] [--explain] prompt\n\nScore a prompt and recommend a model.";
 const KEYS_HELP: &str = "usage: wayfinder-router keys new [--id ID] [--workspace ID] [--json]\n\nMint a virtual gateway key. The plaintext is printed once; only its SHA-256 hash belongs in config.";
 const SERVE_HELP: &str = "usage: wayfinder-router serve [-h] [--host HOST] [--port PORT] [--surface local|data-plane] [--dry-run] [--timeout TIMEOUT] [--config CONFIG]\n\nRun the bounded HTTP gateway. Non-loopback serving requires the authenticated data-plane surface.";
@@ -1554,6 +1566,9 @@ mod tests {
                 "doctor",
                 "connect",
                 "open",
+                "project setup",
+                "project status",
+                "project rollback",
                 "route",
                 "calibrate",
                 "serve",
