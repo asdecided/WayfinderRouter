@@ -35,7 +35,9 @@ for (const required of [
   "install.sh",
   "uninstall.sh",
   "scripts/router-lifecycle.sh",
+  "scripts/omarchy-native-smoke.sh",
   "test/router-lifecycle.test.sh",
+  "test/omarchy-native-smoke.test.sh",
 ]) {
   await access(path.join(root, required), constants.R_OK);
 }
@@ -47,7 +49,9 @@ const uninstaller = await readFile(path.join(root, "uninstall.sh"), "utf8");
 const readme = await readFile(path.join(root, "README.md"), "utf8");
 const model = await readFile(path.join(root, "Model.js"), "utf8");
 const installerStat = await stat(path.join(root, "install.sh"));
+const nativeSmokeStat = await stat(path.join(root, "scripts/omarchy-native-smoke.sh"));
 assert.notEqual(installerStat.mode & 0o111, 0, "install.sh must remain directly executable");
+assert.notEqual(nativeSmokeStat.mode & 0o111, 0, "native smoke must remain directly executable");
 assert.ok(service.includes("wayfinder-router.service"));
 assert.ok(service.includes("/healthz"));
 assert.ok(service.includes('"init", "--preset", "local", "--path"'));
@@ -109,5 +113,6 @@ assert.ok(
 );
 assert.ok(readme.includes("Project profiles"), "README must document project profiles");
 assert.ok(readme.includes("stdin"), "README must document the project-token stdin boundary");
+assert.ok(readme.includes("docs/native-smoke.md"), "README must link the native smoke gate");
 
 console.log(`validated ${manifest.id} ${manifest.version}`);

@@ -21,7 +21,7 @@ Checked: 2026-08-23.
 - **Documented** means the operator path is explicit and reversible, but it is not yet sufficient for a release claim.
 - **Blocked** means the current source intentionally refuses to claim the capability.
 
-The official Omarchy manifest validator is contract evidence, not a substitute for a real Quickshell desktop smoke. Before a coordinated release, a clean supported Omarchy machine must still prove widget loading, first-run setup, service survival across a shell restart, and removal.
+The official Omarchy manifest validator is contract evidence, not a substitute for a real Quickshell desktop smoke. Before a coordinated release, a clean supported Omarchy machine must run the [native smoke gate](native-smoke.md) to prove widget loading, first-run setup, and service survival across a shell restart. Ownership-safe removal remains covered by the installer harness and must be repeated for the coordinated candidate.
 
 ## Current lifecycle status
 

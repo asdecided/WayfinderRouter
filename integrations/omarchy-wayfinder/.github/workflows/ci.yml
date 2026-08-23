@@ -26,11 +26,14 @@ jobs:
         run: bash test/install.test.sh
       - name: Test atomic Router upgrade and rollback
         run: test/router-lifecycle.test.sh
+      - name: Test native Omarchy smoke harness
+        run: test/omarchy-native-smoke.test.sh
       - name: Check install and removal scripts
         run: >-
           bash -n install.sh uninstall.sh scripts/router-lifecycle.sh
-          scripts/validate-omarchy-contract.sh test/install.test.sh
-          test/router-lifecycle.test.sh
+          scripts/validate-omarchy-contract.sh scripts/omarchy-native-smoke.sh
+          test/install.test.sh test/router-lifecycle.test.sh
+          test/omarchy-native-smoke.test.sh
 
   omarchy-contract:
     runs-on: ubuntu-latest
