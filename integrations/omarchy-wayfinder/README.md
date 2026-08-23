@@ -62,6 +62,8 @@ installed. Interrupted setup is safe to resume from the bar.
 
 For bounded diagnostic commands, source update steps, and current rollback
 limits, use the [troubleshooting guide](docs/troubleshooting.md).
+Release candidates also require the operator-run [native Omarchy smoke](docs/native-smoke.md);
+hosted contract tests cannot attest that a real Quickshell session rendered the widget.
 
 The Router binary is installed to `~/.local/bin` by default. Set
 `WAYFINDER_BIN_DIR` before running the installer when another user-owned binary

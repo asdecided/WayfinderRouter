@@ -141,14 +141,18 @@ jobs:
         run: bash integrations/omarchy-wayfinder/test/install.test.sh
       - name: Test atomic Router upgrade and rollback
         run: integrations/omarchy-wayfinder/test/router-lifecycle.test.sh
+      - name: Test native Omarchy smoke harness
+        run: integrations/omarchy-wayfinder/test/omarchy-native-smoke.test.sh
       - name: Check install and removal scripts
         run: >-
           bash -n integrations/omarchy-wayfinder/install.sh
           integrations/omarchy-wayfinder/uninstall.sh
           integrations/omarchy-wayfinder/scripts/router-lifecycle.sh
           integrations/omarchy-wayfinder/scripts/validate-omarchy-contract.sh
+          integrations/omarchy-wayfinder/scripts/omarchy-native-smoke.sh
           integrations/omarchy-wayfinder/test/install.test.sh
           integrations/omarchy-wayfinder/test/router-lifecycle.test.sh
+          integrations/omarchy-wayfinder/test/omarchy-native-smoke.test.sh
 
   linux-packaging:
     runs-on: ubuntu-24.04
