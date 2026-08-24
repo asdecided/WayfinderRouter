@@ -124,6 +124,27 @@ details, release history over commit history.
 
 ### Changed
 
+- **Calibrated automatic first run and semantic blind-spot repair**
+  (WF-ADR-0079, issues #171 and #195). Newly generated automatic presets now
+  run the native min-cost calibrator over the bundled, checksum-recorded
+  developer corpus and write the evidence receipt into the no-clobber policy.
+  A small reviewed lexical weight routes the short halting-problem reproduction
+  to the strong arm, while optional `calibrate --distill-lexicon` learns a
+  bounded static signal from labelled traffic without adding a request-time
+  model, network, dependency, or credential. A 24-row targeted fixture gates
+  complete held-out recovery of both short-hard and long-easy cases.
+
+- **Route-collapse diagnosis** (WF-ADR-0079, issue #195). The prompt-free
+  recent ring now reports scored-only arm counts, and `doctor` warns when at
+  least 20 automatic decisions all use one configured arm. Pinned requests,
+  intentional single-arm policies, unavailable evidence, and warm-up windows
+  do not produce a false warning.
+
+- **AI-readable setup guide.** Root `llms.txt` gives coding agents a curated,
+  ownership-safe Omarchy install, setup, calibration, diagnosis, and rollback
+  path. CI executes its native setup contract, including no-clobber creation,
+  semantic routing, and doctor output.
+
 - **Evidence-backed developer routing starter** (WF-ADR-0078, issue #195).
   Unconfigured binary routing, generated project profiles, and automatic
   `hybrid`, `openai`, and `gemini` presets now share a `0.01` starter cut. The

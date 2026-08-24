@@ -8,7 +8,12 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::{EXIT_OK, EXIT_USAGE, write_error, write_output};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use wayfinder_config::{TierOrderPolicy, dump_routing_toml, routing_config_from_toml};
 use wayfinder_config::gateway::{ProviderKind, gateway_config_from_toml};
+use wayfinder_routing_core::calibration::{ThresholdSample, calibrate_min_cost};
+use wayfinder_routing_core::{Tier, score_complexity};
 
 pub(crate) const APP_SETUP_HELP: &str =
     "usage: wayfinder-router app-setup-init --preset PRESET --path PATH";
@@ -117,17 +122,24 @@ pub(crate) fn run_app_setup(
             return EXIT_USAGE;
         }
     };
-    let Some(config) = preset_config(&options.preset) else {
-        write_error(
-            stderr,
-            &format!(
-                "wayfinder-router: unknown app setup preset '{}'",
-                options.preset
-            ),
-        );
-        return EXIT_USAGE;
+    let config = match preset_config(&options.preset) {
+        Ok(Some(config)) => config,
+        Ok(None) => {
+            write_error(
+                stderr,
+                &format!(
+                    "wayfinder-router: unknown app setup preset '{}'",
+                    options.preset
+                ),
+            );
+            return EXIT_USAGE;
+        }
+        Err(message) => {
+            write_error(stderr, &format!("wayfinder-router: {message}"));
+            return EXIT_USAGE;
+        }
     };
-    if let Err(error) = write_new_config(&options.path, config) {
+    if let Err(error) = write_new_config(&options.path, &config) {
         let message = if error.kind() == io::ErrorKind::AlreadyExists {
             format!("{} already exists", options.path.display())
         } else {
@@ -194,15 +206,132 @@ pub(crate) fn write_new_config(path: &Path, contents: &str) -> io::Result<()> {
     file.write_all(contents.as_bytes())
 }
 
-pub(crate) fn preset_config(name: &str) -> Option<&'static str> {
+pub(crate) fn preset_config(name: &str) -> Result<Option<String>, String> {
     match name {
-        "apple-local" => Some(APPLE_LOCAL_CONFIG),
-        "hybrid" => Some(HYBRID_CONFIG),
-        "local" => Some(LOCAL_CONFIG),
-        "openai" => Some(OPENAI_CONFIG),
-        "gemini" => Some(GEMINI_CONFIG),
-        _ => None,
+        "apple-local" => Ok(Some(APPLE_LOCAL_CONFIG.to_owned())),
+        "hybrid" => calibrated_automatic_preset("hybrid", HYBRID_CONFIG).map(Some),
+        "local" => Ok(Some(LOCAL_CONFIG.to_owned())),
+        "openai" => calibrated_automatic_preset("openai", OPENAI_CONFIG).map(Some),
+        "gemini" => calibrated_automatic_preset("gemini", GEMINI_CONFIG).map(Some),
+        _ => Ok(None),
     }
+}
+
+const STARTER_CORPUS: &str =
+    include_str!("../../../../benchmarks/blind/openai-cross-provider.jsonl");
+const STARTER_SEMANTIC_WEIGHT: f64 = 0.05;
+
+fn calibrated_automatic_preset(name: &str, base: &str) -> Result<String, String> {
+    let mut routing = routing_config_from_toml(
+        base,
+        name,
+        None,
+        TierOrderPolicy::StrictInput,
+    )
+    .map_err(|error| format!("built-in {name} preset is invalid: {error}"))?;
+    if routing.tiers.len() != 2 {
+        return Err(format!("built-in {name} preset is not a two-arm policy"));
+    }
+    if !routing
+        .weights
+        .set("reasoning_term_count", STARTER_SEMANTIC_WEIGHT)
+    {
+        return Err("starter semantic feature mapping is unavailable".to_owned());
+    }
+    let rows = parse_starter_corpus()?;
+    let mut samples = Vec::with_capacity(rows.len());
+    for (prompt, requires_high) in &rows {
+        let decision = score_complexity(prompt, &routing).map_err(|error| error.to_string())?;
+        samples.push(ThresholdSample {
+            score: decision.score,
+            requires_high: *requires_high,
+        });
+    }
+    let result = calibrate_min_cost(&samples, 0.0, 1.0, 2.0)
+        .map_err(|error| format!("starter calibration failed: {error}"))?;
+    let low_model = routing
+        .tiers
+        .first()
+        .map(|tier| tier.model.clone())
+        .ok_or_else(|| "starter low arm is missing".to_owned())?;
+    let high_model = routing
+        .tiers
+        .get(1)
+        .map(|tier| tier.model.clone())
+        .ok_or_else(|| "starter high arm is missing".to_owned())?;
+    routing.tiers = if result.threshold == 0.0 {
+        vec![Tier::new(0.0, high_model)]
+    } else {
+        vec![
+            Tier::new(0.0, low_model),
+            Tier::new(result.threshold, high_model),
+        ]
+    };
+    let routing_fragment = dump_routing_toml(&routing);
+    let gateway_offset = base
+        .find("[gateway")
+        .ok_or_else(|| format!("built-in {name} preset has no gateway section"))?;
+    let gateway = base
+        .get(gateway_offset..)
+        .ok_or_else(|| format!("built-in {name} preset boundary is invalid"))?;
+    let digest = Sha256::digest(STARTER_CORPUS.as_bytes());
+    let corpus_sha256 = format!("{digest:x}");
+    let generated = format!(
+        "# Generated by wayfinder-router init (preset: {name}).\n\
+# wayfinder-starter-calibration: developer-v1\n\
+# corpus: benchmarks/blind/openai-cross-provider.jsonl\n\
+# corpus-sha256: {corpus_sha256}\n\
+# samples: {} (94 hard, 60 easy)\n\
+# objective: min-cost low=0 high=1 quality-penalty=2\n\
+# quality-recovered: {:.4}; cost-savings: {:.4}\n\
+{routing_fragment}\n{gateway}",
+        rows.len(),
+        result.quality_recovered,
+        result.cost_savings,
+    );
+    routing_config_from_toml(
+        &generated,
+        &format!("generated {name} preset"),
+        None,
+        TierOrderPolicy::StrictInput,
+    )
+    .map_err(|error| format!("generated {name} preset is invalid: {error}"))?;
+    gateway_config_from_toml(&generated, &format!("generated {name} preset"))
+        .map_err(|error| format!("generated {name} gateway is invalid: {error}"))?;
+    Ok(generated)
+}
+
+fn parse_starter_corpus() -> Result<Vec<(String, bool)>, String> {
+    let mut rows = Vec::new();
+    for (offset, line) in STARTER_CORPUS.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(line).map_err(|error| {
+            format!("built-in starter corpus line {} is invalid: {error}", offset + 1)
+        })?;
+        let prompt = value["prompt"]
+            .as_str()
+            .ok_or_else(|| format!("built-in starter corpus line {} has no prompt", offset + 1))?;
+        let requires_high = match value["difficulty"].as_str() {
+            Some("hard") => true,
+            Some("easy") => false,
+            _ => {
+                return Err(format!(
+                    "built-in starter corpus line {} has invalid difficulty",
+                    offset + 1
+                ));
+            }
+        };
+        rows.push((prompt.to_owned(), requires_high));
+    }
+    if rows.len() != 154 {
+        return Err(format!(
+            "built-in starter corpus has {} rows, expected 154",
+            rows.len()
+        ));
+    }
+    Ok(rows)
 }
 
 const APPLE_LOCAL_CONFIG: &str = r#"# Generated by wayfinder-router init (preset: apple-local).
@@ -299,7 +428,7 @@ mod tests {
     use wayfinder_config::TierOrderPolicy;
     use wayfinder_config::gateway::gateway_config_from_toml;
     use wayfinder_config::routing_config_from_toml;
-    use wayfinder_routing_core::DEFAULT_THRESHOLD;
+    use wayfinder_routing_core::{DEFAULT_THRESHOLD, score_complexity};
 
     #[test]
     fn chatgpt_configuration_preserves_existing_document_and_is_idempotent() -> Result<(), String> {
@@ -325,9 +454,9 @@ mod tests {
     #[test]
     fn every_app_preset_is_valid_for_both_config_parsers() -> Result<(), String> {
         for name in ["apple-local", "hybrid", "local", "openai", "gemini"] {
-            let text = preset_config(name).ok_or_else(|| format!("missing preset {name}"))?;
-            gateway_config_from_toml(text, name).map_err(|error| error.to_string())?;
-            routing_config_from_toml(text, name, None, TierOrderPolicy::StrictInput)
+            let text = preset_config(name)?.ok_or_else(|| format!("missing preset {name}"))?;
+            gateway_config_from_toml(&text, name).map_err(|error| error.to_string())?;
+            routing_config_from_toml(&text, name, None, TierOrderPolicy::StrictInput)
                 .map_err(|error| error.to_string())?;
         }
         Ok(())
@@ -336,13 +465,21 @@ mod tests {
     #[test]
     fn automatic_app_presets_use_the_developer_starter_cut() -> Result<(), String> {
         for name in ["hybrid", "openai", "gemini"] {
-            let text = preset_config(name).ok_or_else(|| format!("missing preset {name}"))?;
-            let routing = routing_config_from_toml(text, name, None, TierOrderPolicy::StrictInput)
+            let text = preset_config(name)?.ok_or_else(|| format!("missing preset {name}"))?;
+            let routing = routing_config_from_toml(&text, name, None, TierOrderPolicy::StrictInput)
                 .map_err(|error| error.to_string())?;
             assert_eq!(
                 routing.tiers.get(1).map(|tier| tier.min_score),
                 Some(DEFAULT_THRESHOLD),
                 "{name}"
+            );
+            assert_eq!(routing.weights.get("reasoning_term_count"), Some(0.05));
+            assert!(text.contains("wayfinder-starter-calibration: developer-v1"));
+            assert_eq!(
+                score_complexity("Prove the halting problem is undecidable", &routing)
+                    .map_err(|error| error.to_string())?
+                    .recommendation,
+                routing.tiers.get(1).map(|tier| tier.model.as_str()).unwrap_or("")
             );
         }
         let local =

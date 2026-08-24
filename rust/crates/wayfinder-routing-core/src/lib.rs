@@ -610,6 +610,21 @@ pub fn extract_features(text: &str) -> Result<Features, CoreError> {
     extract_features_with_lexicon(text, &Lexicon::default())
 }
 
+/// Return the distinct normalized word tokens seen by lexical routing.
+///
+/// This is exposed for offline calibration only. It uses the same bounded
+/// ASCII token contract as request-time feature extraction and performs no
+/// I/O, model call, or credential lookup.
+pub fn lexical_terms(text: &str) -> Result<BTreeSet<String>, CoreError> {
+    let patterns = patterns()?;
+    let lowered = strip_frontmatter(text).to_ascii_lowercase();
+    Ok(patterns
+        .word_token
+        .find_iter(&lowered)
+        .map(|matched| matched.as_str().to_owned())
+        .collect())
+}
+
 /// Extract raw structural and lexical features with a custom lexicon.
 pub fn extract_features_with_lexicon(text: &str, lexicon: &Lexicon) -> Result<Features, CoreError> {
     let patterns = patterns()?;
@@ -1170,6 +1185,18 @@ mod tests {
         assert_eq!(features.table_row_count, 0);
         assert_eq!(features.link_count, 0);
         assert_eq!(features.code_block_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn lexical_terms_share_the_scorer_token_contract() -> Result<(), CoreError> {
+        assert_eq!(
+            lexical_terms("---\ntitle: ignored\n---\nProve PROVE can't-stop")?,
+            BTreeSet::from([
+                "can't-stop".to_owned(),
+                "prove".to_owned(),
+            ])
+        );
         Ok(())
     }
 

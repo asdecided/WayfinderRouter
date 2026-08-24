@@ -50,10 +50,12 @@ pub(crate) fn run_init(
         }
         index += 1;
     }
-    let Some(contents) = preset_config(&preset) else {
-        return usage_error(stderr, &format!("unknown init preset: {preset}"));
+    let contents = match preset_config(&preset) {
+        Ok(Some(contents)) => contents,
+        Ok(None) => return usage_error(stderr, &format!("unknown init preset: {preset}")),
+        Err(message) => return usage_error(stderr, &message),
     };
-    match write_new_config(&path, contents) {
+    match write_new_config(&path, &contents) {
         Ok(()) => {
             write_output(
                 stdout,
@@ -186,6 +188,29 @@ mod tests {
         assert!(original.contains("preset: local"));
         assert_eq!(run_init(&arguments, &mut stdout, &mut stderr), EXIT_USAGE);
         assert_eq!(fs::read_to_string(&path)?, original);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn init_automatically_calibrates_an_automatic_preset()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("wayfinder-init-{}", uuid::Uuid::new_v4()));
+        let path = root.join("wayfinder-router.toml");
+        let arguments = vec![
+            "--preset".to_owned(),
+            "hybrid".to_owned(),
+            "--path".to_owned(),
+            path.display().to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(run_init(&arguments, &mut stdout, &mut stderr), EXIT_OK);
+        let generated = fs::read_to_string(&path)?;
+        assert!(generated.contains("wayfinder-starter-calibration: developer-v1"));
+        assert!(generated.contains("corpus-sha256:"));
+        assert!(generated.contains("reasoning_term_count = 0.05"));
+        assert!(generated.contains("min_score = 0.01"));
         fs::remove_dir_all(root)?;
         Ok(())
     }
