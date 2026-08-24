@@ -1192,10 +1192,7 @@ mod tests {
     fn lexical_terms_share_the_scorer_token_contract() -> Result<(), CoreError> {
         assert_eq!(
             lexical_terms("---\ntitle: ignored\n---\nProve PROVE can't-stop")?,
-            BTreeSet::from([
-                "can't-stop".to_owned(),
-                "prove".to_owned(),
-            ])
+            BTreeSet::from(["can't-stop".to_owned(), "prove".to_owned(),])
         );
         Ok(())
     }

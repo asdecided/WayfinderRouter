@@ -429,13 +429,13 @@ fn distill_reasoning_lexicon(
 
 fn eligible_distilled_term(term: &str) -> bool {
     const STOP_WORDS: &[&str] = &[
-        "a", "an", "and", "are", "as", "at", "be", "been", "being", "by", "can", "could",
-        "did", "do", "does", "for", "from", "had", "has", "have", "he", "her", "hers",
-        "him", "his", "how", "i", "in", "into", "is", "it", "its", "may", "might", "my",
-        "no", "not", "of", "on", "or", "our", "ours", "shall", "she", "should", "than",
-        "that", "the", "their", "theirs", "them", "then", "there", "these", "they", "this",
-        "those", "to", "under", "was", "we", "were", "what", "when", "where", "which", "who",
-        "why", "will", "with", "would", "you", "your", "yours",
+        "a", "an", "and", "are", "as", "at", "be", "been", "being", "by", "can", "could", "did",
+        "do", "does", "for", "from", "had", "has", "have", "he", "her", "hers", "him", "his",
+        "how", "i", "in", "into", "is", "it", "its", "may", "might", "my", "no", "not", "of", "on",
+        "or", "our", "ours", "shall", "she", "should", "than", "that", "the", "their", "theirs",
+        "them", "then", "there", "these", "they", "this", "those", "to", "under", "was", "we",
+        "were", "what", "when", "where", "which", "who", "why", "will", "with", "would", "you",
+        "your", "yours",
     ];
     (3..=48).contains(&term.len()) && !STOP_WORDS.contains(&term)
 }

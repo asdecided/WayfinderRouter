@@ -1176,9 +1176,11 @@ mod tests {
         );
         assert_eq!(collapsed["status"], "warn");
         assert_eq!(collapsed["missing_arms"], json!(["cloud"]));
-        assert!(collapsed["detail"].as_str().is_some_and(|detail| {
-            detail.contains("zero reached cloud")
-        }));
+        assert!(
+            collapsed["detail"]
+                .as_str()
+                .is_some_and(|detail| { detail.contains("zero reached cloud") })
+        );
     }
 
     #[test]
