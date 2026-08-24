@@ -337,22 +337,17 @@ mod tests {
     fn automatic_app_presets_use_the_developer_starter_cut() -> Result<(), String> {
         for name in ["hybrid", "openai", "gemini"] {
             let text = preset_config(name).ok_or_else(|| format!("missing preset {name}"))?;
-            let routing =
-                routing_config_from_toml(text, name, None, TierOrderPolicy::StrictInput)
-                    .map_err(|error| error.to_string())?;
+            let routing = routing_config_from_toml(text, name, None, TierOrderPolicy::StrictInput)
+                .map_err(|error| error.to_string())?;
             assert_eq!(
                 routing.tiers.get(1).map(|tier| tier.min_score),
                 Some(DEFAULT_THRESHOLD),
                 "{name}"
             );
         }
-        let local = routing_config_from_toml(
-            LOCAL_CONFIG,
-            "local",
-            None,
-            TierOrderPolicy::StrictInput,
-        )
-        .map_err(|error| error.to_string())?;
+        let local =
+            routing_config_from_toml(LOCAL_CONFIG, "local", None, TierOrderPolicy::StrictInput)
+                .map_err(|error| error.to_string())?;
         assert_eq!(local.tiers.get(1).map(|tier| tier.min_score), Some(1.0));
         Ok(())
     }
