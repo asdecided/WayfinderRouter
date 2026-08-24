@@ -2,6 +2,7 @@ FROM rust:1.85-bookworm AS builder
 
 WORKDIR /src
 COPY rust /src/rust
+COPY benchmarks/blind/openai-cross-provider.jsonl /src/benchmarks/blind/openai-cross-provider.jsonl
 RUN cargo build \
     --manifest-path rust/Cargo.toml \
     --package wayfinder-cli \
