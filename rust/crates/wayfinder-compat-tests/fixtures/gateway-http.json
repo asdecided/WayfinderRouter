@@ -865,6 +865,10 @@
               "local": 1,
               "cloud": 1
             },
+            "scored_total": 1,
+            "scored_by_model": {
+              "local": 1
+            },
             "recent": [
               {
                 "request_id": "<request_id:2>",
@@ -897,6 +901,10 @@
             "by_model": {
               "local": 1,
               "cloud": 1
+            },
+            "scored_total": 1,
+            "scored_by_model": {
+              "local": 1
             },
             "recent": [
               {
