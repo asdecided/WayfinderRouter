@@ -193,8 +193,8 @@ mod tests {
     }
 
     #[test]
-    fn init_automatically_calibrates_an_automatic_preset()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn init_automatically_calibrates_an_automatic_preset() -> Result<(), Box<dyn std::error::Error>>
+    {
         let root = std::env::temp_dir().join(format!("wayfinder-init-{}", uuid::Uuid::new_v4()));
         let path = root.join("wayfinder-router.toml");
         let arguments = vec![

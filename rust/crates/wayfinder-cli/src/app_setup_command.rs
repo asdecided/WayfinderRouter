@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use crate::{EXIT_OK, EXIT_USAGE, write_error, write_output};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use wayfinder_config::{TierOrderPolicy, dump_routing_toml, routing_config_from_toml};
 use wayfinder_config::gateway::{ProviderKind, gateway_config_from_toml};
+use wayfinder_config::{TierOrderPolicy, dump_routing_toml, routing_config_from_toml};
 use wayfinder_routing_core::calibration::{ThresholdSample, calibrate_min_cost};
 use wayfinder_routing_core::{Tier, score_complexity};
 
@@ -222,13 +222,8 @@ const STARTER_CORPUS: &str =
 const STARTER_SEMANTIC_WEIGHT: f64 = 0.05;
 
 fn calibrated_automatic_preset(name: &str, base: &str) -> Result<String, String> {
-    let mut routing = routing_config_from_toml(
-        base,
-        name,
-        None,
-        TierOrderPolicy::StrictInput,
-    )
-    .map_err(|error| format!("built-in {name} preset is invalid: {error}"))?;
+    let mut routing = routing_config_from_toml(base, name, None, TierOrderPolicy::StrictInput)
+        .map_err(|error| format!("built-in {name} preset is invalid: {error}"))?;
     if routing.tiers.len() != 2 {
         return Err(format!("built-in {name} preset is not a two-arm policy"));
     }
@@ -308,7 +303,10 @@ fn parse_starter_corpus() -> Result<Vec<(String, bool)>, String> {
             continue;
         }
         let value: Value = serde_json::from_str(line).map_err(|error| {
-            format!("built-in starter corpus line {} is invalid: {error}", offset + 1)
+            format!(
+                "built-in starter corpus line {} is invalid: {error}",
+                offset + 1
+            )
         })?;
         let prompt = value["prompt"]
             .as_str()
@@ -479,7 +477,11 @@ mod tests {
                 score_complexity("Prove the halting problem is undecidable", &routing)
                     .map_err(|error| error.to_string())?
                     .recommendation,
-                routing.tiers.get(1).map(|tier| tier.model.as_str()).unwrap_or("")
+                routing
+                    .tiers
+                    .get(1)
+                    .map(|tier| tier.model.as_str())
+                    .unwrap_or("")
             );
         }
         let local =
