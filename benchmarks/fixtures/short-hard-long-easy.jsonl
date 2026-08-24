@@ -15,9 +15,9 @@
 {"text":"The meeting notes name Kim, Raj, Elena, Marcus, and Zoe as attendees, assign the action to Raj, and set Friday as the deadline. Who owns the action?","label":"local","split":"train","case":"long-easy"}
 {"text":"The shipping table lists Standard as five days, Express as two days, and Overnight as one day. Which option has the shortest listed delivery time?","label":"local","split":"train","case":"long-easy"}
 {"text":"Prove the halting problem is undecidable.","label":"cloud","split":"heldout","case":"short-hard"}
-{"text":"Derive the Bellman optimality equation.","label":"cloud","split":"heldout","case":"short-hard"}
+{"text":"Derive the Bellman optimality equation rigorously.","label":"cloud","split":"heldout","case":"short-hard"}
 {"text":"Analyze whether this transaction schedule is serializable.","label":"cloud","split":"heldout","case":"short-hard"}
-{"text":"Design a consensus protocol for an asynchronous network.","label":"cloud","split":"heldout","case":"short-hard"}
+{"text":"Design an asynchronous consensus protocol with liveness.","label":"cloud","split":"heldout","case":"short-hard"}
 {"text":"The project notes say Phase 1 completed on March 2, Phase 2 completed on March 18, and Phase 3 is scheduled for April 5. Which phase is scheduled for April 5?","label":"local","split":"heldout","case":"long-easy"}
 {"text":"The product catalogue maps P1 to Laptop, P2 to Mouse, P3 to Keyboard, and P4 to Monitor. Which product is mapped to P2 in the catalogue?","label":"local","split":"heldout","case":"long-easy"}
 {"text":"The library shelf lists History on Row 1, Science on Row 2, Fiction on Row 3, and Poetry on Row 4. Which genre appears on Row 2?","label":"local","split":"heldout","case":"long-easy"}
