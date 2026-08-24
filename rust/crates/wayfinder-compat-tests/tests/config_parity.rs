@@ -70,7 +70,7 @@ struct DecisionSummary {
 }
 
 #[test]
-fn strict_input_preserves_frozen_outcomes_and_decisions() -> Result<(), Box<dyn Error>> {
+fn strict_input_preserves_reviewed_outcomes_and_decisions() -> Result<(), Box<dyn Error>> {
     let cases: Vec<ConfigCase> = serde_json::from_str(ROUTING_CONFIG_VECTORS)?;
     let mut valid_count = 0_usize;
     let mut invalid_count = 0_usize;
