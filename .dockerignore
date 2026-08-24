@@ -2,4 +2,7 @@
 !Dockerfile
 !rust/
 !rust/**
+!benchmarks/
+!benchmarks/blind/
+!benchmarks/blind/openai-cross-provider.jsonl
 rust/target/
