@@ -39,7 +39,7 @@ while IFS= read -r row; do
   label="$(jq -r '.label' <<<"$row")"
   baseline="$(env -u WAYFINDER_CONFIG -u WAYFINDER_ROUTER_THRESHOLD \
     "$router" route --json "$prompt" | jq -r '.recommendation')"
-  semantic="$(env WAYFINDER_CONFIG="$config" -u WAYFINDER_ROUTER_THRESHOLD \
+  semantic="$(env -u WAYFINDER_ROUTER_THRESHOLD WAYFINDER_CONFIG="$config" \
     "$router" route --json "$prompt" | jq -r '.recommendation')"
   if [[ "$label" == "cloud" ]]; then
     [[ "$baseline" == "cloud" ]] && ((baseline_hard += 1))
