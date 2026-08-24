@@ -96,7 +96,7 @@
       "cost": null
      },
      {
-      "min_score": 0.5,
+      "min_score": 0.01,
       "model": "cloud",
       "cost": null
      }
@@ -112,7 +112,7 @@
      {
       "name": "headings_lists",
       "score": 0.15,
-      "recommendation": "local",
+      "recommendation": "cloud",
       "mode": "tiered"
      },
      {
@@ -124,13 +124,13 @@
      {
       "name": "classifier_tie",
       "score": 0.05,
-      "recommendation": "local",
+      "recommendation": "cloud",
       "mode": "tiered"
      },
      {
       "name": "classifier_above",
       "score": 0.06,
-      "recommendation": "local",
+      "recommendation": "cloud",
       "mode": "tiered"
      }
     ]
