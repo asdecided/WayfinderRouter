@@ -43,6 +43,17 @@ after their checksums have been reviewed.
   the complete 154-prompt independent corpus: 122 route high (90/94 hard) and
   32 remain local. This is a transparent bootstrap baseline, not a universal
   accuracy claim; explicit policy and native calibration remain authoritative.
+- Automatic two-arm `init` presets now run that calibration during no-clobber
+  creation and record the bundled corpus digest and objective in the generated
+  policy. They also enable a small static lexical signal so short semantic-hard
+  prompts such as the halting-problem reproduction can reach the strong arm.
+- Added optional `calibrate --distill-lexicon`, which learns a bounded static
+  vocabulary and weight from labelled JSONL while keeping request-time routing
+  model-free, network-free, keyless, and deterministic.
+- Added scored-only prompt-free route counts and a `doctor` warning when 20 or
+  more automatic requests have collapsed onto one configured arm.
+- Added a root `llms.txt` setup and rollback guide whose native command contract
+  is exercised in CI.
 
 Existing native `min-cost` threshold calibration and the bounded `init`,
 `doctor`, `connect`, and `open` activation surface remain included.

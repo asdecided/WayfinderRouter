@@ -5,12 +5,17 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use wayfinder_config::{TierOrderPolicy, dump_routing_toml, routing_config_from_toml};
-use wayfinder_routing_core::calibration::{ThresholdSample, calibrate_min_cost};
-use wayfinder_routing_core::{RoutingConfig, Tier, score_complexity};
+use wayfinder_routing_core::calibration::{
+    MinCostCalibration, ThresholdSample, calibrate_min_cost,
+};
+use wayfinder_routing_core::{Lexicon, RoutingConfig, Tier, lexical_terms, score_complexity};
 
 use super::{EXIT_CONFIG, EXIT_OK, EXIT_USAGE, write_error, write_output};
 
-const CALIBRATE_HELP: &str = "usage: wayfinder-router calibrate DATASET [--mode threshold] [--objective min-cost] --costs LABEL=COST,LABEL=COST [--quality-penalty COST] [--config PATH] [--out PATH]\n\nFit a deterministic price-sensitive threshold from JSONL rows with text and label fields. TOML is written to stdout unless --out is supplied.";
+const CALIBRATE_HELP: &str = "usage: wayfinder-router calibrate DATASET [--mode threshold] [--objective min-cost] --costs LABEL=COST,LABEL=COST [--quality-penalty COST] [--distill-lexicon] [--config PATH] [--out PATH]\n\nFit a deterministic price-sensitive threshold from JSONL rows with text and label fields. --distill-lexicon learns a bounded static high-arm vocabulary from the labelled dataset; request-time routing remains offline and model-free. TOML is written to stdout unless --out is supplied.";
+const MAX_DISTILLED_TERMS: usize = 128;
+const MIN_DISTILL_ROWS_PER_ARM: usize = 4;
+const SEMANTIC_WEIGHT_CANDIDATES: [f64; 7] = [0.0, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0];
 
 #[derive(Debug, PartialEq)]
 struct CalibrateOptions {
@@ -19,6 +24,7 @@ struct CalibrateOptions {
     quality_penalty: Option<f64>,
     config: Option<PathBuf>,
     out: Option<PathBuf>,
+    distill_lexicon: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -98,33 +104,60 @@ pub(crate) fn run_calibrate(
     };
     let quality_penalty = options.quality_penalty.unwrap_or(high_cost);
 
-    let scoring_config = match load_scoring_config(options.config.as_deref()) {
+    let mut scoring_config = match load_scoring_config(options.config.as_deref()) {
         Ok(config) => config,
         Err(message) => {
             write_error(stderr, &format!("wayfinder-router: {message}"));
             return EXIT_CONFIG;
         }
     };
-    let mut samples = Vec::with_capacity(prompts.len());
-    for prompt in &prompts {
-        let scored = match score_complexity(&prompt.text, &scoring_config) {
-            Ok(scored) => scored,
-            Err(error) => {
-                write_error(stderr, &format!("wayfinder-router: {error}"));
-                return EXIT_CONFIG;
+    let mut distilled_terms = 0_usize;
+    let result = if options.distill_lexicon {
+        let terms = match distill_reasoning_lexicon(&prompts, &high_label) {
+            Ok(terms) => terms,
+            Err(message) => {
+                write_error(stderr, &format!("wayfinder-router: {message}"));
+                return EXIT_USAGE;
             }
         };
-        samples.push(ThresholdSample {
-            score: scored.score,
-            requires_high: prompt.label == high_label,
-        });
-    }
-
-    let result = match calibrate_min_cost(&samples, low_cost, high_cost, quality_penalty) {
-        Ok(result) => result,
-        Err(error) => {
-            write_error(stderr, &format!("wayfinder-router: {error}"));
-            return EXIT_USAGE;
+        distilled_terms = terms.len();
+        let constraints = scoring_config
+            .lexicon
+            .constraint_terms()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        scoring_config.lexicon = Lexicon::new(terms, constraints);
+        match select_semantic_weight(
+            &prompts,
+            &high_label,
+            &scoring_config,
+            low_cost,
+            high_cost,
+            quality_penalty,
+        ) {
+            Ok((result, weight)) => {
+                let _ = scoring_config.weights.set("reasoning_term_count", weight);
+                result
+            }
+            Err(message) => {
+                write_error(stderr, &format!("wayfinder-router: {message}"));
+                return EXIT_USAGE;
+            }
+        }
+    } else {
+        match calibrate_config(
+            &prompts,
+            &high_label,
+            &scoring_config,
+            low_cost,
+            high_cost,
+            quality_penalty,
+        ) {
+            Ok(result) => result,
+            Err(message) => {
+                write_error(stderr, &format!("wayfinder-router: {message}"));
+                return EXIT_USAGE;
+            }
         }
     };
     let tiers = if result.threshold == 0.0 {
@@ -136,10 +169,10 @@ pub(crate) fn run_calibrate(
         ]
     };
     let output_config = RoutingConfig {
-        weights: scoring_config.weights,
+        weights: scoring_config.weights.clone(),
         tiers,
         classifier: None,
-        lexicon: scoring_config.lexicon,
+        lexicon: scoring_config.lexicon.clone(),
     };
     let toml = dump_routing_toml(&output_config);
     if let Err(error) = routing_config_from_toml(
@@ -172,7 +205,7 @@ pub(crate) fn run_calibrate(
     write_error(
         stderr,
         &format!(
-            "wayfinder-router: calibrated {} prompts: low={} ({:.6}), high={} ({:.6}), threshold={:.4}, Q={:.6}, expected_cost={:.6}, expected_loss={:.6}, quality_recovered={:.4}, cost_savings={:.4}",
+            "wayfinder-router: calibrated {} prompts: low={} ({:.6}), high={} ({:.6}), threshold={:.4}, Q={:.6}, expected_cost={:.6}, expected_loss={:.6}, quality_recovered={:.4}, cost_savings={:.4}, semantic_terms={}, semantic_weight={:.6}",
             prompts.len(),
             low_label,
             low_cost,
@@ -184,6 +217,11 @@ pub(crate) fn run_calibrate(
             result.expected_loss,
             result.quality_recovered,
             result.cost_savings,
+            distilled_terms,
+            scoring_config
+                .weights
+                .get("reasoning_term_count")
+                .unwrap_or(0.0),
         ),
     );
     EXIT_OK
@@ -201,6 +239,7 @@ fn parse_options(arguments: &[String]) -> Result<Option<CalibrateOptions>, Strin
     let mut quality_penalty = None;
     let mut config = None;
     let mut out = None;
+    let mut distill_lexicon = false;
     let mut index = 0_usize;
     while let Some(argument) = arguments.get(index) {
         match argument.as_str() {
@@ -260,6 +299,7 @@ fn parse_options(arguments: &[String]) -> Result<Option<CalibrateOptions>, Strin
             value if value.starts_with("--out=") => {
                 out = Some(PathBuf::from(value.trim_start_matches("--out=")));
             }
+            "--distill-lexicon" => distill_lexicon = true,
             value if value.starts_with('-') && value != "-" => {
                 return Err(format!("unrecognized calibrate argument: {value}"));
             }
@@ -277,7 +317,127 @@ fn parse_options(arguments: &[String]) -> Result<Option<CalibrateOptions>, Strin
         quality_penalty,
         config,
         out,
+        distill_lexicon,
     }))
+}
+
+fn calibrate_config(
+    prompts: &[LabelledPrompt],
+    high_label: &str,
+    config: &RoutingConfig,
+    low_cost: f64,
+    high_cost: f64,
+    quality_penalty: f64,
+) -> Result<MinCostCalibration, String> {
+    let mut samples = Vec::with_capacity(prompts.len());
+    for prompt in prompts {
+        let scored = score_complexity(&prompt.text, config).map_err(|error| error.to_string())?;
+        samples.push(ThresholdSample {
+            score: scored.score,
+            requires_high: prompt.label == high_label,
+        });
+    }
+    calibrate_min_cost(&samples, low_cost, high_cost, quality_penalty)
+        .map_err(|error| error.to_string())
+}
+
+fn select_semantic_weight(
+    prompts: &[LabelledPrompt],
+    high_label: &str,
+    config: &RoutingConfig,
+    low_cost: f64,
+    high_cost: f64,
+    quality_penalty: f64,
+) -> Result<(MinCostCalibration, f64), String> {
+    let mut best: Option<(MinCostCalibration, f64)> = None;
+    for weight in SEMANTIC_WEIGHT_CANDIDATES {
+        let mut candidate = config.clone();
+        if !candidate.weights.set("reasoning_term_count", weight) {
+            return Err("semantic feature mapping is unavailable".to_owned());
+        }
+        let result = calibrate_config(
+            prompts,
+            high_label,
+            &candidate,
+            low_cost,
+            high_cost,
+            quality_penalty,
+        )?;
+        let replace = best.as_ref().is_none_or(|(current, _)| {
+            result.expected_loss < current.expected_loss - 1e-12
+                || ((result.expected_loss - current.expected_loss).abs() <= 1e-12
+                    && result.quality_recovered > current.quality_recovered + 1e-12)
+        });
+        if replace {
+            best = Some((result, weight));
+        }
+    }
+    best.ok_or_else(|| "semantic calibration produced no candidate".to_owned())
+}
+
+fn distill_reasoning_lexicon(
+    prompts: &[LabelledPrompt],
+    high_label: &str,
+) -> Result<Vec<String>, String> {
+    let high_rows = prompts
+        .iter()
+        .filter(|prompt| prompt.label == high_label)
+        .count();
+    let low_rows = prompts.len().saturating_sub(high_rows);
+    if high_rows < MIN_DISTILL_ROWS_PER_ARM || low_rows < MIN_DISTILL_ROWS_PER_ARM {
+        return Err(format!(
+            "--distill-lexicon needs at least {MIN_DISTILL_ROWS_PER_ARM} rows per arm"
+        ));
+    }
+    let mut high_counts = BTreeMap::<String, u64>::new();
+    let mut low_counts = BTreeMap::<String, u64>::new();
+    for prompt in prompts {
+        let terms = lexical_terms(&prompt.text).map_err(|error| error.to_string())?;
+        let counts = if prompt.label == high_label {
+            &mut high_counts
+        } else {
+            &mut low_counts
+        };
+        for term in terms {
+            if eligible_distilled_term(&term) {
+                let count = counts.entry(term).or_insert(0);
+                *count = count.saturating_add(1);
+            }
+        }
+    }
+    let mut candidates = high_counts
+        .into_iter()
+        .filter(|(term, high_count)| {
+            *high_count >= 2 && low_counts.get(term).copied().unwrap_or(0) == 0
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    candidates.truncate(MAX_DISTILLED_TERMS);
+    if candidates.is_empty() {
+        return Err(
+            "--distill-lexicon found no term repeated in the high arm and absent from the low arm"
+                .to_owned(),
+        );
+    }
+    let mut terms = candidates
+        .into_iter()
+        .map(|(term, _)| term)
+        .collect::<Vec<_>>();
+    terms.sort();
+    Ok(terms)
+}
+
+fn eligible_distilled_term(term: &str) -> bool {
+    const STOP_WORDS: &[&str] = &[
+        "a", "an", "and", "are", "as", "at", "be", "been", "being", "by", "can", "could",
+        "did", "do", "does", "for", "from", "had", "has", "have", "he", "her", "hers",
+        "him", "his", "how", "i", "in", "into", "is", "it", "its", "may", "might", "my",
+        "no", "not", "of", "on", "or", "our", "ours", "shall", "she", "should", "than",
+        "that", "the", "their", "theirs", "them", "then", "there", "these", "they", "this",
+        "those", "to", "under", "was", "we", "were", "what", "when", "where", "which", "who",
+        "why", "will", "with", "would", "you", "your", "yours",
+    ];
+    (3..=48).contains(&term.len()) && !STOP_WORDS.contains(&term)
 }
 
 fn required_value<'a>(
@@ -509,6 +669,51 @@ mod tests {
         );
         assert_eq!(code, EXIT_USAGE);
         assert!(String::from_utf8_lossy(&stderr).contains("exactly match"));
+    }
+
+    #[test]
+    fn semantic_distillation_emits_a_static_model_free_signal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let semantic_dataset = concat!(
+            "{\"text\":\"What is the capital of Canada?\",\"label\":\"local\"}\n",
+            "{\"text\":\"Convert 72 Fahrenheit to Celsius.\",\"label\":\"local\"}\n",
+            "{\"text\":\"List the days of the week.\",\"label\":\"local\"}\n",
+            "{\"text\":\"Define photosynthesis in one sentence.\",\"label\":\"local\"}\n",
+            "{\"text\":\"Prove the compactness theorem.\",\"label\":\"cloud\"}\n",
+            "{\"text\":\"Prove the fixed point theorem.\",\"label\":\"cloud\"}\n",
+            "{\"text\":\"Prove the theorem by contradiction.\",\"label\":\"cloud\"}\n",
+            "{\"text\":\"Prove the theorem using induction.\",\"label\":\"cloud\"}\n",
+        );
+        let mut stdin = semantic_dataset.as_bytes();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_calibrate(
+            &[
+                "-".to_owned(),
+                "--costs=local=0,cloud=1".to_owned(),
+                "--quality-penalty=2".to_owned(),
+                "--distill-lexicon".to_owned(),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, EXIT_OK, "{}", String::from_utf8_lossy(&stderr));
+        let rendered = String::from_utf8(stdout)?;
+        assert!(rendered.contains("reasoning_terms"));
+        assert!(rendered.contains("\"prove\""));
+        let parsed = routing_config_from_toml(
+            &rendered,
+            "semantic output",
+            None,
+            TierOrderPolicy::StrictInput,
+        )?;
+        let decision = score_complexity("Prove the halting problem is undecidable", &parsed)?;
+        assert_eq!(decision.recommendation, "cloud");
+        let summary = String::from_utf8(stderr)?;
+        assert!(summary.contains("semantic_terms="));
+        assert!(!summary.contains("semantic_terms=0"));
+        Ok(())
     }
 
     #[test]

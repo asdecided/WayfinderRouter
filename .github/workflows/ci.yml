@@ -43,6 +43,10 @@ jobs:
           --bin wayfinder-router --locked
       - name: Developer starter routing regression
         run: benchmarks/check-developer-starter.sh rust/target/debug/wayfinder-router
+      - name: Held-out semantic distillation regression
+        run: benchmarks/check-semantic-distillation.sh rust/target/debug/wayfinder-router
+      - name: LLM setup guide contract
+        run: benchmarks/check-llms-guide.sh rust/target/debug/wayfinder-router
       - name: Rust documentation tests
         run: cargo +stable test --manifest-path rust/Cargo.toml --doc --workspace --locked
       - name: Rust warning-denied Clippy

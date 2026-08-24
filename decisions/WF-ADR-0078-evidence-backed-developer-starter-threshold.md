@@ -48,7 +48,9 @@ On this corpus, `0.01` is the smallest positive effective cut. With low-arm cost
    or as a generally deployable cut.
 6. A short semantically difficult prompt may still score `0.0`; changing the
    cut cannot repair absent semantic signal. That limitation remains explicit
-   and belongs to issue #171 rather than this defaults fix.
+   and belongs to issue #171 rather than this defaults fix. WF-ADR-0079 later
+   adds a bounded static semantic signal and keeps this structural-only result
+   as the baseline it must not regress.
 
 ## Consequences
 

@@ -16,6 +16,12 @@ wayfinder-router doctor
 wayfinder-router serve
 ```
 
+`init` never overwrites an existing policy. Automatic two-arm presets run the
+native min-cost calibrator over Wayfinder's bundled independent developer
+corpus and record the corpus SHA-256, objective, and measured result in the new
+TOML. This is a reproducible starter, not personalized learning: no user prompt
+is retained and no model or network is used during calibration.
+
 The `hybrid` example expects Ollama at `http://localhost:11434/v1` and uses
 OpenAI as the hosted destination. Edit the generated file if your local runtime
 or hosted provider differs. `init` never overwrites an existing file.
@@ -144,3 +150,7 @@ wayfinder-router open
 
 The dashboard and response headers show the selected public model, routing
 mode, score, and request identity. They do not expose provider credentials.
+After at least 20 scored requests, `wayfinder-router doctor --json` also checks
+the prompt-free route distribution. A warning that every request used one arm
+is evidence to review or calibrate the policy, not permission to lower a cut
+blindly.

@@ -98,6 +98,11 @@ pub struct RecentReport {
     pub total: usize,
     /// Counts across every retained entry.
     pub by_model: BTreeMap<String, u64>,
+    /// Scored automatic decisions currently retained, excluding pinned and
+    /// policy-forced requests.
+    pub scored_total: usize,
+    /// Model counts across scored automatic decisions only.
+    pub scored_by_model: BTreeMap<String, u64>,
     /// Newest-first entries under the clamped limit.
     pub recent: Vec<RecentEntry>,
 }
@@ -224,14 +229,23 @@ impl RecentRoutes {
     pub fn report(&self, requested_limit: i64) -> Result<RecentReport, RecentError> {
         let entries = self.entries.lock().map_err(|_| RecentError::LockPoisoned)?;
         let mut by_model = BTreeMap::new();
+        let mut scored_by_model = BTreeMap::new();
+        let mut scored_total = 0_usize;
         for entry in &*entries {
             let count = by_model.entry(entry.model.clone()).or_insert(0_u64);
             *count = count.saturating_add(1);
+            if entry.mode == "scored" {
+                scored_total = scored_total.saturating_add(1);
+                let count = scored_by_model.entry(entry.model.clone()).or_insert(0_u64);
+                *count = count.saturating_add(1);
+            }
         }
         let clamped = requested_limit.clamp(1, MAX_RECENT_ENTRIES as i64) as usize;
         Ok(RecentReport {
             total: entries.len(),
             by_model,
+            scored_total,
+            scored_by_model,
             recent: entries.iter().rev().take(clamped).cloned().collect(),
         })
     }
@@ -278,6 +292,8 @@ mod tests {
         assert_eq!(report.total, 3);
         assert_eq!(report.by_model["local"], 2);
         assert_eq!(report.by_model["cloud"], 1);
+        assert_eq!(report.scored_total, 3);
+        assert_eq!(report.scored_by_model, report.by_model);
         assert_eq!(
             report
                 .recent
@@ -286,6 +302,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["c", "b"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn scored_summary_excludes_pinned_routes() -> Result<(), RecentError> {
+        let recent = RecentRoutes::new(3);
+        recent.record(entry("a", "local", 0.0))?;
+        let mut pinned = entry("b", "cloud", 0.0);
+        pinned.mode = "pinned".to_owned();
+        recent.record(pinned)?;
+        let report = recent.report(1)?;
+        assert_eq!(report.total, 2);
+        assert_eq!(report.by_model["cloud"], 1);
+        assert_eq!(report.scored_total, 1);
+        assert_eq!(report.scored_by_model.get("cloud"), None);
+        assert_eq!(report.scored_by_model["local"], 1);
         Ok(())
     }
 

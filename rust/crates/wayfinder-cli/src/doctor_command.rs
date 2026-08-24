@@ -8,12 +8,14 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use reqwest::blocking::Client;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use wayfinder_config::gateway::{GatewayConfig, gateway_config_from_toml};
 use wayfinder_config::{
     CONFIG_PATH_ENV, TierOrderPolicy, find_config_file, routing_config_from_toml,
 };
+use wayfinder_routing_core::RoutingConfig;
 
 use crate::service_command::{ServiceInspection, find_executable, inspect_service};
 use crate::{
@@ -27,6 +29,8 @@ const CONFIG_LIMIT: usize = 1024 * 1024;
 const DISCOVERY_FILE_LIMIT: usize = 256 * 1024;
 const PROVENANCE_LIMIT: usize = 16 * 1024;
 const SOCKET_TIMEOUT: Duration = Duration::from_millis(100);
+const ROUTE_WINDOW_LIMIT: usize = 64 * 1024;
+const ROUTE_COLLAPSE_MIN_SCORED: usize = 20;
 
 #[derive(Debug)]
 struct DoctorOptions {
@@ -40,14 +44,25 @@ struct DiagnosticInput<'a> {
     config_valid: bool,
     config_failure: Option<&'a str>,
     gateway: Option<&'a GatewayConfig>,
+    routing: Option<&'a RoutingConfig>,
     missing_environment: &'a [String],
     gateway_reachable: bool,
+    route_window: RouteWindow,
     service: ServiceInspection,
     service_config_matches: Option<bool>,
     provenance: Value,
     runtimes: Vec<Value>,
     agents: Vec<Value>,
     environment: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RouteWindow {
+    Available {
+        scored_total: usize,
+        scored_by_model: BTreeMap<String, u64>,
+    },
+    Unavailable(&'static str),
 }
 
 pub(crate) fn run_doctor(
@@ -82,21 +97,24 @@ pub(crate) fn run_doctor(
             );
         }
     };
-    if let Err(error) = routing_config_from_toml(
+    let routing = match routing_config_from_toml(
         &source,
         &path.display().to_string(),
         None,
         TierOrderPolicy::StrictInput,
     ) {
-        return config_failure(
-            &path,
-            "routing-invalid",
-            &error.to_string(),
-            options.json_output,
-            stdout,
-            stderr,
-        );
-    }
+        Ok(routing) => routing,
+        Err(error) => {
+            return config_failure(
+                &path,
+                "routing-invalid",
+                &error.to_string(),
+                options.json_output,
+                stdout,
+                stderr,
+            );
+        }
+    };
     let gateway = match gateway_config_from_toml(&source, &path.display().to_string()) {
         Ok(gateway) => gateway,
         Err(error) => {
@@ -113,6 +131,11 @@ pub(crate) fn run_doctor(
 
     let missing = missing_environment(&gateway);
     let gateway_reachable = socket_reachable(8_088);
+    let route_window = if gateway_reachable {
+        fetch_route_window()
+    } else {
+        RouteWindow::Unavailable("gateway-unreachable")
+    };
     let evidence = collect_evidence(&gateway);
     let service_config_matches = unit_references_config(&evidence.service, &path);
     let report = build_report(DiagnosticInput {
@@ -120,8 +143,10 @@ pub(crate) fn run_doctor(
         config_valid: true,
         config_failure: None,
         gateway: Some(&gateway),
+        routing: Some(&routing),
         missing_environment: &missing,
         gateway_reachable,
+        route_window,
         service: evidence.service,
         service_config_matches,
         provenance: evidence.provenance,
@@ -189,8 +214,10 @@ fn config_failure(
         config_valid: false,
         config_failure: Some(failure),
         gateway: None,
+        routing: None,
         missing_environment: &[],
         gateway_reachable: socket_reachable(8_088),
+        route_window: RouteWindow::Unavailable("config-invalid"),
         service: evidence.service,
         service_config_matches,
         provenance: evidence.provenance,
@@ -291,6 +318,14 @@ fn build_report(input: DiagnosticInput<'_>) -> Value {
         "config",
         if input.config_valid { "pass" } else { "fail" },
         input.config_failure.unwrap_or("valid"),
+    ));
+    let routing_health = route_health(input.routing, &input.route_window);
+    checks.push(check(
+        "routing-distribution",
+        routing_health["status"].as_str().unwrap_or("info"),
+        routing_health["detail"]
+            .as_str()
+            .unwrap_or("route distribution unavailable"),
     ));
     checks.push(check(
         "destinations",
@@ -444,6 +479,14 @@ fn build_report(input: DiagnosticInput<'_>) -> Value {
             &[],
         ));
     }
+    if routing_health["status"] == "warn" {
+        remediation.push(remediation_item(
+            "routing.calibrate",
+            "Automatic routing has used only one arm over the diagnostic window. Review the generated starter evidence or run native calibration on representative labelled traffic.",
+            None,
+            &[],
+        ));
+    }
     for runtime in &input.runtimes {
         if runtime["configured"] == true && runtime["socket_reachable"] == false {
             let id = runtime["id"].as_str().unwrap_or("runtime");
@@ -477,6 +520,7 @@ fn build_report(input: DiagnosticInput<'_>) -> Value {
         "missing_environment": input.missing_environment,
         "gateway_reachable": input.gateway_reachable,
         "gateway": DEFAULT_ENDPOINT,
+        "routing_distribution": routing_health,
         "router": {
             "version": product_version(),
             "executable": env::current_exe().ok(),
@@ -516,6 +560,161 @@ fn missing_environment(gateway: &GatewayConfig) -> Vec<String> {
         .into_iter()
         .filter(|name| env::var_os(name).is_none_or(|value| value.is_empty()))
         .collect()
+}
+
+fn fetch_route_window() -> RouteWindow {
+    let client = match Client::builder()
+        .connect_timeout(SOCKET_TIMEOUT)
+        .timeout(Duration::from_millis(300))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return RouteWindow::Unavailable("client-unavailable"),
+    };
+    let response = match client
+        .get(format!("{DEFAULT_ENDPOINT}/router/recent?limit=1"))
+        .send()
+    {
+        Ok(response) if response.status().is_success() => response,
+        Ok(response) if response.status().as_u16() == 401 => {
+            return RouteWindow::Unavailable("operator-auth-required");
+        }
+        Ok(_) => return RouteWindow::Unavailable("recent-endpoint-unavailable"),
+        Err(_) => return RouteWindow::Unavailable("recent-endpoint-unavailable"),
+    };
+    if response
+        .content_length()
+        .is_some_and(|length| length > ROUTE_WINDOW_LIMIT as u64)
+    {
+        return RouteWindow::Unavailable("recent-response-too-large");
+    }
+    let mut bytes = Vec::new();
+    if response
+        .take((ROUTE_WINDOW_LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() > ROUTE_WINDOW_LIMIT
+    {
+        return RouteWindow::Unavailable("recent-response-too-large");
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+        return RouteWindow::Unavailable("recent-response-invalid");
+    };
+    let Some(scored_total) = value["scored_total"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+    else {
+        return RouteWindow::Unavailable("router-upgrade-required");
+    };
+    let Some(raw_counts) = value["scored_by_model"].as_object() else {
+        return RouteWindow::Unavailable("recent-response-invalid");
+    };
+    let mut scored_by_model = BTreeMap::new();
+    for (model, raw_count) in raw_counts {
+        let Some(count) = raw_count.as_u64() else {
+            return RouteWindow::Unavailable("recent-response-invalid");
+        };
+        if model.is_empty() || model.len() > 256 {
+            return RouteWindow::Unavailable("recent-response-invalid");
+        }
+        scored_by_model.insert(model.clone(), count);
+    }
+    if scored_by_model.values().copied().sum::<u64>()
+        != u64::try_from(scored_total).unwrap_or(u64::MAX)
+    {
+        return RouteWindow::Unavailable("recent-response-invalid");
+    }
+    RouteWindow::Available {
+        scored_total,
+        scored_by_model,
+    }
+}
+
+fn route_health(routing: Option<&RoutingConfig>, window: &RouteWindow) -> Value {
+    let Some(routing) = routing else {
+        return json!({
+            "status": "info",
+            "detail": "routing policy unavailable",
+            "minimum_scored": ROUTE_COLLAPSE_MIN_SCORED,
+        });
+    };
+    let automatic_models = if let Some(classifier) = &routing.classifier {
+        classifier.models().iter().cloned().collect::<BTreeSet<_>>()
+    } else {
+        routing
+            .tiers
+            .iter()
+            .map(|tier| tier.model.clone())
+            .collect::<BTreeSet<_>>()
+    };
+    if automatic_models.len() < 2 {
+        return json!({
+            "status": "info",
+            "detail": "single-arm policy; collapse check not applicable",
+            "minimum_scored": ROUTE_COLLAPSE_MIN_SCORED,
+        });
+    }
+    let RouteWindow::Available {
+        scored_total,
+        scored_by_model,
+    } = window
+    else {
+        let reason = match window {
+            RouteWindow::Unavailable(reason) => *reason,
+            RouteWindow::Available { .. } => "unavailable",
+        };
+        return json!({
+            "status": "info",
+            "detail": format!("route distribution unavailable ({reason})"),
+            "minimum_scored": ROUTE_COLLAPSE_MIN_SCORED,
+        });
+    };
+    if *scored_total < ROUTE_COLLAPSE_MIN_SCORED {
+        return json!({
+            "status": "info",
+            "detail": format!("{scored_total}/{ROUTE_COLLAPSE_MIN_SCORED} scored requests observed; more evidence needed"),
+            "scored_total": scored_total,
+            "by_model": scored_by_model,
+            "minimum_scored": ROUTE_COLLAPSE_MIN_SCORED,
+        });
+    }
+    let observed = automatic_models
+        .iter()
+        .filter_map(|model| {
+            scored_by_model
+                .get(model)
+                .copied()
+                .filter(|count| *count > 0)
+                .map(|count| (model, count))
+        })
+        .collect::<Vec<_>>();
+    if observed.len() < 2 {
+        let only = observed
+            .first()
+            .map(|(model, _)| model.as_str())
+            .unwrap_or("no configured arm");
+        let missing = automatic_models
+            .iter()
+            .filter(|model| scored_by_model.get(*model).copied().unwrap_or(0) == 0)
+            .cloned()
+            .collect::<Vec<_>>();
+        return json!({
+            "status": "warn",
+            "detail": format!("all {scored_total} scored requests routed to {only}; zero reached {}", missing.join(", ")),
+            "scored_total": scored_total,
+            "by_model": scored_by_model,
+            "missing_arms": missing,
+            "minimum_scored": ROUTE_COLLAPSE_MIN_SCORED,
+        });
+    }
+    json!({
+        "status": "pass",
+        "detail": format!("{scored_total} scored requests exercised {} automatic arms", observed.len()),
+        "scored_total": scored_total,
+        "by_model": scored_by_model,
+        "minimum_scored": ROUTE_COLLAPSE_MIN_SCORED,
+    })
 }
 
 fn runtime_reports(
@@ -690,6 +889,15 @@ fn write_text_report(stdout: &mut dyn Write, report: &Value) {
         &format!(
             "policy     ok ({})",
             report["config"].as_str().unwrap_or("unknown")
+        ),
+    );
+    write_output(
+        stdout,
+        &format!(
+            "routing    {}",
+            report["routing_distribution"]["detail"]
+                .as_str()
+                .unwrap_or("route distribution unavailable")
         ),
     );
     write_output(stdout, &format!("destinations {}", report["destinations"]));
@@ -882,7 +1090,10 @@ mod tests {
         let root = env::temp_dir().join(format!("wayfinder-doctor-{}", uuid::Uuid::new_v4()));
         let path = root.join("wayfinder-router.toml");
         fs::create_dir_all(&root)?;
-        fs::write(&path, preset_config("local").ok_or("missing local preset")?)?;
+        fs::write(
+            &path,
+            preset_config("local")?.ok_or("missing local preset")?,
+        )?;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         assert_eq!(
@@ -939,6 +1150,57 @@ mod tests {
     }
 
     #[test]
+    fn automatic_route_collapse_warns_only_after_the_minimum_window() {
+        let routing = RoutingConfig::binary(0.01);
+        let warming = route_health(
+            Some(&routing),
+            &RouteWindow::Available {
+                scored_total: ROUTE_COLLAPSE_MIN_SCORED - 1,
+                scored_by_model: BTreeMap::from([(
+                    "local".to_owned(),
+                    u64::try_from(ROUTE_COLLAPSE_MIN_SCORED - 1).unwrap_or(0),
+                )]),
+            },
+        );
+        assert_eq!(warming["status"], "info");
+
+        let collapsed = route_health(
+            Some(&routing),
+            &RouteWindow::Available {
+                scored_total: ROUTE_COLLAPSE_MIN_SCORED,
+                scored_by_model: BTreeMap::from([(
+                    "local".to_owned(),
+                    u64::try_from(ROUTE_COLLAPSE_MIN_SCORED).unwrap_or(0),
+                )]),
+            },
+        );
+        assert_eq!(collapsed["status"], "warn");
+        assert_eq!(collapsed["missing_arms"], json!(["cloud"]));
+        assert!(collapsed["detail"].as_str().is_some_and(|detail| {
+            detail.contains("zero reached cloud")
+        }));
+    }
+
+    #[test]
+    fn automatic_route_distribution_passes_when_both_arms_are_observed() {
+        let routing = RoutingConfig::binary(0.01);
+        let report = route_health(
+            Some(&routing),
+            &RouteWindow::Available {
+                scored_total: ROUTE_COLLAPSE_MIN_SCORED,
+                scored_by_model: BTreeMap::from([
+                    ("cloud".to_owned(), 1),
+                    (
+                        "local".to_owned(),
+                        u64::try_from(ROUTE_COLLAPSE_MIN_SCORED - 1).unwrap_or(0),
+                    ),
+                ]),
+            },
+        );
+        assert_eq!(report["status"], "pass");
+    }
+
+    #[test]
     fn agent_discovery_never_emits_secret_values() -> Result<(), Box<dyn std::error::Error>> {
         let root = env::temp_dir().join(format!("wayfinder-agents-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join(".codex"))?;
@@ -990,7 +1252,7 @@ mod tests {
     #[test]
     fn runtime_signals_do_not_claim_identity() -> Result<(), Box<dyn std::error::Error>> {
         let gateway = gateway_config_from_toml(
-            preset_config("local").ok_or("missing local preset")?,
+            &preset_config("local")?.ok_or("missing local preset")?,
             "fixture.toml",
         )?;
         let installed = BTreeMap::from([

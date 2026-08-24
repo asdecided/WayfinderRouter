@@ -1,0 +1,69 @@
+# Wayfinder
+
+> Wayfinder is the deterministic model router built for Omarchy. It gives coding agents one loopback endpoint, selects an eligible local or hosted destination, and records prompt-free route and delivery receipts.
+
+Use the Omarchy plugin as the primary installation path. The Router is a separate Rust process and remains the routing authority when the shell reloads. The scored request path is offline, deterministic, and keyless; provider credentials are resolved only after a destination is selected.
+
+For an Omarchy installation, ask the user to review the repository and then run:
+
+```sh
+omarchy plugin add https://github.com/asdecided/omarchy-wayfinder.git
+cd ~/.config/omarchy/plugins/io.github.asdecided.wayfinder
+./install.sh
+```
+
+Then ask the user to open the Wayfinder bar item and choose **Set up Wayfinder**. The plugin creates only a missing policy, validates it, and installs the independent user service. Never replace an existing policy, provider credential, coding-agent configuration, or independently installed Router binary.
+
+For a two-arm local/OpenAI policy outside the panel, run:
+
+```sh
+wayfinder-router init --preset hybrid
+wayfinder-router doctor
+wayfinder-router serve
+```
+
+`init` is no-clobber. Automatic presets run deterministic first-run calibration against the bundled, checksum-recorded developer corpus and emit the static result into the new policy. The calibration does not inspect retained user prompts or call a model. Set `OPENAI_API_KEY` in the user's existing credential boundary before delivery; never write its value into the policy or output.
+
+Connect a supported coding agent only after showing the generated recipe to the user:
+
+```sh
+wayfinder-router connect codex
+wayfinder-router connect claude-code
+wayfinder-router connect opencode
+```
+
+Use `wayfinder-router doctor --json` for bounded diagnosis. A `routing-distribution` warning means at least 20 scored automatic requests used only one configured arm. Do not suppress the warning by inventing traffic or lowering a threshold blindly; review the starter receipt or calibrate with representative labelled JSONL.
+
+Custom calibration accepts rows shaped as `{"text":"...","label":"local|cloud"}`. `--distill-lexicon` learns a bounded static vocabulary and weight from labels, then emits TOML that the pure Rust scorer evaluates without a network, model, embedding dependency, or credential:
+
+```sh
+wayfinder-router calibrate prompts.jsonl \
+  --costs local=0,cloud=1 \
+  --quality-penalty 2 \
+  --distill-lexicon \
+  --out calibrated.toml
+```
+
+`--out` is also no-clobber. Review the generated policy and held-out evidence before activating it. Do not describe the bundled corpus or distilled vocabulary as a universal accuracy claim.
+
+To reverse a plugin-owned Router upgrade, run `./install.sh --rollback-router` from the installed plugin. To remove an owned project profile, use `wayfinder-router project rollback --json`. Neither operation authorizes deletion of a user policy, repository, credential, or independently installed binary.
+
+## Start here
+
+- [Repository README](https://github.com/asdecided/WayfinderRouter/blob/main/README.md): Product boundaries, installation, build, endpoints, and verification.
+- [Omarchy plugin](https://github.com/asdecided/omarchy-wayfinder): Flagship plugin source, installer, bar surface, and release authority.
+- [Coding-agent quick starts](https://github.com/asdecided/WayfinderRouter/blob/main/docs/coding-agent-quickstarts.md): Reviewed Codex, Claude Code, and OpenCode connection recipes.
+- [Omarchy troubleshooting](https://github.com/asdecided/omarchy-wayfinder/blob/main/docs/troubleshooting.md): Bounded diagnostics, updates, recovery, and rollback.
+
+## Routing and calibration
+
+- [Lexical routing](https://github.com/asdecided/WayfinderRouter/blob/main/docs/lexical-routing.md): Feature, lexicon, calibration, and evidence caveats.
+- [Standalone deterministic Router decision](https://github.com/asdecided/WayfinderRouter/blob/main/decisions/WF-ADR-0001-standalone-deterministic-router.md): Request-time purity and product boundary.
+- [Calibration and classifier decision](https://github.com/asdecided/WayfinderRouter/blob/main/decisions/WF-ADR-0003-calibration-and-classifier.md): Offline labelled-data contract.
+- [Developer starter threshold decision](https://github.com/asdecided/WayfinderRouter/blob/main/decisions/WF-ADR-0078-evidence-backed-developer-starter-threshold.md): Corpus, objective, defaults, and limitations.
+
+## Operations and contribution
+
+- [Managed gateway deployment](https://github.com/asdecided/WayfinderRouter/blob/main/docs/managed-gateway-deployment.md): Fail-closed network-exposed surface.
+- [Contributing](https://github.com/asdecided/WayfinderRouter/blob/main/CONTRIBUTING.md): Required invariants and test expectations.
+- [Security policy](https://github.com/asdecided/WayfinderRouter/blob/main/SECURITY.md): Reporting and security boundaries.

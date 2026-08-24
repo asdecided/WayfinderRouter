@@ -10,7 +10,8 @@
 > `0.09` cut below belongs only to the historical RouterBench lexical recipe,
 > whose weights differ from the default scorer.
 
-Wayfinder's default scorer is **structural only** (length, headings, lists, code, tables).
+Wayfinder's unconfigured core scorer is **structural only** (length, headings, lists, code,
+tables); generated automatic presets add the small calibrated starter signal described below.
 On real frontier traffic that default does not beat stable-random: against RouterBench
 (`mistralai/mistral-7b-chat` as `local` vs `gpt-4-1106-preview` as `cloud`) its historical
 knee recovers a *negative* skill — see [`../benchmarks/routerbench-results.md`](../benchmarks/routerbench-results.md).
@@ -51,8 +52,10 @@ traffic's hardness is *expressed in words the lexicon scans* — proofs, math no
 multi-constraint instructions. RouterBench is math/reasoning-heavy, which is exactly that
 case. On independently-authored prose where hardness is *not* in those words, the lexicon
 fires on ~20% of hard prompts and loses to a length baseline
-([`../benchmarks/blind-eval.md`](../benchmarks/blind-eval.md)) — which is why it ships **off
-by default** (WF-ADR-0016). Turn it on only if your traffic looks like the former.
+([`../benchmarks/blind-eval.md`](../benchmarks/blind-eval.md)). The unconfigured core keeps
+it **off by default** (WF-ADR-0016). Newly generated automatic presets enable only the
+reviewed `0.05` starter weight and calibrate the cut against the bundled independent corpus
+(WF-ADR-0079); larger lexical recipes remain opt-in and workload-specific.
 
 Three things the evidence is clear about:
 
@@ -82,6 +85,26 @@ arm. It defaults to the high-arm cost. Increase it when a wrong answer costs mor
 than one strong-model retry. `--config` is optional; when present, the calibrator
 uses that file's weights and lexicon and preserves them in the generated fragment.
 
+To distil a bounded static high-arm vocabulary from the same labelled data, add
+`--distill-lexicon`:
+
+```bash
+wayfinder-router calibrate your-data.jsonl \
+  --costs local=0.0001,cloud=0.003 \
+  --quality-penalty 0.003 \
+  --distill-lexicon \
+  --out distilled-wayfinder-router.toml
+```
+
+The native distiller keeps terms repeated in the high arm and absent from the
+low arm, removes a fixed stop-word set, caps the artifact at 128 terms, and
+searches a fixed semantic-weight grid under the min-cost objective. The emitted
+TOML is ordinary lexicon, weights, and tiers: request-time routing stays pure
+Rust, offline, deterministic, model-free, and keyless. The 24-row targeted
+fixture improves held-out short-hard recovery from 0/4 to 4/4 and held-out
+long-easy local routing from 0/4 to 4/4. That isolates the rank inversion; it is
+not a universal accuracy claim, so retain a separate held-out workload split.
+
 Aim for a few hundred labels before trusting the cut. `recalibrate` remains
 unsupported; rerun this explicit command when your traffic or prices change.
 
@@ -103,9 +126,10 @@ aren't vocabulary you curate).
 
 ### Historical lexicon-mining evidence
 
-The Python lexicon miner was removed by the Rust-only cutover. There is no supported native
-replacement today, so this guide no longer presents the old command as runnable. The frozen
-RouterBench outputs remain useful evidence and taught two honest lessons:
+The broad Python miner was removed by the Rust-only cutover. The bounded native
+`--distill-lexicon` path above now covers the deployable binary high-arm case;
+it does not restore per-domain reports or the old experimental objectives. The
+frozen RouterBench outputs remain useful evidence and taught two honest lessons:
 
 - **Global mining captures task-surface words, not difficulty.** The top cloud-signal terms
   came out as `homework, mile, preheat, flour, dough, laundry` — i.e. "this looks like a
