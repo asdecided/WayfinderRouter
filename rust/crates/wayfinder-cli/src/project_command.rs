@@ -12,6 +12,7 @@ use uuid::Uuid;
 use wayfinder_config::TierOrderPolicy;
 use wayfinder_config::gateway::{GatewayConfig, VirtualKey, Workspace};
 use wayfinder_config::routing_config_from_toml;
+use wayfinder_routing_core::DEFAULT_THRESHOLD;
 
 use crate::{EXIT_CONFIG, EXIT_OK, EXIT_USAGE, write_error, write_output};
 
@@ -648,7 +649,9 @@ fn validate_visible_id(value: &str, label: &str) -> Result<(), String> {
 }
 
 fn generated_profile() -> String {
-    "# wayfinder-generated: project-profile-v1\n# safe-to-replace: true\n[routing]\nthreshold = 0.5\n".to_owned()
+    format!(
+        "# wayfinder-generated: project-profile-v1\n# safe-to-replace: true\n[routing]\nthreshold = {DEFAULT_THRESHOLD}\n"
+    )
 }
 
 fn directory_id(repository: &str, root: &Path) -> String {
@@ -906,6 +909,23 @@ fn write_human(stdout: &mut dyn Write, payload: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_project_profile_uses_the_developer_starter_cut()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let profile = generated_profile();
+        let config = routing_config_from_toml(
+            &profile,
+            "generated-project-profile",
+            None,
+            TierOrderPolicy::StrictInput,
+        )?;
+        assert_eq!(
+            config.tiers.get(1).map(|tier| tier.min_score),
+            Some(DEFAULT_THRESHOLD)
+        );
+        Ok(())
+    }
 
     #[test]
     fn repository_inputs_are_exact_and_unambiguous() {

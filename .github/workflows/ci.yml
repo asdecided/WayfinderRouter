@@ -37,6 +37,12 @@ jobs:
         run: cargo +stable fmt --manifest-path rust/Cargo.toml --all -- --check
       - name: Rust workspace tests
         run: cargo +stable test --manifest-path rust/Cargo.toml --workspace --all-features --locked
+      - name: Build the default Router executable
+        run: >-
+          cargo +stable build --manifest-path rust/Cargo.toml --package wayfinder-cli
+          --bin wayfinder-router --locked
+      - name: Developer starter routing regression
+        run: benchmarks/check-developer-starter.sh rust/target/debug/wayfinder-router
       - name: Rust documentation tests
         run: cargo +stable test --manifest-path rust/Cargo.toml --doc --workspace --locked
       - name: Rust warning-denied Clippy

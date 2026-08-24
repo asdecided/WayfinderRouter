@@ -37,6 +37,12 @@ after their checksums have been reviewed.
 - Added the native service lifecycle and smoke-test contracts required by the
   independently released Omarchy plugin, including recoverable install,
   update, repair, restart, and uninstall behavior.
+- Replaced the silent all-local developer defaults with one evidence-backed
+  `0.01` starter cut across unconfigured routing, generated project profiles,
+  and automatic two-arm presets. The release gate runs the compiled Router over
+  the complete 154-prompt independent corpus: 122 route high (90/94 hard) and
+  32 remain local. This is a transparent bootstrap baseline, not a universal
+  accuracy claim; explicit policy and native calibration remain authoritative.
 
 Existing native `min-cost` threshold calibration and the bounded `init`,
 `doctor`, `connect`, and `open` activation surface remain included.

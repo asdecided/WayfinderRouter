@@ -47,10 +47,11 @@ struct TierFixture {
 #[test]
 fn rust_matches_all_21_migration_golden_decisions() -> Result<(), Box<dyn Error>> {
     let cases: Vec<ExpectedDecision> = serde_json::from_str(MIGRATION_GOLDEN)?;
+    let frozen_python_default = RoutingConfig::binary(0.5);
 
     assert_eq!(cases.len(), 21);
     for expected in &cases {
-        let actual = score_complexity(&expected.text, &RoutingConfig::default())?;
+        let actual = score_complexity(&expected.text, &frozen_python_default)?;
         assert_decision_matches(
             &expected.name,
             expected.score,

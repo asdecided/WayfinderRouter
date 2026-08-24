@@ -22,8 +22,12 @@ pub use wayfinder_runtime_contracts::{
     RoutingRequest, RoutingRequirements,
 };
 
-/// Default cut for the binary local/cloud router.
-pub const DEFAULT_THRESHOLD: f64 = 0.5;
+/// Evidence-backed starter cut for the binary local/cloud router.
+///
+/// This is a bootstrap policy, not a universal optimum. Operators should use
+/// the native calibrator with representative labelled traffic before treating
+/// a threshold as settled policy (WF-ADR-0078).
+pub const DEFAULT_THRESHOLD: f64 = 0.01;
 
 /// Stable feature order used by reports, classifier vectors, and score accumulation.
 pub const FEATURE_ORDER: [&str; 11] = [
@@ -1188,12 +1192,13 @@ mod tests {
     fn default_golden_cases_match_python() -> Result<(), CoreError> {
         let headings = scored("# Plan\n\n## Steps\n- one\n- two\n- three\n1. first\n2. second")?;
         assert_eq!(headings.score, 0.15);
-        assert_eq!(headings.recommendation, "local");
+        assert_eq!(headings.recommendation, "cloud");
         assert_eq!(headings.features.heading_count, 2);
         assert_eq!(headings.features.list_item_count, 5);
 
         let math = scored("show that ∑ x ≤ ∞ and ∫ f dx ≥ 0 using \\alpha and \\beta")?;
         assert_eq!(math.score, 0.01);
+        assert_eq!(math.recommendation, "cloud");
         assert_eq!(math.features.math_symbol_count, 7);
         Ok(())
     }

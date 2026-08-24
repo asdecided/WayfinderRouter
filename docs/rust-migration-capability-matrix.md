@@ -23,8 +23,9 @@ Rust parity: Phases 1–3 complete; operations, CLI, and distribution gates rema
 > unchanged. With fixed two-arm costs, the cost-ratio term is constant across candidate cuts, so
 > changing only the configured prices cannot move the selected cut. WF-ADR-0015 reclassifies
 > `knee` as a quality/call-fraction heuristic, and WF-ADR-0017 specifies `min-cost` for any future
-> price-sensitive native calibrator. The current Rust CLI continues to reject `calibrate` and
-> `recalibrate` under WF-ADR-0046.
+> price-sensitive native calibrator. The Rust CLI now ships the bounded
+> `calibrate --mode threshold --objective min-cost` path from WF-ADR-0017;
+> `recalibrate`, legacy objectives, and classifier fitting remain unavailable.
 
 This is the compatibility contract for the Python-to-Rust migration. It is intentionally
 evidence-first: a Rust module is not considered compatible merely because it has an analogous

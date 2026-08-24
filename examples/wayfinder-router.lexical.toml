@@ -13,8 +13,9 @@
 #
 # Lexical signals help only when your traffic's difficulty lives in its vocabulary
 # (RouterBench is math/reasoning-heavy). They ship OFF by default (WF-ADR-0016); this
-# file turns them on deliberately. The 0.09 cut is RouterBench's knee, NOT a universal
-# constant — recalibrate it to your own traffic (see docs/lexical-routing.md).
+# file turns them on deliberately. The 0.09 cut is RouterBench's historical knee for
+# these different weights, NOT Wayfinder's general 0.01 developer starter and NOT a
+# universal constant — recalibrate it to your own traffic (see docs/lexical-routing.md).
 
 [routing]
 threshold = 0.09
