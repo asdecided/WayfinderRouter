@@ -4,6 +4,11 @@
 > removed by the Rust-only cutover (WF-ADR-0046). The native CLI now supports
 > the bounded `threshold` + `min-cost` path documented below; legacy objectives,
 > classifier fitting, and automatic recalibration remain unsupported.
+>
+> The general developer starter is now `0.01` (WF-ADR-0078), derived from the
+> independent blind corpus and guarded with the compiled Router in CI. The
+> `0.09` cut below belongs only to the historical RouterBench lexical recipe,
+> whose weights differ from the default scorer.
 
 Wayfinder's default scorer is **structural only** (length, headings, lists, code, tables).
 On real frontier traffic that default does not beat stable-random: against RouterBench
@@ -49,9 +54,11 @@ fires on ~20% of hard prompts and loses to a length baseline
 ([`../benchmarks/blind-eval.md`](../benchmarks/blind-eval.md)) — which is why it ships **off
 by default** (WF-ADR-0016). Turn it on only if your traffic looks like the former.
 
-Two things the evidence is clear about:
+Three things the evidence is clear about:
 
 - **`0.09` is RouterBench's knee, not a universal constant.** Recalibrate it to your traffic.
+- **`0.01` is a general bootstrap cut, not a universal constant either.** It fixes the silent
+  all-local first run on the independent 154-prompt corpus; explicit policy and calibration win.
 - **A ~20-prompt bootstrap is not enough** to find a stable cut: skill is noise-dominated
   until you have a few hundred labeled prompts (see the learning curve in
   `calibration-eval.md`). Treat 20 prompts as a smoke test, not a calibration.
@@ -94,18 +101,11 @@ It stays off until you also weight it (`reasoning_term_count`), and it round-tri
 the config loader like everything else. Math symbols and the `?` count stay built-in (they
 aren't vocabulary you curate).
 
-### Mine the words from your own labels
+### Historical lexicon-mining evidence
 
-Guessing a wordlist re-introduces author bias. `benchmarks/mine_lexicon.py` instead picks
-the terms that, in *your* labeled data, appear far more in cloud-labeled prompts than
-local-labeled ones (a deterministic smoothed log-odds on a held-out train split), and emits
-a ready `[routing.lexicon]` config:
-
-```bash
-python -m benchmarks.mine_lexicon your-data.jsonl
-```
-
-Read the output with eyes open — on RouterBench it taught two honest lessons:
+The Python lexicon miner was removed by the Rust-only cutover. There is no supported native
+replacement today, so this guide no longer presents the old command as runnable. The frozen
+RouterBench outputs remain useful evidence and taught two honest lessons:
 
 - **Global mining captures task-surface words, not difficulty.** The top cloud-signal terms
   came out as `homework, mile, preheat, flour, dough, laundry` — i.e. "this looks like a
@@ -137,12 +137,13 @@ threshold = 0.09   # then recalibrate to your traffic
 These are *starters*, and honestly uneven: the `science`, `general`, and `humanities` blocks
 are real subject-matter vocabulary; `math`, `multilingual`, and `commonsense` skew to
 task-surface nouns (RouterBench's tasks there are word-problems / templated). Treat them as a
-worked example and regenerate from your own labelled traffic with `--emit-domains`.
+frozen worked example, not a generated policy for new traffic.
 
 ### Stock profiles (packaged, selectable in the demo)
 
 For a head-start without hand-copying, the library ships **lexicon profiles**
-([`wayfinder_router/profiles.py`](../wayfinder_router/profiles.py), WF-ADR-0024), served at
+([`rust/crates/wayfinder-routing-core/src/profiles.rs`](../rust/crates/wayfinder-routing-core/src/profiles.rs),
+WF-ADR-0024), served at
 `GET /router/profiles` and selectable in the demo's **Advanced** settings — pick one and it
 fills the term lists, turns the lexical signal on, and you tune + **Export config** from there.
 They come in two honestly-labelled flavours:
@@ -157,11 +158,8 @@ labels**. The lexical caveat above (it reads vocabulary, not difficulty) applies
 
 ## Verify it on your data
 
-Point the benchmark harness at your labeled set to see the held-out skill for the structural
-default vs the lexical opt-in before you deploy:
-
-```bash
-python -m benchmarks.routerbench_calibrate your-data.jsonl
-```
-
-It reports both, plus the random / length / oracle reference lines, all leakage-free.
+Use the native `min-cost` calibration command above on a representative training split, then
+evaluate its emitted cut on a separate held-out split before deployment. The repository keeps
+the old RouterBench reports as historical evidence, but the removed Python benchmark command is
+not a supported runtime or verification path. Record your labels, arm costs, quality penalty,
+selected cut, and held-out result with the policy so the decision remains reviewable.

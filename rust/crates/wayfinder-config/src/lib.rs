@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use toml::Value;
 use wayfinder_routing_core::{
-    ClassifierModel, CoreError, FEATURE_ORDER, Lexicon, RoutingConfig, Tier, Weights, binary_tiers,
-    python_round,
+    ClassifierModel, CoreError, DEFAULT_THRESHOLD, FEATURE_ORDER, Lexicon, RoutingConfig, Tier,
+    Weights, binary_tiers, python_round,
 };
 
 /// Gateway configuration schema and validation.
@@ -104,7 +104,7 @@ pub fn load_routing_config(
     tier_order: TierOrderPolicy,
 ) -> Result<RoutingConfig, ConfigError> {
     let Some(path) = find_config_file(start_dir, explicit) else {
-        let threshold = parse_environment_threshold(threshold_environment, 0.5)?;
+        let threshold = parse_environment_threshold(threshold_environment, DEFAULT_THRESHOLD)?;
         return Ok(RoutingConfig::binary(threshold));
     };
     let text = fs::read_to_string(&path).map_err(|error| ConfigError::Read {
@@ -154,7 +154,7 @@ pub fn routing_config_from_toml(
         let classifier = parse_classifier(value, where_)?;
         return Ok(RoutingConfig {
             weights,
-            tiers: binary_tiers(0.5),
+            tiers: binary_tiers(DEFAULT_THRESHOLD),
             classifier: Some(classifier),
             lexicon,
         });
@@ -168,7 +168,7 @@ pub fn routing_config_from_toml(
         });
     }
 
-    let configured = parse_threshold(routing.get("threshold"), where_, 0.5)?;
+    let configured = parse_threshold(routing.get("threshold"), where_, DEFAULT_THRESHOLD)?;
     let threshold = parse_environment_threshold(threshold_environment, configured).map_err(
         |error| match error {
             ConfigError::InvalidValue { message, .. } => ConfigError::InvalidValue {
@@ -830,7 +830,10 @@ mod tests {
             "[gateway]\noffline = true\n",
             TierOrderPolicy::CompatibilitySort,
         )?;
-        assert_eq!(config.tiers.get(1).map(|tier| tier.min_score), Some(0.5));
+        assert_eq!(
+            config.tiers.get(1).map(|tier| tier.min_score),
+            Some(DEFAULT_THRESHOLD)
+        );
         Ok(())
     }
 

@@ -124,6 +124,15 @@ details, release history over commit history.
 
 ### Changed
 
+- **Evidence-backed developer routing starter** (WF-ADR-0078, issue #195).
+  Unconfigured binary routing, generated project profiles, and automatic
+  `hybrid`, `openai`, and `gemini` presets now share a `0.01` starter cut. The
+  compiled Router is regression-tested on the complete 154-prompt independent
+  corpus, where the reviewed baseline uses both arms, recovers 90/94 hard
+  prompts, and retains 32/154 local calls. Explicit policy remains authoritative,
+  the offline local-only preset remains `1.0`, and the starter is documented as
+  bootstrap evidence rather than a universal optimum.
+
 - **Bounded daily route receipts** (WF-ADR-0074, WF-ROADMAP-0017). The
   prompt-free `/router/recent` ring now distinguishes the selected route from
   the destination that actually served it, records the concrete execution
