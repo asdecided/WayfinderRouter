@@ -52,6 +52,7 @@ The native Swift macOS app provides:
 - conversation-first Chat with locally persisted history;
 - automatic or pinned model selection;
 - Apple Foundation Models delivery on eligible Apple Silicon Macs;
+- native Anthropic Messages destinations with bounded streaming/tool translation;
 - opt-in ChatGPT account routing through a separately verified provider;
 - OpenAI-compatible and Anthropic-compatible local gateway endpoints;
 - native setup, connection, routing, privacy, and diagnostic surfaces.

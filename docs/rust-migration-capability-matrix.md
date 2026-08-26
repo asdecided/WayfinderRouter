@@ -163,7 +163,7 @@ verified subset; the proposed owner is an architectural mapping, not permission 
 | OpenAI-compatible provider client | forward helpers | gateway tests | `wayfinder-providers::openai_compat` | `base_url.rstrip('/') + /chat/completions`, replace upstream model, optional Bearer auth, explicit timeouts. Critical provider/error parity and SSRF hardening. |
 | Incoming Anthropic Messages adapter | `anthropic_adapter.py`, `/v1/messages`, `/messages` | `test_anthropic_adapter.py`, gateway tests, DESIGN-0011 | `wayfinder-providers::anthropic` | Buffered aliases reuse the Rust chat path with text/tool translation, model echo, decision headers, auth, cache, and error reshaping; streaming aliases incrementally translate bounded OpenAI SSE. |
 | Gemini/local providers | presets plus generic relay | bootstrap/gateway tests | `wayfinder-providers::openai_compat` | Current Gemini and local support is through OpenAI-compatible endpoints, not a separate native adapter. Medium documentation/parity risk. |
-| Native Anthropic upstream | intentionally not implemented | Phase 3 preset and bootstrap tests | future optional adapter | The default hybrid preset now uses OpenAI's compatible endpoint. Anthropic's native Messages URL is no longer falsely advertised as OpenAI-compatible; native outbound Anthropic can be added later as an explicit provider type. |
+| Native Anthropic upstream | explicit provider type; no legacy equivalent | provider translation, config, and gateway tests; WF-ADR-0081 | `wayfinder-providers::anthropic_native`, `AnthropicDelivery` | Distinct `x-api-key`/Messages client with buffered, error, tool, usage, and bounded SSE translation. It is never advertised as OpenAI-compatible and does not alter Automatic. |
 | Buffered provider errors | forward helpers and chat handler | gateway tests | `wayfinder-providers::error` | Transport exhaustion maps to Wayfinder 502, circuit open to 503; ordinary upstream 4xx body/status passes through; retryable set is exact. Critical error-envelope parity. |
 | OpenAI SSE relay | `aforward_stream`, chat handler | stream tests, ADR-0013 | `wayfinder-providers::sse` | Rust now establishes upstream lazily, relays incremental bytes exactly, bounds SSE frames, accounts only clean completion, and appends a terminal error plus `[DONE]` on transport/parser failure. Upstream status parity and explicit disconnect/backpressure evidence remain open; streaming intentionally uses one plan target without retries. Critical correctness/security gap. |
 | Anthropic SSE translation | `MessagesStreamTranslator` | adapter tests | `anthropic::sse_state` | Explicit event sequencing; fragmented frames; empty output; missing `[DONE]`; tool calls emitted complete in first-seen order. Critical parser/state parity. |
@@ -279,9 +279,7 @@ explicitly recorded as intentional changes rather than normalized away.
 5. **Legacy secret commands:** `api_key_cmd` is an existing config contract but currently uses a
    shell and can expose command text/stderr. Rust must retain compatibility without reproducing
    insecure transport or silently rewriting config.
-6. **Native Anthropic upstream:** incoming Anthropic Messages compatibility exists, but the default
-   hybrid preset's Anthropic upstream is not actually supported by the generic OpenAI relay.
-7. **CLI breadth:** the Python local web UI and terminal chat are real supported commands but are
+6. **CLI breadth:** the Python local web UI and terminal chat are real supported commands but are
    outside the preferred Rust workspace shape. They must remain on the Python path until ported or
    explicitly deprecated through a reviewed decision.
 

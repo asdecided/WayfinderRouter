@@ -129,6 +129,14 @@ impl SecretValue {
         value.set_sensitive(true);
         Ok(value)
     }
+
+    /// Render one sensitive raw API-key header for a provider-specific client.
+    pub(crate) fn api_key_header(&self) -> Result<HeaderValue, ProviderError> {
+        let mut value =
+            HeaderValue::from_bytes(&self.bytes).map_err(|_| ProviderError::InvalidCredential)?;
+        value.set_sensitive(true);
+        Ok(value)
+    }
 }
 
 impl Drop for SecretValue {

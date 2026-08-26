@@ -80,8 +80,9 @@ Any two OpenAI-compatible endpoints. The gateway maps the two routed tiers (`loc
 upstreams in `[gateway.models.*]`, forwards an OpenAI-style request, and sends the key as
 `Authorization: Bearer $<api_key_env>` — so it works with local servers (Ollama, vLLM, LM Studio…)
 and hosted APIs that implement OpenAI Chat Completions (including OpenAI and Gemini's documented
-compatibility endpoint) alike. Anthropic's native Messages API is not an OpenAI-compatible endpoint;
-use Wayfinder's incoming Anthropic aliases with a configured OpenAI-compatible upstream. Keys are set as environment
+compatibility endpoint) alike. Anthropic's native Messages API uses the explicit
+`provider = "anthropic"` destination and is translated as a distinct bounded
+delivery contract. Keys are set as environment
 variables named by `api_key_env` — never written into the config. The two tiers don't even have to be
 two *different* models: pointing both at the same model with reasoning on for the dear tier and off for
 the cheap one (a **think / no-think** split) is a valid two-tier setup — the router just decides which

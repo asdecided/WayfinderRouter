@@ -1,5 +1,6 @@
 //! Buffered provider-delivery seam and OpenAI-compatible implementation.
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 use std::net::IpAddr;
@@ -25,6 +26,10 @@ use wayfinder_codex_app_server::{
     CodexAppServerManager, MAX_NOTIFICATION_QUEUE, MAX_RESPONSE_BYTES,
 };
 use wayfinder_config::gateway::ProviderKind;
+use wayfinder_providers::anthropic_native::{
+    AnthropicEndpoint, AnthropicNativeError, AnthropicProviderClient, AnthropicToOpenAiStream,
+    anthropic_to_openai_error, anthropic_to_openai_response, openai_to_anthropic_request,
+};
 use wayfinder_providers::openai_compat::{
     OpenAiEndpoint, OpenAiProviderClient, ProviderError, SecretValue,
 };
@@ -200,9 +205,23 @@ pub enum DeliveryError {
     /// Native Apple provider failed with a sanitized, planning-safe category.
     #[error(transparent)]
     Apple(AppleDeliveryError),
+    /// Native Anthropic Messages delivery failed with a sanitized category.
+    #[error(transparent)]
+    Anthropic(AnthropicDeliveryError),
     /// Managed Codex app-server delivery failed with a sanitized category.
     #[error(transparent)]
     Codex(CodexDeliveryError),
+}
+
+/// Stable native Anthropic delivery failures.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum AnthropicDeliveryError {
+    /// The public request is outside the bounded Messages adapter contract.
+    #[error("request is unsupported by the Anthropic provider")]
+    InvalidRequest,
+    /// The upstream response violated the bounded Messages contract.
+    #[error("Anthropic returned an invalid response")]
+    InvalidResponse,
 }
 
 /// Stable Codex app-server delivery failures. No variant retains request content.
@@ -594,43 +613,48 @@ where
     }
 }
 
-/// Buffered dispatcher that keeps native and OpenAI-compatible providers distinct.
-pub struct BufferedProviderDelivery<O, A, C> {
+/// Buffered dispatcher that keeps provider-specific delivery contracts distinct.
+pub struct BufferedProviderDelivery<O, N, A, C> {
     openai: O,
+    anthropic: N,
     apple: A,
     codex: C,
 }
 
-impl<O, A, C> BufferedProviderDelivery<O, A, C> {
+impl<O, N, A, C> BufferedProviderDelivery<O, N, A, C> {
     /// Bind provider-specific buffered implementations.
     #[must_use]
-    pub const fn new(openai: O, apple: A, codex: C) -> Self {
+    pub const fn new(openai: O, anthropic: N, apple: A, codex: C) -> Self {
         Self {
             openai,
+            anthropic,
             apple,
             codex,
         }
     }
 }
 
-impl<O, A, C> BufferedDelivery for BufferedProviderDelivery<O, A, C>
+impl<O, N, A, C> BufferedDelivery for BufferedProviderDelivery<O, N, A, C>
 where
     O: BufferedDelivery,
+    N: BufferedDelivery,
     A: BufferedDelivery,
     C: BufferedDelivery,
 {
     fn send<'a>(&'a self, model: &'a ConfiguredModel, body: Value) -> DeliveryFuture<'a> {
         match model.provider() {
             ProviderKind::OpenAiCompatible => self.openai.send(model, body),
+            ProviderKind::Anthropic => self.anthropic.send(model, body),
             ProviderKind::AppleFoundationModels => self.apple.send(model, body),
             ProviderKind::CodexAppServer => self.codex.send(model, body),
         }
     }
 }
 
-impl<O, A, C> StreamingDelivery for BufferedProviderDelivery<O, A, C>
+impl<O, N, A, C> StreamingDelivery for BufferedProviderDelivery<O, N, A, C>
 where
     O: StreamingDelivery,
+    N: StreamingDelivery,
     A: StreamingDelivery,
     C: StreamingDelivery,
 {
@@ -641,6 +665,7 @@ where
     ) -> StreamingDeliveryFuture<'a> {
         match model.provider() {
             ProviderKind::OpenAiCompatible => self.openai.send_stream(model, body),
+            ProviderKind::Anthropic => self.anthropic.send_stream(model, body),
             ProviderKind::AppleFoundationModels => self.apple.send_stream(model, body),
             ProviderKind::CodexAppServer => self.codex.send_stream(model, body),
         }
@@ -1249,6 +1274,211 @@ where
                 status,
                 content_type,
                 Box::pin(stream),
+            ))
+        })
+    }
+}
+
+/// Reqwest-backed native Anthropic delivery with OpenAI-shape translation.
+pub struct AnthropicDelivery<S> {
+    client: AnthropicProviderClient,
+    credentials: S,
+}
+
+impl<S> AnthropicDelivery<S> {
+    /// Bind a policy-constrained Anthropic client to a credential source.
+    #[must_use]
+    pub const fn new(client: AnthropicProviderClient, credentials: S) -> Self {
+        Self {
+            client,
+            credentials,
+        }
+    }
+}
+
+impl<S> fmt::Debug for AnthropicDelivery<S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AnthropicDelivery")
+            .field("client", &self.client)
+            .field("credentials", &"[REDACTED SOURCE]")
+            .finish()
+    }
+}
+
+fn map_anthropic_translation(error: AnthropicNativeError) -> DeliveryError {
+    match error {
+        AnthropicNativeError::InvalidRequest => {
+            DeliveryError::Anthropic(AnthropicDeliveryError::InvalidRequest)
+        }
+        AnthropicNativeError::InvalidResponse | AnthropicNativeError::Stream(_) => {
+            DeliveryError::Anthropic(AnthropicDeliveryError::InvalidResponse)
+        }
+    }
+}
+
+fn translate_anthropic_error_bytes(body: &[u8]) -> Bytes {
+    let body = serde_json::from_slice(body)
+        .unwrap_or_else(|_| serde_json::json!({"error": {"message": "Anthropic upstream error"}}));
+    serde_json::to_vec(&anthropic_to_openai_error(&body)).map_or_else(
+        |_| {
+            Bytes::from_static(
+                b"{\"error\":{\"message\":\"Anthropic upstream error\",\"type\":\"api_error\"}}",
+            )
+        },
+        Bytes::from,
+    )
+}
+
+impl<S> BufferedDelivery for AnthropicDelivery<S>
+where
+    S: CredentialSource,
+{
+    fn send<'a>(&'a self, model: &'a ConfiguredModel, body: Value) -> DeliveryFuture<'a> {
+        Box::pin(async move {
+            if model.provider() != ProviderKind::Anthropic {
+                return Err(DeliveryError::Anthropic(
+                    AnthropicDeliveryError::InvalidRequest,
+                ));
+            }
+            let endpoint = AnthropicEndpoint::parse(model.endpoint())
+                .map_err(|_| DeliveryError::InvalidEndpoint)?;
+            let credential = self
+                .credentials
+                .resolve(model.api_key_env())
+                .map_err(|_| DeliveryError::CredentialUnavailable)?
+                .ok_or(DeliveryError::CredentialUnavailable)?;
+            let body = openai_to_anthropic_request(&body, model.provider_model(), false)
+                .map_err(map_anthropic_translation)?;
+            let mut propagation = HeaderMap::new();
+            crate::otel::inject_traceparent(&mut propagation);
+            let response = self
+                .client
+                .send_buffered_with_headers(&endpoint, &body, &credential, Some(&propagation))
+                .await
+                .map_err(DeliveryError::Provider)?;
+            let status = response.status();
+            let body = response.into_body();
+            let body = if status.is_success() {
+                let value = serde_json::from_slice(&body).map_err(|_| {
+                    DeliveryError::Anthropic(AnthropicDeliveryError::InvalidResponse)
+                })?;
+                let translated =
+                    anthropic_to_openai_response(&value).map_err(map_anthropic_translation)?;
+                Bytes::from(serde_json::to_vec(&translated).map_err(|_| {
+                    DeliveryError::Anthropic(AnthropicDeliveryError::InvalidResponse)
+                })?)
+            } else {
+                translate_anthropic_error_bytes(&body)
+            };
+            Ok(BufferedDeliveryResponse::new(
+                status,
+                "application/json",
+                body,
+            ))
+        })
+    }
+}
+
+struct AnthropicTranslatedStream {
+    upstream: wayfinder_providers::anthropic_native::AnthropicByteStream,
+    translator: AnthropicToOpenAiStream,
+    pending: VecDeque<Result<Bytes, DeliveryError>>,
+    finished: bool,
+}
+
+impl Stream for AnthropicTranslatedStream {
+    type Item = Result<Bytes, DeliveryError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            if let Some(item) = self.pending.pop_front() {
+                return Poll::Ready(Some(item));
+            }
+            if self.finished {
+                return Poll::Ready(None);
+            }
+            match self.upstream.as_mut().poll_next(context) {
+                Poll::Ready(Some(Ok(chunk))) => match self.translator.push(&chunk) {
+                    Ok(chunks) => self.pending.extend(chunks.into_iter().map(Ok)),
+                    Err(error) => {
+                        self.finished = true;
+                        return Poll::Ready(Some(Err(map_anthropic_translation(error))));
+                    }
+                },
+                Poll::Ready(Some(Err(error))) => {
+                    self.finished = true;
+                    return Poll::Ready(Some(Err(DeliveryError::Provider(error))));
+                }
+                Poll::Ready(None) => {
+                    self.finished = true;
+                    match self.translator.finish() {
+                        Ok(chunks) => self.pending.extend(chunks.into_iter().map(Ok)),
+                        Err(error) => {
+                            return Poll::Ready(Some(Err(map_anthropic_translation(error))));
+                        }
+                    }
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+impl<S> StreamingDelivery for AnthropicDelivery<S>
+where
+    S: CredentialSource,
+{
+    fn send_stream<'a>(
+        &'a self,
+        model: &'a ConfiguredModel,
+        body: Value,
+    ) -> StreamingDeliveryFuture<'a> {
+        Box::pin(async move {
+            if model.provider() != ProviderKind::Anthropic {
+                return Err(DeliveryError::Anthropic(
+                    AnthropicDeliveryError::InvalidRequest,
+                ));
+            }
+            let endpoint = AnthropicEndpoint::parse(model.endpoint())
+                .map_err(|_| DeliveryError::InvalidEndpoint)?;
+            let credential = self
+                .credentials
+                .resolve(model.api_key_env())
+                .map_err(|_| DeliveryError::CredentialUnavailable)?
+                .ok_or(DeliveryError::CredentialUnavailable)?;
+            let body = openai_to_anthropic_request(&body, model.provider_model(), true)
+                .map_err(map_anthropic_translation)?;
+            let mut propagation = HeaderMap::new();
+            crate::otel::inject_traceparent(&mut propagation);
+            let response = self
+                .client
+                .send_stream_with_headers(&endpoint, &body, &credential, Some(&propagation))
+                .await
+                .map_err(DeliveryError::Provider)?;
+            let status = response.status();
+            let stream = response.into_stream();
+            if !status.is_success() {
+                let translated = stream.map(|chunk| {
+                    chunk
+                        .map(|body| translate_anthropic_error_bytes(&body))
+                        .map_err(DeliveryError::Provider)
+                });
+                return Ok(StreamingDeliveryResponse::new(
+                    status,
+                    "application/json",
+                    Box::pin(translated),
+                ));
+            }
+            Ok(StreamingDeliveryResponse::new(
+                status,
+                "text/event-stream",
+                Box::pin(AnthropicTranslatedStream {
+                    upstream: stream,
+                    translator: AnthropicToOpenAiStream::default(),
+                    pending: VecDeque::new(),
+                    finished: false,
+                }),
             ))
         })
     }

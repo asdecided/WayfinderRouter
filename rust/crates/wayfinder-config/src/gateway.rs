@@ -155,6 +155,8 @@ pub enum ProviderKind {
     /// An HTTP endpoint implementing the OpenAI chat-completions contract.
     #[default]
     OpenAiCompatible,
+    /// A native Anthropic Messages HTTP endpoint.
+    Anthropic,
     /// Apple's native on-device system language model.
     AppleFoundationModels,
     /// A bounded Codex app-server authenticated through ChatGPT.
@@ -167,6 +169,7 @@ impl ProviderKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::OpenAiCompatible => "openai-compatible",
+            Self::Anthropic => "anthropic",
             Self::AppleFoundationModels => "apple-foundation-models",
             Self::CodexAppServer => "codex-app-server",
         }
@@ -383,7 +386,7 @@ impl ShadowConfig {
 pub struct GatewayModel {
     /// Provider delivery kind. Omitted TOML defaults to OpenAI-compatible.
     pub provider: ProviderKind,
-    /// OpenAI-compatible API base URL; absent for native providers.
+    /// HTTP provider base URL; absent for on-device and managed providers.
     pub base_url: Option<String>,
     /// Provider model identifier sent upstream.
     pub model: String,
@@ -2086,6 +2089,7 @@ fn parse_models(
             Some(Value::String(value)) if value == "openai-compatible" => {
                 ProviderKind::OpenAiCompatible
             }
+            Some(Value::String(value)) if value == "anthropic" => ProviderKind::Anthropic,
             Some(Value::String(value)) if value == "apple-foundation-models" => {
                 ProviderKind::AppleFoundationModels
             }
@@ -2097,7 +2101,7 @@ fn parse_models(
                     where_,
                     format!(
                         "'gateway.models.{name}.provider' must be one of openai-compatible, \
-                         apple-foundation-models, codex-app-server"
+                         anthropic, apple-foundation-models, codex-app-server"
                     ),
                 ));
             }
@@ -2148,6 +2152,26 @@ fn parse_models(
                     return Err(invalid(
                         where_,
                         format!("'gateway.models.{name}.base_url' must be a string"),
+                    ));
+                }
+                if tier.is_some() {
+                    return Err(invalid(
+                        where_,
+                        format!("'gateway.models.{name}.tier' is only valid for native providers"),
+                    ));
+                }
+            }
+            ProviderKind::Anthropic => {
+                if base_url.is_none() {
+                    return Err(invalid(
+                        where_,
+                        format!("'gateway.models.{name}.base_url' must be a string"),
+                    ));
+                }
+                if api_key_env.is_none() {
+                    return Err(invalid(
+                        where_,
+                        format!("'gateway.models.{name}.api_key_env' is required for anthropic"),
                     ));
                 }
                 if tier.is_some() {
@@ -3392,6 +3416,39 @@ models = ["fast"]
             .ok_or_else(|| invalid("test", "profile credential field was accepted"))?;
         assert!(error.to_string().contains("routing-only"));
         Ok(())
+    }
+
+    #[test]
+    fn anthropic_is_typed_hosted_keyed_and_round_trips() -> Result<(), ConfigError> {
+        let text = concat!(
+            "[gateway.models.claude]\n",
+            "provider = \"anthropic\"\n",
+            "base_url = \"https://api.anthropic.com\"\n",
+            "model = \"claude-sonnet\"\n",
+            "api_key_env = \"ANTHROPIC_API_KEY\"\n",
+            "context_window = 200000"
+        );
+        let config = gateway_config_from_toml(text, "test")?;
+        let model = config
+            .models
+            .get("claude")
+            .ok_or_else(|| invalid("test", "missing Anthropic model"))?;
+        assert_eq!(model.provider, ProviderKind::Anthropic);
+        assert_eq!(model.base_url.as_deref(), Some("https://api.anthropic.com"));
+        assert_eq!(model.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(model.tier, None);
+        assert_eq!(dump_gateway_toml(&config)?, text);
+        Ok(())
+    }
+
+    #[test]
+    fn anthropic_requires_an_endpoint_and_credential_reference() {
+        for text in [
+            "[gateway.models.claude]\nprovider = \"anthropic\"\nmodel = \"claude\"\napi_key_env = \"ANTHROPIC_API_KEY\"\n",
+            "[gateway.models.claude]\nprovider = \"anthropic\"\nbase_url = \"https://api.anthropic.com\"\nmodel = \"claude\"\n",
+        ] {
+            assert!(parse(text).is_err(), "unexpectedly accepted: {text}");
+        }
     }
 
     #[test]

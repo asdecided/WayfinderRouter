@@ -133,6 +133,34 @@ tripwire writes a shared rollback reason and stops new assignments for
 ID; the operator audit log records rollback identity and reason only. See
 [WF-ADR-0065](../decisions/WF-ADR-0065-bounded-canary-rollouts.md).
 
+## Anthropic provider (opt-in)
+
+Anthropic's native Messages API is a distinct delivery kind rather than an
+OpenAI-compatible URL:
+
+```toml
+[gateway.models.claude]
+provider = "anthropic"
+base_url = "https://api.anthropic.com"
+model = "<current Anthropic model ID>"
+api_key_env = "ANTHROPIC_API_KEY"
+```
+
+Set the key only in the Router service environment. The client appends
+`/v1/messages`, uses `x-api-key` plus `anthropic-version: 2023-06-01`, and
+disables redirects and ambient proxies. Buffered and streaming text, function
+tools, tool results, stops, usage, and errors are translated through the same
+routing decision. Unsupported multimodal and provider-specific fields fail
+closed. If an OpenAI-shaped request omits `max_tokens`, Wayfinder supplies the
+documented bounded default of `4096` required by Messages.
+
+This destination table alone does not add Claude to Automatic. Add its public
+name to a reviewed routing tier, fallback, or allowlist separately. To reverse
+the connection, remove only the table and unset `ANTHROPIC_API_KEY` from the
+Router service environment. See the official [Messages API](https://docs.anthropic.com/en/api/messages),
+[streaming event contract](https://docs.anthropic.com/en/api/messages-streaming),
+and [WF-ADR-0081](../decisions/WF-ADR-0081-native-anthropic-destination.md).
+
 ## ChatGPT account provider (opt-in)
 
 For reviewable OpenAI-compatible destination fragments, see the
@@ -275,7 +303,8 @@ The body also contributes hard requirements: estimated prompt plus requested
 output context, image content, tool/function declarations, and streaming.
 Apple Foundation Models and the bounded ChatGPT adapter are text-only and are
 excluded for image/tool requests; the gateway's explicit modality gate also
-rejects non-text payloads before any OpenAI-compatible delivery. Missing credentials, declared windows that are
+rejects non-text payloads before any OpenAI-compatible or native Anthropic
+delivery. Missing credentials, declared windows that are
 too small, unsupported capabilities, and denied privacy boundaries are
 excluded before reliability retries or failover. Models that omit
 `context_window` retain the legacy prompt-precheck behavior. Every concrete

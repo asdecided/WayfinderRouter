@@ -37,9 +37,9 @@ use wayfinder_gateway::control_plane::{
     PolicyProfile, PolicyReceipt,
 };
 use wayfinder_gateway::delivery::{
-    AppleFoundationModelDelivery, BufferedProviderDelivery, CodexAppServerDelivery,
-    CredentialError, CredentialSource, OpenAiCompatibleDelivery, ProviderDelivery,
-    UnavailableCodexDelivery,
+    AnthropicDelivery, AppleFoundationModelDelivery, BufferedProviderDelivery,
+    CodexAppServerDelivery, CredentialError, CredentialSource, OpenAiCompatibleDelivery,
+    ProviderDelivery, UnavailableCodexDelivery,
 };
 use wayfinder_gateway::reload::{LastGood, ReloadOutcome};
 use wayfinder_gateway::server::{DEFAULT_DRAIN_TIMEOUT, serve_with_shutdown, shutdown_signal};
@@ -47,6 +47,7 @@ use wayfinder_gateway::{
     AppState, ConfiguredDeployment, ConfiguredModel, RouteOn, build_reloadable_data_plane_router,
     build_reloadable_router, validate_data_plane_state,
 };
+use wayfinder_providers::anthropic_native::AnthropicProviderClient;
 use wayfinder_providers::openai_compat::{
     DEFAULT_CONNECT_TIMEOUT, OpenAiProviderClient, ProviderClientConfig, SecretValue,
 };
@@ -853,13 +854,18 @@ async fn build_serve_state<W: Write>(
         let timeout = resolve_provider_timeout(options.timeout)?;
         let request_timeout = Duration::try_from_secs_f64(timeout)
             .map_err(|_| "provider timeout is outside the supported duration range".to_owned())?;
-        let client = OpenAiProviderClient::new(ProviderClientConfig {
+        let provider_config = ProviderClientConfig {
             request_timeout,
             connect_timeout: request_timeout.min(DEFAULT_CONNECT_TIMEOUT),
             ..ProviderClientConfig::default()
-        })
-        .map_err(|error| error.to_string())?;
-        let openai = Arc::new(OpenAiCompatibleDelivery::new(client, credentials));
+        };
+        let client =
+            OpenAiProviderClient::new(provider_config).map_err(|error| error.to_string())?;
+        let anthropic_client =
+            AnthropicProviderClient::new(provider_config).map_err(|error| error.to_string())?;
+        let credentials = SharedCredentialSource(Arc::new(credentials));
+        let openai = Arc::new(OpenAiCompatibleDelivery::new(client, credentials.clone()));
+        let anthropic = Arc::new(AnthropicDelivery::new(anthropic_client, credentials));
         let apple_timeout = Duration::from_millis(
             u64::try_from(
                 request_timeout
@@ -879,7 +885,7 @@ async fn build_serve_state<W: Write>(
             |adapter| Arc::new(CodexAppServerDelivery::new(Arc::new(adapter.manager()))) as Arc<_>,
         );
         state = state.with_provider_delivery(Arc::new(BufferedProviderDelivery::new(
-            openai, apple, codex,
+            openai, anthropic, apple, codex,
         )));
     }
     Ok(state)
@@ -1031,6 +1037,15 @@ impl CredentialSource for StartupCredentialSource {
             .map(SecretValue::duplicate_for_request)
             .map(Some)
             .ok_or(CredentialError::Unavailable)
+    }
+}
+
+#[derive(Clone)]
+struct SharedCredentialSource(Arc<StartupCredentialSource>);
+
+impl CredentialSource for SharedCredentialSource {
+    fn resolve(&self, reference: Option<&str>) -> Result<Option<SecretValue>, CredentialError> {
+        self.0.resolve(reference)
     }
 }
 

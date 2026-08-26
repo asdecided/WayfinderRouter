@@ -5130,6 +5130,13 @@ fn fatal_delivery_status(error: &DeliveryError) -> (StatusCode, &'static str) {
         DeliveryError::Apple(delivery::AppleDeliveryError::InvalidResponse) => {
             (StatusCode::BAD_GATEWAY, "wayfinder_router_upstream_error")
         }
+        DeliveryError::Anthropic(delivery::AnthropicDeliveryError::InvalidRequest) => (
+            StatusCode::BAD_REQUEST,
+            "wayfinder_router_unsupported_request",
+        ),
+        DeliveryError::Anthropic(delivery::AnthropicDeliveryError::InvalidResponse) => {
+            (StatusCode::BAD_GATEWAY, "wayfinder_router_upstream_error")
+        }
         DeliveryError::Codex(
             delivery::CodexDeliveryError::Unavailable
             | delivery::CodexDeliveryError::AuthenticationRequired
@@ -5186,7 +5193,7 @@ fn model_capabilities(model: &ConfiguredModel) -> DestinationCapabilities {
         // The OpenAI-compatible adapter currently supports text, tools, and
         // streaming. Non-text surfaces remain explicit opt-ins and are not
         // advertised until their adapters and parity fixtures ship.
-        ProviderKind::OpenAiCompatible => DestinationCapabilities {
+        ProviderKind::OpenAiCompatible | ProviderKind::Anthropic => DestinationCapabilities {
             text: true,
             streaming: true,
             image_input: false,
@@ -5226,7 +5233,9 @@ fn destination_snapshot(model: &ConfiguredModel) -> DestinationSnapshot {
         billing_class: match model.provider() {
             ProviderKind::AppleFoundationModels => wayfinder_routing_core::BillingClass::OnDevice,
             ProviderKind::CodexAppServer => wayfinder_routing_core::BillingClass::Subscription,
-            ProviderKind::OpenAiCompatible => wayfinder_routing_core::BillingClass::ApiMetered,
+            ProviderKind::OpenAiCompatible | ProviderKind::Anthropic => {
+                wayfinder_routing_core::BillingClass::ApiMetered
+            }
         },
         context_window: model.context_window(),
         capabilities: model_capabilities(model),
