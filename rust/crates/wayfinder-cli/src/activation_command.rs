@@ -15,7 +15,7 @@ const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8088";
 const INIT_HELP: &str =
     "usage: wayfinder-router init [--preset local|hybrid|openai|gemini|apple-local] [--path PATH]";
 const CONNECT_HELP: &str =
-    "usage: wayfinder-router connect codex|claude-code|opencode [--endpoint URL]";
+    "usage: wayfinder-router connect codex|claude-code|opencode|pi [--endpoint URL]";
 const OPEN_HELP: &str = "usage: wayfinder-router open [--print]";
 
 pub(crate) fn run_init(
@@ -115,6 +115,9 @@ pub(crate) fn run_connect(
         ),
         "opencode" => format!(
             "{{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {{\n    \"wayfinder\": {{\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"name\": \"Wayfinder\",\n      \"options\": {{ \"baseURL\": \"{endpoint}/v1\" }},\n      \"models\": {{ \"auto\": {{ \"name\": \"Wayfinder Automatic\" }} }}\n    }}\n  }}\n}}"
+        ),
+        "pi" => format!(
+            "{{\n  \"providers\": {{\n    \"wayfinder\": {{\n      \"baseUrl\": \"{endpoint}/v1\",\n      \"api\": \"openai-completions\",\n      \"apiKey\": \"wayfinder-local\",\n      \"compat\": {{\n        \"supportsDeveloperRole\": false,\n        \"supportsReasoningEffort\": false\n      }},\n      \"models\": [\n        {{ \"id\": \"auto\", \"name\": \"Wayfinder Automatic\" }}\n      ]\n    }}\n  }}\n}}"
         ),
         _ => return usage_error(stderr, &format!("unsupported client: {client}")),
     };
@@ -221,6 +224,7 @@ mod tests {
             ("codex", "wire_api"),
             ("claude-code", "export ANTHROPIC_MODEL=\"auto\""),
             ("opencode", "@ai-sdk/openai-compatible"),
+            ("pi", "\"api\": \"openai-completions\""),
         ] {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
@@ -257,6 +261,32 @@ mod tests {
             ),
             EXIT_USAGE
         );
+    }
+
+    #[test]
+    fn pi_connection_recipe_is_valid_json_with_bounded_compatibility() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            run_connect(
+                &[
+                    "pi".to_owned(),
+                    "--endpoint".to_owned(),
+                    "http://localhost:9088/".to_owned(),
+                ],
+                &mut stdout,
+                &mut stderr,
+            ),
+            EXIT_OK
+        );
+        let recipe: serde_json::Value = serde_json::from_slice(&stdout).expect("valid Pi JSON");
+        let provider = &recipe["providers"]["wayfinder"];
+        assert_eq!(provider["baseUrl"], "http://localhost:9088/v1");
+        assert_eq!(provider["api"], "openai-completions");
+        assert_eq!(provider["apiKey"], "wayfinder-local");
+        assert_eq!(provider["compat"]["supportsDeveloperRole"], false);
+        assert_eq!(provider["compat"]["supportsReasoningEffort"], false);
+        assert_eq!(provider["models"][0]["id"], "auto");
     }
 
     #[test]

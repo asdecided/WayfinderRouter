@@ -75,6 +75,25 @@ user `opencode.json`. Choose **Wayfinder Automatic** from `/models`.
 The provider object follows OpenCode's
 [custom provider contract](https://opencode.ai/docs/providers/).
 
+## Pi
+
+```sh
+wayfinder-router connect pi
+```
+
+Review the JSON and merge its `providers.wayfinder` object into
+`~/.pi/agent/models.json`. Select **Wayfinder Automatic** from `/model`, or run
+Pi with `--provider wayfinder --model auto`. The recipe uses Pi's documented
+`openai-completions` custom-provider contract and disables the optional
+`developer` role and `reasoning_effort` fields so the client sends only the
+bounded Chat Completions surface Wayfinder verifies. The `wayfinder-local`
+value is a loopback placeholder, not a provider credential; replace it with a
+Wayfinder virtual key when the local gateway requires one.
+
+To reverse the connection, remove only the `wayfinder` provider object and any
+saved `wayfinder/auto` model selection. Wayfinder does not read Pi's account or
+provider authentication files.
+
 ## Low-level project profiles
 
 Project-aware launch integration is built on authenticated local keys, not a

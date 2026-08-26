@@ -4,6 +4,7 @@ id: WF-ADR-0070
 type: decision
 status: accepted
 date: 2026-08-18
+amended: 2026-08-26
 tags: [activation, cli, local-policy, developer-tools]
 ---
 
@@ -35,10 +36,11 @@ The Rust CLI owns four bounded activation commands:
    parsers. It reports configured destination count, missing environment
    references by variable name, and loopback gateway reachability. It never
    prints credential values or calls a provider.
-3. `connect` prints a client-specific configuration for Codex, Claude Code, or
-   OpenCode. It writes no client file, accepts only an explicit loopback HTTP
-   endpoint, and makes the proposed mutation reviewable before the user applies
-   it.
+3. `connect` prints a client-specific configuration for Codex, Claude Code,
+   OpenCode, or Pi. It writes no client file, accepts only an explicit loopback
+   HTTP endpoint, and makes the proposed mutation reviewable before the user
+   applies it. A printed placeholder token is local gateway configuration, not
+   imported provider authentication.
 4. `open` opens the fixed loopback operator dashboard. `--print` exposes the
    target without a side effect. It cannot open an arbitrary URL.
 
