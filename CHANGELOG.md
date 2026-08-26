@@ -37,9 +37,14 @@ details, release history over commit history.
   selected profile. This is the contract beneath issue #160, not an
   administrative UI or hosted gateway.
 
+- **Aider connection recipe** (WF-ADR-0070, issue #207). `wayfinder-router
+  connect aider` prints Aider's documented OpenAI-compatible endpoint variables
+  and selects `openai/auto`. It writes no client file, imports no credential,
+  and can be reversed by unsetting the two shell variables.
+
 - **Native activation surface** (WF-ADR-0070). `wayfinder-router init` creates a
   no-clobber starter policy, `doctor` validates policy and credential references,
-  `connect` prints bounded Codex, Claude Code, OpenCode, and Pi configurations,
+  `connect` prints bounded Codex, Claude Code, OpenCode, Pi, and Aider configurations,
   and `open` opens only the local decision dashboard. These are new Rust
   contracts, not compatibility shims for the retired Python onboarding
   commands.

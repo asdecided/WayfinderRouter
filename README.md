@@ -17,7 +17,7 @@ wayfinder-router init
 wayfinder-router doctor
 ```
 
-Point Codex, Claude Code, OpenCode, or Pi at the same loopback policy with
+Point Codex, Claude Code, OpenCode, Pi, or Aider at the same loopback policy with
 `wayfinder-router connect <client>`. See the
 [verified coding-agent quick starts](docs/coding-agent-quickstarts.md), or run
 `wayfinder-router open` to inspect local routing decisions.

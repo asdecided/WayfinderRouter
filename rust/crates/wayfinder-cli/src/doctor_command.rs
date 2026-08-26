@@ -262,7 +262,7 @@ fn collect_evidence_inner(gateway: Option<&GatewayConfig>) -> CollectedEvidence 
     );
 
     let runtime_names = ["ollama", "lms", "vllm", "llama-server"];
-    let agent_names = ["codex", "claude", "opencode", "pi"];
+    let agent_names = ["codex", "claude", "opencode", "pi", "aider"];
     let mut installed = BTreeMap::new();
     for name in runtime_names.into_iter().chain(agent_names) {
         installed.insert(name.to_owned(), find_executable(name));
@@ -281,6 +281,16 @@ fn collect_evidence_inner(gateway: Option<&GatewayConfig>) -> CollectedEvidence 
     agent_environment.insert(
         "ANTHROPIC_AUTH_TOKEN".to_owned(),
         env::var_os("ANTHROPIC_AUTH_TOKEN")
+            .filter(|value| !value.is_empty())
+            .map(|_| "present".to_owned()),
+    );
+    agent_environment.insert(
+        "OPENAI_API_BASE".to_owned(),
+        env::var("OPENAI_API_BASE").ok(),
+    );
+    agent_environment.insert(
+        "OPENAI_API_KEY".to_owned(),
+        env::var_os("OPENAI_API_KEY")
             .filter(|value| !value.is_empty())
             .map(|_| "present".to_owned()),
     );
@@ -783,6 +793,14 @@ fn agent_reports(
             .any(|text| text.contains("wayfinder") && contains_gateway_endpoint(&text))
     });
 
+    let aider_endpoint = environment
+        .get("OPENAI_API_BASE")
+        .and_then(Option::as_deref)
+        .is_some_and(is_gateway_endpoint);
+    let aider_auth_reference = environment
+        .get("OPENAI_API_KEY")
+        .is_some_and(Option::is_some);
+
     vec![
         json!({
             "id": "codex",
@@ -808,6 +826,14 @@ fn agent_reports(
             "id": "pi",
             "installed": installed.get("pi").is_some_and(Option::is_some),
             "configured": false,
+            "verification": "unverified",
+        }),
+        json!({
+            "id": "aider",
+            "installed": installed.get("aider").is_some_and(Option::is_some),
+            "configured": aider_endpoint && aider_auth_reference,
+            "endpoint_configured": aider_endpoint,
+            "auth_reference_present": aider_auth_reference,
             "verification": "unverified",
         }),
     ]
@@ -1220,6 +1246,7 @@ mod tests {
             ("claude".to_owned(), Some(PathBuf::from("/bin/claude"))),
             ("opencode".to_owned(), Some(PathBuf::from("/bin/opencode"))),
             ("pi".to_owned(), None),
+            ("aider".to_owned(), Some(PathBuf::from("/bin/aider"))),
         ]);
         let environment = BTreeMap::from([
             (
@@ -1229,6 +1256,14 @@ mod tests {
             (
                 "ANTHROPIC_AUTH_TOKEN".to_owned(),
                 Some("secret-sentinel-must-not-escape".to_owned()),
+            ),
+            (
+                "OPENAI_API_BASE".to_owned(),
+                Some("http://127.0.0.1:8088/v1".to_owned()),
+            ),
+            (
+                "OPENAI_API_KEY".to_owned(),
+                Some("another-secret-sentinel".to_owned()),
             ),
         ]);
         let report = agent_reports(
@@ -1242,6 +1277,7 @@ mod tests {
         assert_eq!(report[0]["configured"], true);
         assert_eq!(report[1]["configured"], true);
         assert_eq!(report[2]["configured"], true);
+        assert_eq!(report[4]["configured"], true);
         assert!(
             report
                 .iter()
