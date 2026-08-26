@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod anthropic;
+pub mod anthropic_native;
 pub mod openai_compat;
 pub mod reliability;
 pub mod sse;

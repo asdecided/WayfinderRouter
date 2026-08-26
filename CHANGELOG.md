@@ -50,6 +50,12 @@ details, release history over commit history.
   operator-supplied model ID, and an environment-variable reference; it writes
   no file or credential and does not change Automatic.
 
+- **Native Anthropic destination** (WF-ADR-0081). `provider = "anthropic"`
+  delivers to the Messages API with explicit `x-api-key` authentication and
+  bounded buffered, streaming, tool, usage, and error translation. Unsupported
+  fields fail closed, credentials remain delivery-only, and configuring the
+  destination does not change Automatic.
+
 - **Native price-sensitive threshold calibration** (WF-ADR-0017, issue #170).
   Operators can fit a deterministic `min-cost` cut from labelled JSONL using
   explicit arm costs and an optional missed-high quality penalty. Calibration
