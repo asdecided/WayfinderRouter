@@ -22,6 +22,11 @@ Point Codex, Claude Code, OpenCode, or Pi at the same loopback policy with
 [verified coding-agent quick starts](docs/coding-agent-quickstarts.md), or run
 `wayfinder-router open` to inspect local routing decisions.
 
+Add a hosted destination without changing Automatic using a reviewable
+[`provider preset`](docs/hosted-provider-presets.md) fragment. The command
+prints the official compatibility endpoint and an environment-variable
+reference; it never writes a credential or edits routing policy.
+
 Underneath the plugin, Wayfinder Router remains a portable Rust project with no
 Omarchy runtime dependency. The scored decision path stays offline,
 deterministic, and keyless; credentials are resolved only for delivery.
