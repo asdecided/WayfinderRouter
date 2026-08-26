@@ -44,6 +44,12 @@ details, release history over commit history.
   contracts, not compatibility shims for the retired Python onboarding
   commands.
 
+- **Reviewable hosted-provider presets** (WF-ADR-0080). `wayfinder-router
+  provider preset` prints isolated OpenAI-compatible destination fragments for
+  ten documented hosted providers. It emits only an official endpoint, an
+  operator-supplied model ID, and an environment-variable reference; it writes
+  no file or credential and does not change Automatic.
+
 - **Native price-sensitive threshold calibration** (WF-ADR-0017, issue #170).
   Operators can fit a deterministic `min-cost` cut from labelled JSONL using
   explicit arm costs and an optional missed-high quality penalty. Calibration
