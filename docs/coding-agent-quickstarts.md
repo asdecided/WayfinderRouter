@@ -94,6 +94,25 @@ To reverse the connection, remove only the `wayfinder` provider object and any
 saved `wayfinder/auto` model selection. Wayfinder does not read Pi's account or
 provider authentication files.
 
+## Aider
+
+```sh
+wayfinder-router connect aider
+```
+
+Review and export the printed variables in the shell that starts Aider, then
+run the printed `aider --model openai/auto` command. `OPENAI_API_BASE` uses
+Wayfinder's loopback `/v1` endpoint, as required by Aider's documented
+OpenAI-compatible API contract; the `openai/` model prefix selects that
+contract and `auto` remains Wayfinder's reserved routing directive. The
+`wayfinder-local` value is a loopback placeholder, not a provider credential.
+Replace it with a Wayfinder virtual key only when the local gateway requires
+one.
+
+To reverse the connection, unset `OPENAI_API_BASE` and `OPENAI_API_KEY` in that
+shell and stop selecting `openai/auto`. Wayfinder writes no Aider configuration
+and does not read Aider's provider credentials or project files.
+
 ## Low-level project profiles
 
 Project-aware launch integration is built on authenticated local keys, not a

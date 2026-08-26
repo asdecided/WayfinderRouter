@@ -15,7 +15,7 @@ const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8088";
 const INIT_HELP: &str =
     "usage: wayfinder-router init [--preset local|hybrid|openai|gemini|apple-local] [--path PATH]";
 const CONNECT_HELP: &str =
-    "usage: wayfinder-router connect codex|claude-code|opencode|pi [--endpoint URL]";
+    "usage: wayfinder-router connect codex|claude-code|opencode|pi|aider [--endpoint URL]";
 const OPEN_HELP: &str = "usage: wayfinder-router open [--print]";
 
 pub(crate) fn run_init(
@@ -118,6 +118,9 @@ pub(crate) fn run_connect(
         ),
         "pi" => format!(
             "{{\n  \"providers\": {{\n    \"wayfinder\": {{\n      \"baseUrl\": \"{endpoint}/v1\",\n      \"api\": \"openai-completions\",\n      \"apiKey\": \"wayfinder-local\",\n      \"compat\": {{\n        \"supportsDeveloperRole\": false,\n        \"supportsReasoningEffort\": false\n      }},\n      \"models\": [\n        {{ \"id\": \"auto\", \"name\": \"Wayfinder Automatic\" }}\n      ]\n    }}\n  }}\n}}"
+        ),
+        "aider" => format!(
+            "# Set these variables before starting Aider\nexport OPENAI_API_BASE=\"{endpoint}/v1\"\nexport OPENAI_API_KEY=\"wayfinder-local\"\naider --model openai/auto"
         ),
         _ => return usage_error(stderr, &format!("unsupported client: {client}")),
     };
@@ -225,6 +228,7 @@ mod tests {
             ("claude-code", "export ANTHROPIC_MODEL=\"auto\""),
             ("opencode", "@ai-sdk/openai-compatible"),
             ("pi", "\"api\": \"openai-completions\""),
+            ("aider", "aider --model openai/auto"),
         ] {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
@@ -288,6 +292,31 @@ mod tests {
         assert_eq!(provider["compat"]["supportsReasoningEffort"], false);
         assert_eq!(provider["models"][0]["id"], "auto");
         Ok(())
+    }
+
+    #[test]
+    fn aider_recipe_uses_only_the_official_compatible_endpoint_contract() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            run_connect(
+                &[
+                    "aider".to_owned(),
+                    "--endpoint".to_owned(),
+                    "http://localhost:9088/".to_owned(),
+                ],
+                &mut stdout,
+                &mut stderr,
+            ),
+            EXIT_OK
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&stdout),
+            "# Set these variables before starting Aider\n\
+export OPENAI_API_BASE=\"http://localhost:9088/v1\"\n\
+export OPENAI_API_KEY=\"wayfinder-local\"\n\
+aider --model openai/auto\n"
+        );
     }
 
     #[test]

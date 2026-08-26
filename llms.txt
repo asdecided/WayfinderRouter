@@ -30,6 +30,8 @@ Connect a supported coding agent only after showing the generated recipe to the 
 wayfinder-router connect codex
 wayfinder-router connect claude-code
 wayfinder-router connect opencode
+wayfinder-router connect pi
+wayfinder-router connect aider
 ```
 
 Use `wayfinder-router doctor --json` for bounded diagnosis. A `routing-distribution` warning means at least 20 scored automatic requests used only one configured arm. Do not suppress the warning by inventing traffic or lowering a threshold blindly; review the starter receipt or calibrate with representative labelled JSONL.
@@ -52,7 +54,7 @@ To reverse a plugin-owned Router upgrade, run `./install.sh --rollback-router` f
 
 - [Repository README](https://github.com/asdecided/WayfinderRouter/blob/main/README.md): Product boundaries, installation, build, endpoints, and verification.
 - [Omarchy plugin](https://github.com/asdecided/omarchy-wayfinder): Flagship plugin source, installer, bar surface, and release authority.
-- [Coding-agent quick starts](https://github.com/asdecided/WayfinderRouter/blob/main/docs/coding-agent-quickstarts.md): Reviewed Codex, Claude Code, and OpenCode connection recipes.
+- [Coding-agent quick starts](https://github.com/asdecided/WayfinderRouter/blob/main/docs/coding-agent-quickstarts.md): Reviewed Codex, Claude Code, OpenCode, Pi, and Aider connection recipes.
 - [Omarchy troubleshooting](https://github.com/asdecided/omarchy-wayfinder/blob/main/docs/troubleshooting.md): Bounded diagnostics, updates, recovery, and rollback.
 
 ## Routing and calibration

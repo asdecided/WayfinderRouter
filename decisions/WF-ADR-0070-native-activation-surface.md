@@ -37,7 +37,7 @@ The Rust CLI owns four bounded activation commands:
    references by variable name, and loopback gateway reachability. It never
    prints credential values or calls a provider.
 3. `connect` prints a client-specific configuration for Codex, Claude Code,
-   OpenCode, or Pi. It writes no client file, accepts only an explicit loopback
+   OpenCode, Pi, or Aider. It writes no client file, accepts only an explicit loopback
    HTTP endpoint, and makes the proposed mutation reviewable before the user
    applies it. A printed placeholder token is local gateway configuration, not
    imported provider authentication.

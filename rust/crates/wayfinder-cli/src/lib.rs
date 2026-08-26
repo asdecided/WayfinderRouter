@@ -1484,7 +1484,31 @@ fn write_error(stream: &mut dyn Write, message: &str) {
 }
 
 const TOP_LEVEL_USAGE: &str = "usage: wayfinder-router [-h] [--version] COMMAND ...";
-const TOP_LEVEL_HELP: &str = "usage: wayfinder-router [-h] [--version] COMMAND ...\n\nLocal execution policy for AI.\n\nStart here:\n  init           Create a no-clobber starter policy.\n  doctor         Check policy, credential references, and local gateway reachability.\n  connect        Print a verified client configuration for Codex, Claude Code, OpenCode, or Pi.\n  provider       Print a hosted destination preset without changing routing.\n  project        Set up, inspect, or roll back a repository profile.\n  open           Open the local decision dashboard.\n\nCommands:\n  route          Score a prompt and recommend a model.\n  calibrate      Fit a price-sensitive min-cost threshold from labelled JSONL.\n  serve          Run the bounded HTTP gateway.\n  service        Manage the always-on launchd/systemd user service.\n  keys new       Mint a virtual gateway key and its hashed config entry.\n  capabilities   Emit the versioned helper capability handshake.\n  app-setup-init Create a bounded desktop setup config.\n  app-configure-chatgpt\n                 Add a bounded ChatGPT account route for Desktop.\n  config read-routing | apply-routing\n                 Read or replace the desktop-owned routing fragment.\n  apple-foundation-live-smoke\n                 Exercise the bounded Apple Foundation Models delivery path.";
+const TOP_LEVEL_HELP: &str = concat!(
+    "usage: wayfinder-router [-h] [--version] COMMAND ...\n\n",
+    "Local execution policy for AI.\n\n",
+    "Start here:\n",
+    "  init           Create a no-clobber starter policy.\n",
+    "  doctor         Check policy, credential references, and local gateway reachability.\n",
+    "  connect        Print a verified configuration for Codex, Claude Code, OpenCode, Pi, or Aider.\n",
+    "  provider       Print a hosted destination preset without changing routing.\n",
+    "  project        Set up, inspect, or roll back a repository profile.\n",
+    "  open           Open the local decision dashboard.\n\n",
+    "Commands:\n",
+    "  route          Score a prompt and recommend a model.\n",
+    "  calibrate      Fit a price-sensitive min-cost threshold from labelled JSONL.\n",
+    "  serve          Run the bounded HTTP gateway.\n",
+    "  service        Manage the always-on launchd/systemd user service.\n",
+    "  keys new       Mint a virtual gateway key and its hashed config entry.\n",
+    "  capabilities   Emit the versioned helper capability handshake.\n",
+    "  app-setup-init Create a bounded desktop setup config.\n",
+    "  app-configure-chatgpt\n",
+    "                 Add a bounded ChatGPT account route for Desktop.\n",
+    "  config read-routing | apply-routing\n",
+    "                 Read or replace the desktop-owned routing fragment.\n",
+    "  apple-foundation-live-smoke\n",
+    "                 Exercise the bounded Apple Foundation Models delivery path."
+);
 const ROUTE_HELP: &str = "usage: wayfinder-router route [-h] [--threshold THRESHOLD] [--json] [--explain] prompt\n\nScore a prompt and recommend a model.";
 const KEYS_HELP: &str = "usage: wayfinder-router keys new [--id ID] [--workspace ID] [--json]\n\nMint a virtual gateway key. The plaintext is printed once; only its SHA-256 hash belongs in config.";
 const SERVE_HELP: &str = "usage: wayfinder-router serve [-h] [--host HOST] [--port PORT] [--surface local|data-plane] [--dry-run] [--timeout TIMEOUT] [--config CONFIG]\n\nRun the bounded HTTP gateway. Non-loopback serving requires the authenticated data-plane surface.";
