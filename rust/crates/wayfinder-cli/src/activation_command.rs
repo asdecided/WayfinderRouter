@@ -264,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn pi_connection_recipe_is_valid_json_with_bounded_compatibility() {
+    fn pi_recipe_has_bounded_compatibility() -> Result<(), serde_json::Error> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         assert_eq!(
@@ -279,7 +279,7 @@ mod tests {
             ),
             EXIT_OK
         );
-        let recipe: serde_json::Value = serde_json::from_slice(&stdout).expect("valid Pi JSON");
+        let recipe: serde_json::Value = serde_json::from_slice(&stdout)?;
         let provider = &recipe["providers"]["wayfinder"];
         assert_eq!(provider["baseUrl"], "http://localhost:9088/v1");
         assert_eq!(provider["api"], "openai-completions");
@@ -287,6 +287,7 @@ mod tests {
         assert_eq!(provider["compat"]["supportsDeveloperRole"], false);
         assert_eq!(provider["compat"]["supportsReasoningEffort"], false);
         assert_eq!(provider["models"][0]["id"], "auto");
+        Ok(())
     }
 
     #[test]
