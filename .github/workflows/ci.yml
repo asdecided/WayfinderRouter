@@ -177,5 +177,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate deterministic Linux packaging
         run: |
-          bash -n packaging/linux/check_release_surfaces.sh packaging/linux/package_router.sh packaging/linux/test_package_router.sh
+          bash -n packaging/linux/check_release_surfaces.sh packaging/linux/package_router.sh packaging/linux/test_package_router.sh tools/hosted-provider-live-smoke.sh
           packaging/linux/test_package_router.sh

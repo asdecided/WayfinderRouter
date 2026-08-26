@@ -165,7 +165,9 @@ and [WF-ADR-0081](../decisions/WF-ADR-0081-native-anthropic-destination.md).
 
 For reviewable OpenAI-compatible destination fragments, see the
 [hosted provider preset catalog](hosted-provider-presets.md). Presets print
-configuration only and never add a model to Automatic.
+configuration only and never add a model to Automatic. Use the bounded
+[live validation harness](hosted-provider-live-validation.md) before calling an
+exact provider/model combination verified.
 
 `codex-app-server` is a distinct hosted provider for models made available through an eligible
 ChatGPT Codex account. It does not turn a ChatGPT subscription into an OpenAI Platform API key and

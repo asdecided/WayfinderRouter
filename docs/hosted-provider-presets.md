@@ -46,6 +46,12 @@ These presets cover Wayfinder's existing `openai-compatible` delivery kind.
 They do not make provider-specific hosted tools or non-Chat-Completions
 extensions portable. Unsupported request features continue to fail closed.
 
+Before calling an exact provider/model combination verified, run the bounded
+[live provider validation](hosted-provider-live-validation.md). The opt-in
+harness sends three fixed low-output requests through the loopback Router and
+records buffered text, streaming usage, function-call, and served-destination
+evidence without retaining provider response content.
+
 ## Reversal
 
 Remove only the generated `[gateway.models."..."]` table and unset its key
