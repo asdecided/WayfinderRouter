@@ -24,6 +24,10 @@ after their checksums have been reviewed.
 - Added a reviewable Pi connection recipe using Pi's official custom-provider
   configuration. The command prints JSON only, writes no client file, imports
   no credential, and documents exact reversal.
+- Added a reviewable Aider connection recipe using Aider's official
+  OpenAI-compatible endpoint contract. The command prints shell-local exports
+  and an explicit invocation, writes no client file, imports no credential,
+  and documents exact reversal.
 - Added isolated hosted-provider configuration fragments for OpenAI, Gemini,
   OpenRouter, Groq, DeepSeek, Together, Fireworks, Cerebras, xAI, and Mistral.
   Each fragment requires an explicit model identifier and environment-variable
@@ -33,14 +37,20 @@ after their checksums have been reviewed.
   streaming text, tool, usage, and error translation. Credentials are resolved
   only at delivery time, unsupported request fields fail closed, and merely
   configuring the destination does not change Automatic.
+- Added an opt-in live-provider harness for the ten hosted presets and native
+  Anthropic delivery. It checks buffered text and usage, streamed text and
+  usage, terminal completion, forced tool calls, and the served-by receipt while
+  keeping credentials and response content out of its evidence record.
 
 The Pi client contract passed a real streaming tool round-trip, structured
 upstream-error propagation, and disconnect cancellation through the Router.
-The native Anthropic destination is covered by deterministic transport and
-translation fixtures; this release does not claim a live Anthropic account
-smoke.
+The Aider client contract passed a real streamed file-edit round-trip plus
+buffered, error, and cancellation checks through the Router. The native
+Anthropic destination is covered by deterministic transport and translation
+fixtures. The live-provider harness is disabled by default, and this release
+does not claim a live hosted-provider account smoke.
 
 All behavior from Router 2026.8.1 remains included, including project-aware
 profiles, native `min-cost` calibration and calibrated deterministic routing,
-daily delivery receipts, supported Codex, Claude Code, OpenCode, and Pi
+daily delivery receipts, supported Codex, Claude Code, OpenCode, Pi, and Aider
 connection surfaces, and native Omarchy service lifecycle contracts.
