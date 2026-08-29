@@ -23,6 +23,7 @@ pub mod metrics;
 pub mod modalities;
 pub mod operator_auth;
 pub mod otel;
+pub mod project_value;
 pub mod rate_limit;
 pub mod recent;
 pub mod reliability;
@@ -113,6 +114,7 @@ use crate::deployment_selection::{
 };
 use crate::evidence::{EvidenceError, EvidenceLabel, EvidenceReport, EvidenceStore};
 use crate::metrics::{DEFAULT_MAX_LABEL_SERIES, GatewayMetrics};
+use crate::project_value::{ProjectAccountingReport, ProjectValueReport};
 use crate::rate_limit::{RateResult, RateSnapshot};
 use crate::recent::{RecentCost, RecentEntry, RecentOutcome, RecentRoutes};
 use crate::reliability::{ReliabilityAttempt, ReliabilityError, ReliabilityPolicy, sleep_retry};
@@ -1844,6 +1846,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/router/canary", get(canary_status))
         .route("/v1/savings", get(savings_report))
         .route("/savings", get(savings_report))
+        .route("/v1/value", get(project_value_report))
+        .route("/value", get(project_value_report))
+        .route("/router/value", get(project_value_report))
         .route("/v1/evidence", get(evidence_report_json))
         .route("/evidence", get(evidence_report_json))
         .route("/v1/evidence.txt", get(evidence_report_text))
@@ -2462,6 +2467,138 @@ async fn savings_report(
             HeaderMap::new(),
         ),
     }
+}
+
+struct ProjectValueQuery {
+    workspace: String,
+    period_days: Option<u32>,
+}
+
+async fn project_value_report(
+    State(state): State<AppState>,
+    uri: Uri,
+    actor: Option<Extension<audit::AuditActor>>,
+) -> Response {
+    let query = match project_value_query(&uri) {
+        Ok(query) => query,
+        Err(message) => {
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "wayfinder_router_bad_value_query",
+                message,
+                HeaderMap::new(),
+            );
+        }
+    };
+    let today = match utc_today() {
+        Ok(today) => today,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "wayfinder_router_state_error",
+                error.to_string(),
+                HeaderMap::new(),
+            );
+        }
+    };
+    let accounting = match state.savings_ledger().period_for_workspace(
+        &query.workspace,
+        query.period_days,
+        today,
+    ) {
+        Ok(report) => ProjectAccountingReport::from_workspace(report, today.to_string()),
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "wayfinder_router_state_error",
+                error.to_string(),
+                HeaderMap::new(),
+            );
+        }
+    };
+    let delivery = match state.recent().report_for_workspace(&query.workspace) {
+        Ok(report) => report,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "wayfinder_router_state_error",
+                error.to_string(),
+                HeaderMap::new(),
+            );
+        }
+    };
+    let actor = actor.as_ref().map_or("local", |actor| actor.0.0.as_str());
+    if let Err(error) = state
+        .record_audit(
+            actor,
+            "project-value.export",
+            None,
+            Some(json!({
+                "workspace_id": query.workspace.clone(),
+                "period_days": query.period_days
+            })),
+        )
+        .await
+    {
+        return audit_unavailable_response(error);
+    }
+    let generated_at_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |duration| duration.as_secs_f64());
+    Json(ProjectValueReport::new(
+        query.workspace,
+        generated_at_ts,
+        accounting,
+        delivery,
+        state.price_table_version().to_owned(),
+        &state.price_table().costs,
+    ))
+    .into_response()
+}
+
+fn project_value_query(uri: &Uri) -> Result<ProjectValueQuery, String> {
+    let mut workspace = None;
+    let mut period = Some(30_u32);
+    for pair in uri.query().unwrap_or_default().split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (raw_key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
+        let key = decode_query_component(raw_key)
+            .map_err(|_| "project value query contains invalid URL encoding".to_owned())?;
+        let value = decode_query_component(raw_value)
+            .map_err(|_| "project value query contains invalid URL encoding".to_owned())?;
+        match key.as_str() {
+            "workspace" => workspace = Some(value),
+            "period" => {
+                period = match value.as_str() {
+                    "today" => Some(1),
+                    "7d" => Some(7),
+                    "30d" => Some(30),
+                    "all" => None,
+                    _ => {
+                        return Err(
+                            "period must be one of today, 7d, 30d, or all".to_owned()
+                        );
+                    }
+                };
+            }
+            _ => {}
+        }
+    }
+    let workspace = workspace.ok_or_else(|| "workspace is required".to_owned())?;
+    if workspace.is_empty()
+        || workspace.len() > 128
+        || !workspace.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+    {
+        return Err(
+            "workspace must be 1..=128 visible ASCII bytes".to_owned()
+        );
+    }
+    Ok(ProjectValueQuery {
+        workspace,
+        period_days: period,
+    })
 }
 
 fn savings_period(uri: &Uri) -> Option<u32> {
@@ -3170,6 +3307,7 @@ pub(crate) async fn chat_completions(
         ts: timestamp,
         cost: None,
         key: key_id.map(str::to_owned),
+        workspace: workspace_id.map(str::to_owned),
         cache: None,
     });
     let _ =
@@ -5948,7 +6086,9 @@ async fn record_accounted_usage(
     let workspace_id = state
         .access_policy()
         .and_then(|policy| access_grant.and_then(|grant| policy.workspace_id(grant)));
-    let _ = state.savings_ledger().record(&cost, today, key_id);
+    let _ = state
+        .savings_ledger()
+        .record_attributed(&cost, today, key_id, workspace_id);
     let _ = state.persist_savings();
     if let Some(backend) = state
         .shared_state_backend()
@@ -7674,6 +7814,89 @@ mod tests {
         }
         let today = json_body(get(&state, "/v1/savings?period=today").await?).await?;
         assert_eq!(today["period_days"], 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn project_value_report_combines_attributed_accounting_and_bounded_delivery()
+    -> TestResult {
+        let ledger = Arc::new(SavingsLedger::new(400, true));
+        let state = AppState::new(
+            RoutingConfig::binary(0.5),
+            vec![
+                ConfiguredModel::new(
+                    "local",
+                    "http://127.0.0.1:11434/v1",
+                    "provider-local",
+                    None,
+                    true,
+                )
+                .with_cost_per_1k(Some(0.0)),
+                ConfiguredModel::new(
+                    "cloud",
+                    "https://cloud.example/v1",
+                    "provider-cloud",
+                    None,
+                    true,
+                )
+                .with_cost_per_1k(Some(0.01)),
+            ],
+            false,
+            "test",
+        )
+        .with_savings_ledger(Arc::clone(&ledger));
+        let cost = turn_cost(
+            "local",
+            1_000,
+            0,
+            &state.price_table().costs,
+            false,
+            None,
+        )?;
+        ledger.record_attributed(&cost, utc_today()?, Some("project-key"), Some("project one"))?;
+        state.recent().record(RecentEntry {
+            request_id: "abcdef123456".to_owned(),
+            model: "local".to_owned(),
+            score: 0.1,
+            mode: "scored".to_owned(),
+            policy_version: None,
+            snapshot_id: None,
+            policy_profile: Some("developer-starter".to_owned()),
+            served_by: Some("local".to_owned()),
+            execution_boundary: Some(ExecutionBoundary::OnDevice),
+            outcome: Some(RecentOutcome::Succeeded),
+            http_status: Some(200),
+            error_type: None,
+            ts: 1_777_680_000.0,
+            cost: None,
+            key: Some("project-key".to_owned()),
+            workspace: Some("project one".to_owned()),
+            cache: None,
+        })?;
+
+        let response = get(&state, "/v1/value?workspace=project%20one&period=30d").await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await?;
+        assert_eq!(body["schema_version"], "wf-project-value-v1");
+        assert_eq!(body["workspace_id"], "project one");
+        assert_eq!(body["accounting"]["requests"], 1);
+        assert_eq!(body["accounting"]["saved"], 0.01);
+        assert!(body["accounting"].get("by_key").is_none());
+        assert_eq!(body["delivery"]["retained"], 1);
+        assert_eq!(body["delivery"]["boundaries"]["on_device"], 1);
+        assert_eq!(body["quality"]["status"], "not-collected");
+        assert_eq!(body["quality"]["coverage_pct"], 0.0);
+        assert!(body["quality"]["correction_rate_pct"].is_null());
+        assert_eq!(body["baseline"]["kind"], "dearest-configured-rate");
+        assert_eq!(body["baseline"]["routes"], json!(["cloud"]));
+        assert_eq!(body["baseline"]["rate_per_1k"], 0.01);
+
+        let invalid = get(&state, "/v1/value?workspace=project-one&period=year").await?;
+        assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(invalid).await?["error"]["type"],
+            "wayfinder_router_bad_value_query"
+        );
         Ok(())
     }
 
