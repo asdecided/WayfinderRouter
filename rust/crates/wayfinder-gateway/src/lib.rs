@@ -2577,9 +2577,7 @@ fn project_value_query(uri: &Uri) -> Result<ProjectValueQuery, String> {
                     "30d" => Some(30),
                     "all" => None,
                     _ => {
-                        return Err(
-                            "period must be one of today, 7d, 30d, or all".to_owned()
-                        );
+                        return Err("period must be one of today, 7d, 30d, or all".to_owned());
                     }
                 };
             }
@@ -2591,9 +2589,7 @@ fn project_value_query(uri: &Uri) -> Result<ProjectValueQuery, String> {
         || workspace.len() > 128
         || !workspace.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
     {
-        return Err(
-            "workspace must be 1..=128 visible ASCII bytes".to_owned()
-        );
+        return Err("workspace must be 1..=128 visible ASCII bytes".to_owned());
     }
     Ok(ProjectValueQuery {
         workspace,
@@ -7818,8 +7814,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_value_report_combines_attributed_accounting_and_bounded_delivery()
-    -> TestResult {
+    async fn project_value_report_combines_attributed_accounting_and_bounded_delivery() -> TestResult
+    {
         let ledger = Arc::new(SavingsLedger::new(400, true));
         let state = AppState::new(
             RoutingConfig::binary(0.5),
@@ -7845,15 +7841,13 @@ mod tests {
             "test",
         )
         .with_savings_ledger(Arc::clone(&ledger));
-        let cost = turn_cost(
-            "local",
-            1_000,
-            0,
-            &state.price_table().costs,
-            false,
-            None,
+        let cost = turn_cost("local", 1_000, 0, &state.price_table().costs, false, None)?;
+        ledger.record_attributed(
+            &cost,
+            utc_today()?,
+            Some("project-key"),
+            Some("project one"),
         )?;
-        ledger.record_attributed(&cost, utc_today()?, Some("project-key"), Some("project one"))?;
         state.recent().record(RecentEntry {
             request_id: "abcdef123456".to_owned(),
             model: "local".to_owned(),
