@@ -326,8 +326,10 @@ impl RecentRoutes {
             .filter(|entry| entry.workspace.as_deref() == Some(workspace))
         {
             retained = retained.saturating_add(1);
-            first_observed_ts = Some(first_observed_ts.map_or(entry.ts, |value: f64| value.min(entry.ts)));
-            last_observed_ts = Some(last_observed_ts.map_or(entry.ts, |value: f64| value.max(entry.ts)));
+            first_observed_ts =
+                Some(first_observed_ts.map_or(entry.ts, |value: f64| value.min(entry.ts)));
+            last_observed_ts =
+                Some(last_observed_ts.map_or(entry.ts, |value: f64| value.max(entry.ts)));
             match entry.outcome {
                 Some(RecentOutcome::Succeeded) => {
                     terminal = terminal.saturating_add(1);
@@ -371,8 +373,9 @@ impl RecentRoutes {
             *count = count.saturating_add(1);
         }
 
-        let failure_rate_pct = (terminal > 0)
-            .then(|| wayfinder_routing_core::python_round(100.0 * failed as f64 / terminal as f64, 1));
+        let failure_rate_pct = (terminal > 0).then(|| {
+            wayfinder_routing_core::python_round(100.0 * failed as f64 / terminal as f64, 1)
+        });
         Ok(RecentWorkspaceReport {
             retention: "process-local-bounded-shared-ring",
             shared_capacity: self.capacity,
