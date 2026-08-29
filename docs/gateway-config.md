@@ -34,7 +34,8 @@ admin_claim = "wayfinder_admin"
 ```
 
 `oidc` requires a signed RS256 bearer JWT for `/router/*`, `/metrics`,
-`/v1/savings`, `/savings`, and configuration mutation. The token must have the
+`/v1/savings`, `/savings`, `/v1/value`, `/value`, and configuration mutation.
+The token must have the
 configured issuer and audience, a live `exp`, a non-empty subject, and a truthy
 configured admin claim (`true`, `admin`, or `operator`, including in a list).
 `both` also accepts a configured virtual key during migration; `vkeys` leaves
@@ -46,7 +47,7 @@ fail closed. See [WF-ADR-0057](../decisions/WF-ADR-0057-operator-oidc-auth.md).
 When the native CLI serves the gateway, operator events are appended to
 `wayfinder-audit.jsonl` beside the selected configuration. Override the path
 with `WAYFINDER_ROUTER_AUDIT_FILE`. Records cover configuration reloads,
-operator-auth failures, and routing/savings exports; they contain only a
+operator-auth failures, and routing/savings/project-value exports; they contain only a
 bounded actor, action, timestamp, UUID, content digest, and sanitized metadata.
 Prompt and provider payloads are never written. One bounded ordered worker
 acknowledges every configured destination; flush and shutdown durably synchronize
@@ -220,6 +221,7 @@ verification. See
 | `GET /healthz` | reports `degraded` and lists `missing_keys` when a configured `api_key_env` is unset |
 | `GET /router` | read-only dashboard of recent decisions, with `X-Wayfinder-Debug: true` surfacing one in the body |
 | `GET /v1/savings?period=today\|7d\|30d\|all` | realized vs always-frontier cost and the savings between them, per route (WF-DESIGN-0007) |
+| `GET /v1/value?workspace=<id>&period=...` | prompt-free per-project accounting plus bounded actual delivery outcomes; accepts `today`, `7d`, `30d`, or `all`, defaults to 30 days, and exposes price, baseline, denominator, and missing-evidence limits (WF-ADR-0082) |
 | `GET /v1/evidence` / `GET /v1/evidence.txt` | quality/efficiency report over bounded shadow records; below the minimum decisive sample or with conflicting provenance it returns `keep-shadowing` rather than claiming significance (WF-ADR-0064) |
 | `WAYFINDER_ROUTER_SAVINGS_FILE` | where the savings ledger is persisted (default `<config-dir>/wayfinder-savings.json`) |
 
@@ -284,6 +286,35 @@ unchanged). See [WF-ADR-0058](../decisions/WF-ADR-0058-opentelemetry-observabili
 | `[gateway.keys.<id>] hash` / `tags` / `models` (+ nested `budget` / `rate_limit`) | virtual API keys: when any is set, inference requires a valid `Authorization: Bearer` token (else `401`). Mint with `wayfinder-router keys new --id <id>`; the plaintext is printed once and only the SHA-256 hash belongs in config. Spend & **savings** are attributed per key (`by_key` in `/v1/savings`, `wayfinder_router_key_requests_total`); a key can carry its own budget/rate-limit (strictest wins) and a `models` allowlist (clamps to the nearest allowed tier) (WF-ADR-0035) |
 | `[gateway.workspaces.<id>] models` (+ nested `budget` / `rate_limit`) / `[gateway.keys.<id>] workspace` | group multiple keys under one model policy, spend cap, and shared RPM/TPM envelope. With `[gateway.state] backend = "redis"`, accounting and the envelope are fleet-wide; otherwise they are process-local. A key inherits the workspace model list and may only narrow it. Successful inference returns `x-wayfinder-router-workspace`; discovery uses the same effective list (WF-ADR-0052, WF-ADR-0060) |
 | `[gateway.profiles.<id>] routing_toml` / `[gateway.workspaces.<id>] profile` | bind an authenticated local project workspace to a routing-only profile. The top-level `[routing]` policy remains the immutable `default`; named profiles may change scoring and tiers but cannot broaden configured models, privacy/capability eligibility, budgets, or key/workspace allowlists. The key's verified workspace selects the profile—caller-supplied repository/workspace headers are ignored. Successful loads expose a content-addressed policy version, activation snapshot, and resolved profile in receipts; a rejected hot reload retains the last-known-good runtime (WF-ADR-0075) |
+
+## Per-project value reports
+
+The local operator surface exposes `GET /v1/value` (plus `/value` and
+`/router/value`) for a configured project workspace. The required `workspace`
+query is the public workspace ID, not a repository path. `period` accepts
+`today`, `7d`, `30d`, or `all` and defaults to `30d`.
+
+The `wf-project-value-v1` response deliberately keeps three evidence domains
+separate:
+
+- `accounting` is durable successful-request usage attributed after the
+  workspace-aware ledger schema became active. It includes request and token
+  denominators, estimated-usage count, realized/baseline/saved amounts, and
+  per-route lines. Pre-existing global history is not reassigned.
+- `delivery` is the current workspace slice of the shared, process-local,
+  200-entry recent ring. It reports actual on-device, local-network, hosted,
+  and unknown boundaries plus terminal successes, failures, cancellations,
+  cache hits, in-progress requests, and delivery-unobserved selections.
+- `quality` states that user corrections are not collected by this schema.
+  `correction_rate_pct` is therefore `null`; no correction is ever inferred
+  from missing evidence.
+
+`baseline` identifies the `dearest-configured-rate` counterfactual already used
+by savings arithmetic, every route tied at that rate, its unit, and the exact
+price-table fingerprint. When no real `cost_per_1k` values are configured,
+amounts are clearly marked `relative`. The endpoint is operator-authenticated,
+audit-recorded, prompt-free, and read-only; it never changes project policy or
+Automatic eligibility (WF-ADR-0082).
 
 ## Privacy and capability eligibility
 

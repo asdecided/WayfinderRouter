@@ -23,7 +23,7 @@ use wayfinder_routing_core::python_round;
 /// The compatibility estimate used when an upstream omits token usage.
 pub const CHARS_PER_TOKEN: usize = 4;
 /// Current on-disk ledger envelope. Legacy unversioned snapshots remain readable.
-pub const LEDGER_SCHEMA_VERSION: u64 = 1;
+pub const LEDGER_SCHEMA_VERSION: u64 = 2;
 
 /// Failures possible while creating stable pricing metadata.
 #[derive(Debug, Error)]
@@ -362,6 +362,18 @@ struct DayBucket {
     estimated_n: u64,
     by_route: BTreeMap<String, LedgerStats>,
     by_key: BTreeMap<String, LedgerStats>,
+    by_workspace: BTreeMap<String, WorkspaceBucket>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+struct WorkspaceBucket {
+    n: u64,
+    realized: f64,
+    baseline: f64,
+    savings: f64,
+    tokens: u64,
+    estimated_n: u64,
+    by_route: BTreeMap<String, LedgerStats>,
 }
 
 impl DayBucket {
@@ -384,6 +396,41 @@ impl DayBucket {
         self.estimated_n = self.estimated_n.saturating_add(other.estimated_n);
         merge_stat_maps(&mut self.by_route, &other.by_route);
         merge_stat_maps(&mut self.by_key, &other.by_key);
+        for (workspace, bucket) in &other.by_workspace {
+            self.by_workspace
+                .entry(workspace.clone())
+                .or_default()
+                .add_bucket(bucket);
+        }
+    }
+}
+
+impl WorkspaceBucket {
+    fn add_turn(&mut self, cost: &TurnCost) {
+        self.n = self.n.saturating_add(1);
+        self.realized = python_round(self.realized + cost.realized, 6);
+        self.baseline = python_round(self.baseline + cost.baseline, 6);
+        self.savings = python_round(self.savings + cost.savings, 6);
+        self.tokens = self
+            .tokens
+            .saturating_add(cost.prompt_tokens.saturating_add(cost.completion_tokens));
+        if cost.estimated {
+            self.estimated_n = self.estimated_n.saturating_add(1);
+        }
+        self.by_route
+            .entry(cost.route.clone())
+            .or_default()
+            .add_turn(cost);
+    }
+
+    fn add_bucket(&mut self, other: &Self) {
+        self.n = self.n.saturating_add(other.n);
+        self.realized = python_round(self.realized + other.realized, 6);
+        self.baseline = python_round(self.baseline + other.baseline, 6);
+        self.savings = python_round(self.savings + other.savings, 6);
+        self.tokens = self.tokens.saturating_add(other.tokens);
+        self.estimated_n = self.estimated_n.saturating_add(other.estimated_n);
+        merge_stat_maps(&mut self.by_route, &other.by_route);
     }
 }
 
@@ -472,6 +519,18 @@ pub struct SavingsReport {
     pub by_key: BTreeMap<String, SavingsBreakdown>,
 }
 
+/// One workspace's durable accounting window.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct WorkspaceSavingsReport {
+    /// Aggregate savings fields for the selected workspace only.
+    #[serde(flatten)]
+    pub report: SavingsReport,
+    /// First UTC day containing an attributed request in the selected window.
+    pub first_observed_utc: Option<String>,
+    /// Last UTC day containing an attributed request in the selected window.
+    pub last_observed_utc: Option<String>,
+}
+
 /// All-time counters exported to metrics.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct SavingsTotals {
@@ -537,6 +596,17 @@ impl SavingsLedger {
         when: UtcDate,
         virtual_key: Option<&str>,
     ) -> Result<(), LedgerError> {
+        self.record_attributed(cost, when, virtual_key, None)
+    }
+
+    /// Record one turn with optional virtual-key and workspace attribution.
+    pub fn record_attributed(
+        &self,
+        cost: &TurnCost,
+        when: UtcDate,
+        virtual_key: Option<&str>,
+        workspace: Option<&str>,
+    ) -> Result<(), LedgerError> {
         let mut days = self.days.lock().map_err(|_| LedgerError::LockPoisoned)?;
         let bucket = days.entry(when.to_string()).or_default();
         bucket.add_turn(cost);
@@ -552,6 +622,13 @@ impl SavingsLedger {
             bucket
                 .by_key
                 .entry(key.to_owned())
+                .or_default()
+                .add_turn(cost);
+        }
+        if let Some(workspace) = workspace {
+            bucket
+                .by_workspace
+                .entry(workspace.to_owned())
                 .or_default()
                 .add_turn(cost);
         }
@@ -613,6 +690,75 @@ impl SavingsLedger {
                 .iter()
                 .map(|(name, stats)| (name.clone(), SavingsBreakdown::from(stats)))
                 .collect(),
+        })
+    }
+
+    /// Aggregate one workspace's attributed turns over a trailing-day window.
+    pub fn period_for_workspace(
+        &self,
+        workspace: &str,
+        period_days: Option<u32>,
+        today: UtcDate,
+    ) -> Result<WorkspaceSavingsReport, LedgerError> {
+        let cutoff = period_days.map(|days| {
+            today
+                .ordinal()
+                .saturating_sub(i64::from(days).saturating_sub(1))
+        });
+        let days = self.days.lock().map_err(|_| LedgerError::LockPoisoned)?;
+        let mut aggregate = WorkspaceBucket::default();
+        let mut first_observed_utc = None;
+        let mut last_observed_utc = None;
+        for (date, bucket) in &*days {
+            let include = match cutoff {
+                None => true,
+                Some(cutoff) => UtcDate::parse(date).is_ok_and(|date| date.ordinal() >= cutoff),
+            };
+            if !include {
+                continue;
+            }
+            let Some(workspace_bucket) = bucket.by_workspace.get(workspace) else {
+                continue;
+            };
+            if workspace_bucket.n == 0 {
+                continue;
+            }
+            if first_observed_utc.is_none() {
+                first_observed_utc = Some(date.clone());
+            }
+            last_observed_utc = Some(date.clone());
+            aggregate.add_bucket(workspace_bucket);
+        }
+
+        let baseline = python_round(aggregate.baseline, 6);
+        let saved = python_round(aggregate.savings, 6);
+        let saved_pct = if baseline == 0.0 {
+            0.0
+        } else {
+            python_round(100.0 * saved / baseline, 1)
+        };
+        let priced = self.priced();
+        Ok(WorkspaceSavingsReport {
+            report: SavingsReport {
+                period_days,
+                unit: if priced { "usd" } else { "relative" }.to_owned(),
+                priced,
+                requests: aggregate.n,
+                estimated_requests: aggregate.estimated_n,
+                tokens: aggregate.tokens,
+                realized: python_round(aggregate.realized, 6),
+                baseline,
+                saved,
+                saved_pct,
+                by_route: aggregate
+                    .by_route
+                    .iter()
+                    .map(|(name, stats)| (name.clone(), SavingsBreakdown::from(stats)))
+                    .collect(),
+                by_key: BTreeMap::new(),
+            },
+            first_observed_utc,
+            last_observed_utc,
         })
     }
 
@@ -853,7 +999,35 @@ fn coerce_bucket(raw: &serde_json::Map<String, Value>) -> DayBucket {
         estimated_n: compatible_u64(raw.get("estimated_n")),
         by_route: coerce_stat_map(raw.get("by_route")),
         by_key: coerce_stat_map(raw.get("by_key")),
+        by_workspace: coerce_workspace_map(raw.get("by_workspace")),
     }
+}
+
+fn coerce_workspace_map(value: Option<&Value>) -> BTreeMap<String, WorkspaceBucket> {
+    value
+        .and_then(Value::as_object)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|(name, value)| {
+                    value.as_object().map(|stats| {
+                        (
+                            name.clone(),
+                            WorkspaceBucket {
+                                n: compatible_u64(stats.get("n")),
+                                realized: compatible_f64(stats.get("realized")),
+                                baseline: compatible_f64(stats.get("baseline")),
+                                savings: compatible_f64(stats.get("savings")),
+                                tokens: compatible_u64(stats.get("tokens")),
+                                estimated_n: compatible_u64(stats.get("estimated_n")),
+                                by_route: coerce_stat_map(stats.get("by_route")),
+                            },
+                        )
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn coerce_stat_map(value: Option<&Value>) -> BTreeMap<String, LedgerStats> {
@@ -1084,6 +1258,37 @@ mod tests {
         assert_eq!(report.saved_pct, 50.0);
         assert_eq!(report.by_route["local"].saved, 0.009);
         assert_eq!(report.by_key["team-b"].requests, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_accounting_is_isolated_and_excludes_legacy_unattributed_turns()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let ledger = SavingsLedger::new(400, true);
+        let costs = [("local".to_owned(), 0.0), ("cloud".to_owned(), 0.01)]
+            .into_iter()
+            .collect();
+        let day = UtcDate::new(2026, 8, 29)?;
+        let local = turn_cost("local", 1_000, 0, &costs, false, None)?;
+        let cloud = turn_cost("cloud", 2_000, 0, &costs, true, None)?;
+        ledger.record(&cloud, day, Some("legacy-key"))?;
+        ledger.record_attributed(&local, day, Some("key-a"), Some("project-a"))?;
+        ledger.record_attributed(&cloud, day, Some("key-b"), Some("project-b"))?;
+
+        let project_a = ledger.period_for_workspace("project-a", Some(30), day)?;
+        assert_eq!(project_a.report.requests, 1);
+        assert_eq!(project_a.report.estimated_requests, 0);
+        assert_eq!(project_a.report.saved, 0.01);
+        assert_eq!(project_a.report.by_route["local"].requests, 1);
+        assert!(project_a.report.by_key.is_empty());
+        assert_eq!(project_a.first_observed_utc.as_deref(), Some("2026-08-29"));
+        assert_eq!(project_a.last_observed_utc.as_deref(), Some("2026-08-29"));
+
+        let project_b = ledger.period_for_workspace("project-b", Some(30), day)?;
+        assert_eq!(project_b.report.requests, 1);
+        assert_eq!(project_b.report.estimated_requests, 1);
+        assert_eq!(project_b.report.realized, 0.02);
+        assert_eq!(ledger.period(None, day)?.requests, 3);
         Ok(())
     }
 

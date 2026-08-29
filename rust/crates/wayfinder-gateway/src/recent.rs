@@ -53,6 +53,9 @@ pub struct RecentEntry {
     /// Optional virtual-key attribution id (never the credential).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// Optional workspace attribution id (never a filesystem path).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
     /// Optional exact-cache outcome (`hit` or `miss`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache: Option<String>,
@@ -105,6 +108,55 @@ pub struct RecentReport {
     pub scored_by_model: BTreeMap<String, u64>,
     /// Newest-first entries under the clamped limit.
     pub recent: Vec<RecentEntry>,
+}
+
+/// Actual execution-boundary counts in one workspace's retained receipts.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct RecentBoundaryCounts {
+    /// Requests executed on the current device.
+    pub on_device: u64,
+    /// Requests executed by a trusted local-network destination.
+    pub local_network: u64,
+    /// Requests executed by a hosted destination.
+    pub hosted: u64,
+    /// Requests for which delivery did not expose an actual boundary.
+    pub unknown: u64,
+}
+
+/// Prompt-free delivery evidence for one workspace in the shared process ring.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct RecentWorkspaceReport {
+    /// Explicit retention contract for this evidence source.
+    pub retention: &'static str,
+    /// Maximum entries across all workspaces in the shared process ring.
+    pub shared_capacity: usize,
+    /// Entries for this workspace currently retained.
+    pub retained: u64,
+    /// Earliest retained Unix timestamp for this workspace.
+    pub first_observed_ts: Option<f64>,
+    /// Latest retained Unix timestamp for this workspace.
+    pub last_observed_ts: Option<f64>,
+    /// Requests with a terminal outcome.
+    pub terminal: u64,
+    /// Successful terminal deliveries.
+    pub succeeded: u64,
+    /// Failed terminal deliveries.
+    pub failed: u64,
+    /// Client-cancelled terminal deliveries.
+    pub cancelled: u64,
+    /// Exact-cache hits treated as successful terminal deliveries.
+    pub cache_hits: u64,
+    /// Accepted streaming deliveries not yet terminal.
+    pub in_progress: u64,
+    /// Selected requests without a delivery observation.
+    pub delivery_unobserved: u64,
+    /// Failed terminal deliveries divided by all terminal deliveries.
+    pub failure_rate_pct: Option<f64>,
+    /// Actual content execution boundaries across retained receipts.
+    pub boundaries: RecentBoundaryCounts,
+    /// Actual served-route counts, falling back to the selected model only
+    /// when delivery has not yet supplied a concrete route.
+    pub by_route: BTreeMap<String, u64>,
 }
 
 /// Synchronization failure.
@@ -249,6 +301,96 @@ impl RecentRoutes {
             recent: entries.iter().rev().take(clamped).cloned().collect(),
         })
     }
+
+    /// Summarize prompt-free delivery receipts for one workspace.
+    pub fn report_for_workspace(
+        &self,
+        workspace: &str,
+    ) -> Result<RecentWorkspaceReport, RecentError> {
+        let entries = self.entries.lock().map_err(|_| RecentError::LockPoisoned)?;
+        let mut retained = 0_u64;
+        let mut first_observed_ts = None;
+        let mut last_observed_ts = None;
+        let mut terminal = 0_u64;
+        let mut succeeded = 0_u64;
+        let mut failed = 0_u64;
+        let mut cancelled = 0_u64;
+        let mut cache_hits = 0_u64;
+        let mut in_progress = 0_u64;
+        let mut delivery_unobserved = 0_u64;
+        let mut boundaries = RecentBoundaryCounts::default();
+        let mut by_route = BTreeMap::new();
+
+        for entry in entries
+            .iter()
+            .filter(|entry| entry.workspace.as_deref() == Some(workspace))
+        {
+            retained = retained.saturating_add(1);
+            first_observed_ts = Some(first_observed_ts.map_or(entry.ts, |value: f64| value.min(entry.ts)));
+            last_observed_ts = Some(last_observed_ts.map_or(entry.ts, |value: f64| value.max(entry.ts)));
+            match entry.outcome {
+                Some(RecentOutcome::Succeeded) => {
+                    terminal = terminal.saturating_add(1);
+                    succeeded = succeeded.saturating_add(1);
+                }
+                Some(RecentOutcome::Failed) => {
+                    terminal = terminal.saturating_add(1);
+                    failed = failed.saturating_add(1);
+                }
+                Some(RecentOutcome::Cancelled) => {
+                    terminal = terminal.saturating_add(1);
+                    cancelled = cancelled.saturating_add(1);
+                }
+                Some(RecentOutcome::CacheHit) => {
+                    terminal = terminal.saturating_add(1);
+                    cache_hits = cache_hits.saturating_add(1);
+                }
+                Some(RecentOutcome::Streaming) => {
+                    in_progress = in_progress.saturating_add(1);
+                }
+                None => {
+                    delivery_unobserved = delivery_unobserved.saturating_add(1);
+                }
+            }
+            match entry.execution_boundary {
+                Some(ExecutionBoundary::OnDevice) => {
+                    boundaries.on_device = boundaries.on_device.saturating_add(1);
+                }
+                Some(ExecutionBoundary::LocalNetwork) => {
+                    boundaries.local_network = boundaries.local_network.saturating_add(1);
+                }
+                Some(ExecutionBoundary::Hosted) => {
+                    boundaries.hosted = boundaries.hosted.saturating_add(1);
+                }
+                None => {
+                    boundaries.unknown = boundaries.unknown.saturating_add(1);
+                }
+            }
+            let route = entry.served_by.as_ref().unwrap_or(&entry.model);
+            let count = by_route.entry(route.clone()).or_insert(0_u64);
+            *count = count.saturating_add(1);
+        }
+
+        let failure_rate_pct = (terminal > 0)
+            .then(|| wayfinder_routing_core::python_round(100.0 * failed as f64 / terminal as f64, 1));
+        Ok(RecentWorkspaceReport {
+            retention: "process-local-bounded-shared-ring",
+            shared_capacity: self.capacity,
+            retained,
+            first_observed_ts,
+            last_observed_ts,
+            terminal,
+            succeeded,
+            failed,
+            cancelled,
+            cache_hits,
+            in_progress,
+            delivery_unobserved,
+            failure_rate_pct,
+            boundaries,
+            by_route,
+        })
+    }
 }
 
 impl Default for RecentRoutes {
@@ -278,6 +420,7 @@ mod tests {
             ts: 1_700_000_000.0,
             cost: None,
             key: None,
+            workspace: None,
             cache: None,
         }
     }
@@ -449,6 +592,52 @@ mod tests {
             report.recent[1].cost.as_ref().map(|cost| cost.tokens),
             Some(1_000)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_report_isolatedly_counts_boundaries_and_terminal_failures()
+    -> Result<(), RecentError> {
+        let recent = RecentRoutes::new(4);
+        let mut first = entry("a", "selected-cloud", 0.8);
+        first.workspace = Some("project-a".to_owned());
+        recent.record(first)?;
+        recent.update_delivery(
+            "a",
+            "actual-local",
+            ExecutionBoundary::OnDevice,
+            RecentOutcome::Succeeded,
+            Some(200),
+            None,
+        )?;
+        let mut second = entry("b", "cloud", 0.9);
+        second.workspace = Some("project-a".to_owned());
+        second.ts = 1_700_000_010.0;
+        recent.record(second)?;
+        recent.update_delivery(
+            "b",
+            "cloud",
+            ExecutionBoundary::Hosted,
+            RecentOutcome::Failed,
+            Some(503),
+            Some("wayfinder_router_upstream_error"),
+        )?;
+        let mut other = entry("c", "cloud", 0.9);
+        other.workspace = Some("project-b".to_owned());
+        recent.record(other)?;
+
+        let report = recent.report_for_workspace("project-a")?;
+        assert_eq!(report.retained, 2);
+        assert_eq!(report.terminal, 2);
+        assert_eq!(report.succeeded, 1);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.failure_rate_pct, Some(50.0));
+        assert_eq!(report.boundaries.on_device, 1);
+        assert_eq!(report.boundaries.hosted, 1);
+        assert_eq!(report.by_route["actual-local"], 1);
+        assert_eq!(report.by_route["cloud"], 1);
+        assert_eq!(report.first_observed_ts, Some(1_700_000_000.0));
+        assert_eq!(report.last_observed_ts, Some(1_700_000_010.0));
         Ok(())
     }
 }
