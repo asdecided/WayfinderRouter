@@ -6419,7 +6419,8 @@ mod tests {
         GatewayConfig, ProviderKind, ProviderTier, RateLimit, RoutePreset, VirtualKey, Workspace,
     };
     use wayfinder_routing_core::{
-        ClassifierModel, PrivacyPosture, RoutingConfig, RoutingRequest, RoutingRequirements,
+        ClassifierModel, ExecutionBoundary, PrivacyPosture, RoutingConfig, RoutingRequest,
+        RoutingRequirements,
     };
     use wayfinder_service::pricing::{SavingsLedger, UtcDate, turn_cost};
 
@@ -6445,6 +6446,7 @@ mod tests {
             AdministrativeIdentity, BindingKind, PolicyBinding, PolicyDocument, PolicyLifecycle,
             PolicyProfile,
         },
+        recent::{RecentEntry, RecentOutcome},
         server::serve_with_shutdown,
     };
 
