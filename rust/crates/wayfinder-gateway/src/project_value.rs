@@ -85,7 +85,7 @@ pub struct ProjectBaseline {
     pub rate_per_1k: f64,
     /// `usd` for configured prices, otherwise `relative`.
     pub unit: String,
-    /// Fingerprint of the complete configured price table.
+    /// Fingerprint of the complete price table active at report generation.
     pub price_table_version: String,
 }
 
@@ -162,6 +162,7 @@ impl ProjectValueReport {
             "pre-activation aggregate accounting has no workspace attribution",
             "delivery evidence is bounded to the current process shared ring",
             "correction evidence is unavailable until explicit outcome labels exist",
+            "historical amounts retain their recorded baseline but not each prior price-table fingerprint",
         ];
         if accounting.requests == 0 {
             limitations.push("no workspace-attributed accounting exists in this window");

@@ -39,8 +39,10 @@ than being converted into confident zeroes.
    `/value` and `/router/value` aliases. The default window is 30 days.
 4. The `wf-project-value-v1` response names every denominator and observation
    window. It discloses whether prices are real or relative, how many accounted
-   requests use estimated tokens, the exact price-table fingerprint, and the
+   requests use estimated tokens, the current price-table fingerprint, and the
    `dearest-configured-rate` counterfactual used by existing savings arithmetic.
+   Historical totals retain their recorded baseline amounts but not each prior
+   table fingerprint, and the response names that limitation.
 5. Delivery failure rate is calculated only from retained terminal delivery
    receipts. User correction rate remains `null`, evidence coverage is zero
    only when eligible receipts exist, and the response explains that explicit
@@ -71,4 +73,3 @@ than being converted into confident zeroes.
 - WF-ADR-0074 (bounded delivery receipts)
 - WF-ADR-0075 (authenticated local project profiles)
 - WF-ROADMAP-0017 (Omarchy-first delivery)
-

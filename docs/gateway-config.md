@@ -310,8 +310,10 @@ separate:
   from missing evidence.
 
 `baseline` identifies the `dearest-configured-rate` counterfactual already used
-by savings arithmetic, every route tied at that rate, its unit, and the exact
-price-table fingerprint. When no real `cost_per_1k` values are configured,
+by savings arithmetic, every route currently tied at that rate, its unit, and
+the current price-table fingerprint. Historical totals retain the baseline
+amount recorded for each request but not every earlier table fingerprint; this
+is explicit in `limitations`. When no real `cost_per_1k` values are configured,
 amounts are clearly marked `relative`. The endpoint is operator-authenticated,
 audit-recorded, prompt-free, and read-only; it never changes project policy or
 Automatic eligibility (WF-ADR-0082).
