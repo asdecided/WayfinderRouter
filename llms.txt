@@ -34,6 +34,21 @@ wayfinder-router connect pi
 wayfinder-router connect aider
 ```
 
+For Omarchy's explicit agent-routing mode, Codex, Claude Code, and OpenCode can
+be launched without changing client configuration:
+
+```sh
+wayfinder-router exec codex -- codex
+wayfinder-router exec claude-code -- claude
+wayfinder-router exec opencode -- opencode
+```
+
+`exec` validates Router health, a ready destination, the Wayfinder-owned `auto`
+model, and the required wire endpoint before it replaces the process. Never
+bypass a failed probe by launching the original command directly. Pi has no
+verified no-write endpoint override and must remain on the reviewed `connect
+pi` path; do not read or edit its `models.json` to approximate this contract.
+
 Use `wayfinder-router doctor --json` for bounded diagnosis. A `routing-distribution` warning means at least 20 scored automatic requests used only one configured arm. Do not suppress the warning by inventing traffic or lowering a threshold blindly; review the starter receipt or calibrate with representative labelled JSONL.
 
 Custom calibration accepts rows shaped as `{"text":"...","label":"local|cloud"}`. `--distill-lexicon` learns a bounded static vocabulary and weight from labels, then emits TOML that the pure Rust scorer evaluates without a network, model, embedding dependency, or credential:

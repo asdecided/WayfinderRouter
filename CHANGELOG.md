@@ -8,6 +8,15 @@ details, release history over commit history.
 
 ### Added
 
+- **No-write coding-agent launch contract** (WF-ADR-0084). `wayfinder-router
+  exec` now validates a ready loopback Router, its Wayfinder-owned `auto`
+  model, and the required client wire interface before launching Codex, Claude
+  Code, or OpenCode with bounded process-local endpoint, model, and placeholder
+  token overrides. It reads and writes no client config or credential, replaces
+  the process on Unix, and fails visibly without a direct-provider fallback.
+  The versioned capability handshake advertises the exact supported set; Pi is
+  rejected honestly until it has a verified no-write endpoint override.
+
 - **Prompt-free per-project value reports** (WF-ADR-0082, issue #207).
   Authenticated local operators can query a configured workspace for durable
   accounted savings and a bounded slice of actual delivery outcomes. The

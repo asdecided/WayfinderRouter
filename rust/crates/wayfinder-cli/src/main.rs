@@ -22,6 +22,10 @@ fn main() {
             &mut stdout,
             &mut stderr,
         ))
+    } else if wayfinder_cli::is_exec_command(&arguments) {
+        let mut stdout = io::stdout().lock();
+        let mut stderr = io::stderr().lock();
+        wayfinder_cli::run_exec_process(&arguments[1..], &mut stdout, &mut stderr)
     } else {
         let mut stdin = io::stdin().lock();
         let mut stdout = io::stdout().lock();

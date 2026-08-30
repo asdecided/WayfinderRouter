@@ -22,6 +22,13 @@ Point Codex, Claude Code, OpenCode, Pi, or Aider at the same loopback policy wit
 [verified coding-agent quick starts](docs/coding-agent-quickstarts.md), or run
 `wayfinder-router open` to inspect local routing decisions.
 
+Omarchy can launch Codex, Claude Code, or OpenCode through the same policy with
+`wayfinder-router exec <client> -- <program>`. The no-write launcher validates
+Router readiness and the client's wire capability first, applies only
+process-local endpoint/model/placeholder-token overrides, and never falls back
+to the direct provider. Pi remains on the reviewable `connect` path until its
+CLI exposes a verified no-write endpoint override.
+
 Add a hosted destination without changing Automatic using a reviewable
 [`provider preset`](docs/hosted-provider-presets.md) fragment. The command
 prints the official compatibility endpoint and an environment-variable
