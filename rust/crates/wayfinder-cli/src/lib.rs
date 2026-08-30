@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod activation_command;
+mod agent_exec;
 mod app_setup_command;
 mod apple_foundation_live;
 mod calibrate_command;
@@ -137,6 +138,22 @@ pub fn is_serve_command(arguments: &[OsString]) -> bool {
     arguments.first().and_then(|argument| argument.to_str()) == Some("serve")
 }
 
+/// Whether the process entry point must select the no-write agent exec path.
+#[must_use]
+pub fn is_exec_command(arguments: &[OsString]) -> bool {
+    arguments.first().and_then(|argument| argument.to_str()) == Some("exec")
+}
+
+/// Validate Router readiness and replace this process with a supported coding
+/// agent using launch-only endpoint, model, and placeholder-token overrides.
+pub fn run_exec_process(
+    arguments: &[OsString],
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    agent_exec::run_exec_process(arguments, stdout, stderr)
+}
+
 /// Run with injected streams. Environment and current-directory discovery remain
 /// real so subprocess and in-process tests exercise the same config contract.
 pub fn run(
@@ -173,6 +190,13 @@ pub fn run(
         "init" => activation_command::run_init(&arguments[1..], stdout, stderr),
         "doctor" => doctor_command::run_doctor(&arguments[1..], stdout, stderr),
         "connect" => activation_command::run_connect(&arguments[1..], stdout, stderr),
+        "exec" => {
+            write_error(
+                stderr,
+                "wayfinder-router: exec must be invoked through the process entry point",
+            );
+            EXIT_USAGE
+        }
         "provider" => provider_command::run_provider(&arguments[1..], stdout, stderr),
         "open" => activation_command::run_open(&arguments[1..], stdout, stderr),
         "project" => project_command::run_project(&arguments[1..], stdin, stdout, stderr),
@@ -344,8 +368,31 @@ fn run_capabilities(arguments: &[String], stdout: &mut dyn Write, stderr: &mut d
         "implementation": "rust",
         "version": product_version(),
         "target_architecture": target_architecture(),
-        "commands": ["init", "doctor", "connect", "provider", "open", "project", "route", "calibrate", "serve", "service", "keys", "capabilities", "app-setup-init", "app-configure-chatgpt", "config", "apple-foundation-live-smoke"],
-        "native_commands": ["init", "doctor", "connect", "provider presets", "provider preset", "open", "project setup", "project status", "project rollback", "route", "calibrate", "serve", "service", "keys new", "capabilities", "app-setup-init", "app-configure-chatgpt", "config read-routing", "config apply-routing", "apple-foundation-live-smoke"],
+        "commands": ["init", "doctor", "connect", "exec", "provider", "open", "project", "route", "calibrate", "serve", "service", "keys", "capabilities", "app-setup-init", "app-configure-chatgpt", "config", "apple-foundation-live-smoke"],
+        "native_commands": ["init", "doctor", "connect", "exec", "provider presets", "provider preset", "open", "project setup", "project status", "project rollback", "route", "calibrate", "serve", "service", "keys new", "capabilities", "app-setup-init", "app-configure-chatgpt", "config read-routing", "config apply-routing", "apple-foundation-live-smoke"],
+        "agent_exec": {
+            "schema": "wf-agent-exec-v1",
+            "schema_version": "1",
+            "clients": ["codex", "claude-code", "opencode"],
+            "endpoint_default": "http://127.0.0.1:8088",
+            "routing_model": "auto",
+            "health_probe": "/healthz",
+            "model_capability_probe": "/v1/models",
+            "probe_proxy": "disabled",
+            "client_interfaces": {
+                "codex": "/v1/responses",
+                "claude-code": "/v1/messages",
+                "opencode": "/v1/chat/completions"
+            },
+            "client_config_read": false,
+            "client_config_write": false,
+            "credential_import": false,
+            "fallback": "none",
+            "unsupported": [{
+                "client": "pi",
+                "reason": "no-verified-no-write-endpoint-override"
+            }]
+        },
         "delegated_commands": [],
         "delegation": null,
         "decision_schema_versions": ["3"],
@@ -1491,6 +1538,7 @@ const TOP_LEVEL_HELP: &str = concat!(
     "  init           Create a no-clobber starter policy.\n",
     "  doctor         Check policy, credential references, and local gateway reachability.\n",
     "  connect        Print a verified configuration for Codex, Claude Code, OpenCode, Pi, or Aider.\n",
+    "  exec           Launch Codex, Claude Code, or OpenCode through a ready local Router.\n",
     "  provider       Print a hosted destination preset without changing routing.\n",
     "  project        Set up, inspect, or roll back a repository profile.\n",
     "  open           Open the local decision dashboard.\n\n",
@@ -1607,6 +1655,7 @@ mod tests {
                 "init",
                 "doctor",
                 "connect",
+                "exec",
                 "provider presets",
                 "provider preset",
                 "open",
@@ -1628,6 +1677,21 @@ mod tests {
         );
         assert!(payload["delegation"].is_null());
         assert_eq!(payload["delegated_commands"], json!([]));
+        assert_eq!(
+            payload["agent_exec"]["clients"],
+            json!(["codex", "claude-code", "opencode"])
+        );
+        assert_eq!(payload["agent_exec"]["schema"], "wf-agent-exec-v1");
+        assert_eq!(payload["agent_exec"]["schema_version"], "1");
+        assert_eq!(payload["agent_exec"]["probe_proxy"], "disabled");
+        assert_eq!(
+            payload["agent_exec"]["client_interfaces"]["claude-code"],
+            "/v1/messages"
+        );
+        assert_eq!(payload["agent_exec"]["client_config_read"], false);
+        assert_eq!(payload["agent_exec"]["client_config_write"], false);
+        assert_eq!(payload["agent_exec"]["fallback"], "none");
+        assert_eq!(payload["agent_exec"]["unsupported"][0]["client"], "pi");
         Ok(())
     }
 
@@ -1797,6 +1861,8 @@ mod tests {
         assert!(!host_is_literal_loopback("127.evil.example"));
         assert!(is_serve_command(&[OsString::from("serve")]));
         assert!(!is_serve_command(&[OsString::from("route")]));
+        assert!(is_exec_command(&[OsString::from("exec")]));
+        assert!(!is_exec_command(&[OsString::from("connect")]));
         Ok(())
     }
 

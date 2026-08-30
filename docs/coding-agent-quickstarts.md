@@ -29,6 +29,34 @@ or hosted provider differs. `init` never overwrites an existing file.
 Keep the server running while the client uses it. In another terminal, run the
 matching command below to print the client configuration.
 
+## No-write launch from Omarchy
+
+Codex, Claude Code, and OpenCode also have a launch-only path that leaves their
+configuration and authentication stores untouched:
+
+```sh
+wayfinder-router exec codex -- codex
+wayfinder-router exec claude-code -- claude
+wayfinder-router exec opencode -- opencode
+```
+
+Arguments after the program are preserved, so a non-interactive Codex launch
+can use `wayfinder-router exec codex -- codex exec ...`. Before replacing the
+process, Wayfinder requires a loopback Router with at least one ready
+destination, the Wayfinder-owned `auto` model, and the client's required wire
+endpoint. A failed check stops visibly and never launches the client against
+its direct provider.
+
+This path injects only the loopback endpoint, `auto`, and a non-provider
+placeholder token into the child process. It does not read or write a client
+file, credential, prompt, or repository path. The versioned contract is
+available in `wayfinder-router capabilities --json` under `agent_exec`.
+
+Pi is intentionally absent: its current CLI has no verified launch-time custom
+endpoint override. `wayfinder-router exec pi -- pi` fails before launch; use
+the reviewable `connect pi` recipe below until Pi can satisfy the same no-write
+contract.
+
 ## Codex
 
 ```sh
