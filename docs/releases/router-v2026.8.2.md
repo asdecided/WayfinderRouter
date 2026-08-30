@@ -41,6 +41,12 @@ after their checksums have been reviewed.
   Anthropic delivery. It checks buffered text and usage, streamed text and
   usage, terminal completion, forced tool calls, and the served-by receipt while
   keeping credentials and response content out of its evidence record.
+- Added prompt-free per-project value reports for authenticated workspaces.
+  The read-only `wf-project-value-v1` contract keeps durable accounted savings,
+  bounded delivery outcomes, current baseline pricing, and unavailable
+  correction evidence separate, with every window and denominator disclosed.
+  It stores no prompt, response, repository path, tool argument, credential, or
+  private reasoning and cannot activate policy or change Automatic routing.
 
 The Pi client contract passed a real streaming tool round-trip, structured
 upstream-error propagation, and disconnect cancellation through the Router.

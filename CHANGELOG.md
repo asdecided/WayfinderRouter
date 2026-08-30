@@ -8,6 +8,15 @@ details, release history over commit history.
 
 ### Added
 
+- **Prompt-free per-project value reports** (WF-ADR-0082, issue #207).
+  Authenticated local operators can query a configured workspace for durable
+  accounted savings and a bounded slice of actual delivery outcomes. The
+  versioned report discloses its retention windows, denominators, estimated-token
+  coverage, current dearest-configured-rate baseline, price-table fingerprint,
+  and missing correction evidence. It persists no prompt, response, repository
+  path, tool argument, credential, or private reasoning, and it cannot activate
+  policy or change Automatic routing.
+
 - **Owned project profile lifecycle** (WF-ADR-0076). Canonical GitHub
   repository discovery now feeds an XDG-owned, no-clobber
   `project setup|status|rollback` contract. Project capabilities enter only
