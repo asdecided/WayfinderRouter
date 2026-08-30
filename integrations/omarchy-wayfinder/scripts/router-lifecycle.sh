@@ -44,7 +44,7 @@ router_require_safe_value() {
 router_require_release_identity() {
   local version="$1"
   local target="$2"
-  [[ "$version" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+$ ]] || {
+  [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
     printf 'invalid Router release version: %s\n' "$version" >&2
     return 1
   }

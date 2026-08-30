@@ -53,6 +53,9 @@ const nativeSmokeStat = await stat(path.join(root, "scripts/omarchy-native-smoke
 assert.notEqual(installerStat.mode & 0o111, 0, "install.sh must remain directly executable");
 assert.notEqual(nativeSmokeStat.mode & 0o111, 0, "native smoke must remain directly executable");
 assert.ok(service.includes("wayfinder-router.service"));
+assert.ok(service.includes("manifest.__sourceDir"), "setup must use Omarchy's installed source path");
+assert.ok(service.includes('[pluginSourceDir + "/install.sh", "--bootstrap-router"]'),
+  "setup must invoke the bounded Router bootstrap without shell interpolation");
 assert.ok(service.includes("/healthz"));
 assert.ok(service.includes('"init", "--preset", "local", "--path"'));
 assert.ok(service.includes('"doctor", "--config"'));
@@ -84,8 +87,10 @@ assert.ok(projectRootSetting, "manifest must expose the repository root setting"
 assert.equal(projectRootSetting.type, "path");
 assert.equal(manifest.barWidget.defaults.projectRoot, "");
 
-const versionMatch = installer.match(/^router_version="(\d{4}\.\d+\.\d+)"$/m);
-assert.ok(versionMatch, "installer must pin a Router CalVer release");
+const versionMatch = installer.match(
+  /^router_version="((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))"$/m
+);
+assert.ok(versionMatch, "installer must pin a Router SemVer release");
 assert.ok(
   readme.includes(`router-v${versionMatch[1]}`),
   "README must identify the pinned Router release"
@@ -97,6 +102,7 @@ for (const architecture of ["x86_64", "aarch64"]) {
 }
 
 assert.ok(installer.includes("sha256sum --check --strict"), "installer must verify the archive digest");
+assert.ok(installer.includes("--bootstrap-router"), "installer must expose the bounded panel bootstrap");
 assert.ok(installer.includes("--proto '=https'"), "installer must restrict release downloads to HTTPS");
 assert.ok(!installer.includes("cargo install"), "native installation must not require Cargo");
 assert.ok(!service.includes("bash -lc \"wayfinder-router init"), "setup arguments must not use shell interpolation");

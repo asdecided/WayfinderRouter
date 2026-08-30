@@ -29,6 +29,14 @@ const contracts = {
     toolMarker: "WAYFINDER_OPENCODE_TOOL_ROUNDTRIP",
     finalMarker: "WAYFINDER_OPENCODE_SMOKE_OK",
   },
+  "pi-0.84.3": {
+    agent: "pi",
+    version: "0.84.3",
+    preferredTool: "bash",
+    argumentName: "command",
+    toolMarker: "WAYFINDER_PI_TOOL_ROUNDTRIP",
+    finalMarker: "WAYFINDER_PI_SMOKE_OK",
+  },
 };
 const selected = contracts[contract];
 const maxRequestBytes = 2 * 1024 * 1024;
@@ -36,7 +44,7 @@ const toolCallId = "call_wayfinder_smoke";
 
 if (!Number.isInteger(port) || port < 1024 || port > 65535 || !evidencePath || !selected) {
   process.stderr.write(
-    "usage: node coding-agent-mock-provider.mjs PORT EVIDENCE_PATH codex-0.149.0|claude-code-2.1.241|opencode-1.18.21\n",
+    "usage: node coding-agent-mock-provider.mjs PORT EVIDENCE_PATH codex-0.149.0|claude-code-2.1.241|opencode-1.18.21|pi-0.84.3\n",
   );
   process.exit(2);
 }
@@ -155,16 +163,17 @@ const server = createServer((request, response) => {
       ]);
     }
 
-    if (selected.agent === "opencode"
-        && requestText.includes("WAYFINDER_OPENCODE_ERROR_PROBE")) {
+    const probePrefix = selected.agent === "pi" ? "WAYFINDER_PI" : "WAYFINDER_OPENCODE";
+    if (["opencode", "pi"].includes(selected.agent)
+        && requestText.includes(`${probePrefix}_ERROR_PROBE`)) {
       errorRequestSeen = true;
       persistEvidence();
       return json(response, 400, {
-        error: { message: "WAYFINDER_OPENCODE_UPSTREAM_ERROR" },
+        error: { message: `${probePrefix}_UPSTREAM_ERROR` },
       });
     }
-    if (selected.agent === "opencode"
-        && requestText.includes("WAYFINDER_OPENCODE_CANCELLATION_PROBE")) {
+    if (["opencode", "pi"].includes(selected.agent)
+        && requestText.includes(`${probePrefix}_CANCELLATION_PROBE`)) {
       cancellationStarted = true;
       persistEvidence();
       response.writeHead(200, {

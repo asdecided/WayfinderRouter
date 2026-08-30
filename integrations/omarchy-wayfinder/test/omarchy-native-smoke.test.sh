@@ -24,7 +24,7 @@ git -C "$plugin_dir" commit -qm "fixture"
 
 cat > "$router_path" <<'ROUTER'
 #!/usr/bin/env bash
-printf '%s\n' "wayfinder-router 2026.8.0"
+printf '%s\n' "wayfinder-router 2026.8.1"
 ROUTER
 chmod 0755 "$router_path"
 router_binary_sha256="$(sha256sum "$router_path" | cut -d ' ' -f 1)"
@@ -33,7 +33,7 @@ cat > "$router_provenance_dir/omarchy-router-install" <<EOF
 schema_version=1
 plugin_id=io.github.asdecided.wayfinder
 role=current
-router_version=2026.8.0
+router_version=2026.8.1
 router_target=x86_64-unknown-linux-gnu
 archive_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 binary_sha256=$router_binary_sha256
@@ -94,12 +94,12 @@ PATH="$mock_bin:$(dirname -- "$router_path"):$PATH" \
 jq -e '
   .schemaVersion == 1
   and .plugin.id == "io.github.asdecided.wayfinder"
-  and .plugin.version == "0.3.0"
+  and .plugin.version == "0.3.2"
   and .plugin.cleanCheckout == true
   and .plugin.enabledBeforeAndAfterRestart == true
   and .plugin.widgetVisible == true
   and .omarchy.shellRestartSurvived == true
-  and .router.version == "2026.8.0"
+  and .router.version == "2026.8.1"
   and .router.pluginOwned == true
   and .router.healthBeforeAndAfterRestart == true
 ' "$evidence_file" >/dev/null
