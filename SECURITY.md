@@ -11,9 +11,9 @@ keep you posted as we work on a fix.
 
 ## Supported versions
 
-The standalone `wayfinder-router` package follows CalVer; Wayfinder Desktop follows SemVer. Each
-product line ships fixes on its latest release. Please reproduce against the most recent applicable
-router or Desktop version before reporting.
+The standalone `wayfinder-router` package and Wayfinder Desktop each follow SemVer on independent
+release lines. Each product line ships fixes on its latest release. Please reproduce against the
+most recent applicable Router or Desktop version before reporting.
 
 ## Scope & design posture
 

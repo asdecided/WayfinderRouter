@@ -58,5 +58,5 @@ keys remain a separate provider path, and Wayfinder never imports ChatGPT tokens
 
 `Wayfinder.app` inside the downloadable archive is Developer ID signed, notarized by Apple, stapled,
 and Gatekeeper checked. The ZIP is accompanied by its SHA-256 checksum and verified again after
-extraction. The standalone `wayfinder-router` package keeps its separate CalVer release line;
+extraction. The standalone `wayfinder-router` package keeps its separate SemVer release line;
 desktop version `0.1.0` does not change or publish it.

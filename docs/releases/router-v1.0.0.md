@@ -1,7 +1,11 @@
-# Wayfinder Router 2026.8.2 for Linux
+# Wayfinder Router 1.0.0 for Linux
 
 This release publishes the native Rust `wayfinder-router` gateway for direct
 installation on glibc-based Linux systems, including Omarchy.
+
+This is the first Router SemVer release. The unpublished `2026.8.2` candidate
+became `1.0.0`; the existing `2026.8.0` and `2026.8.1` DateVer releases remain
+immutable and valid rollback points.
 
 ## Assets
 
