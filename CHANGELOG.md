@@ -151,6 +151,11 @@ details, release history over commit history.
 
 ### Changed
 
+- **Portable Router releases return to SemVer** (WF-ADR-0083). The unpublished
+  `2026.8.2` candidate becomes Router `1.0.0`; existing DateVer tags remain
+  immutable rollback points. Router, Desktop, and persisted schema versions
+  remain independent.
+
 - **Calibrated automatic first run and semantic blind-spot repair**
   (WF-ADR-0079, issues #171 and #195). Newly generated automatic presets now
   run the native min-cost calibrator over the bundled, checksum-recorded

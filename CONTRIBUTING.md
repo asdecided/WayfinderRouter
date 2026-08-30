@@ -57,7 +57,10 @@ changelog entry. Pull requests are squash-merged after review and green checks.
 
 ## Releases
 
-Wayfinder Desktop is the release product. It uses SemVer, includes the native
-Rust router, and follows
+The portable Router and Wayfinder Desktop use independent SemVer release lines.
+Router tags use `router-vMAJOR.MINOR.PATCH`; Desktop tags use
+`desktop-vMAJOR.MINOR.PATCH`. A version change in one product does not imply a
+version change in the other. The Desktop release includes the native Rust
+router and follows
 [`macos/WayfinderMac/Packaging/RELEASE.md`](macos/WayfinderMac/Packaging/RELEASE.md).
 The retired package distribution is not a release or rollback channel.
