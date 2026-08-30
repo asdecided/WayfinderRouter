@@ -37,6 +37,19 @@ grep -Fx "$quickshell_package" "$omarchy_source/install/omarchy-base.packages" >
   printf 'the pinned Omarchy package set does not include %s\n' "$quickshell_package" >&2
   exit 1
 }
+grep -F 'manifest.__sourceDir || ""' "$omarchy_source/shell/services/PluginRegistry.qml" >/dev/null || {
+  printf '%s\n' "the pinned Omarchy contract does not expose the installed plugin source directory" >&2
+  exit 1
+}
+grep -F 'inst.manifest = manifest' "$omarchy_source/shell/shell.qml" >/dev/null || {
+  printf '%s\n' "the pinned Omarchy service contract does not inject the stamped manifest" >&2
+  exit 1
+}
+grep -F 'omarchy plugin add https://github.com/acme/omarchy-weather.git --enable' \
+  "$omarchy_source/bin/omarchy-plugin-add" >/dev/null || {
+  printf '%s\n' "the pinned Omarchy contract does not support standard add-and-enable" >&2
+  exit 1
+}
 
 LC_ALL=C bash "$omarchy_source/bin/omarchy-plugin-validate" "$plugin_root"
 printf 'validated Wayfinder against Omarchy %s at %s\n' "$expected_version" "$expected_commit"

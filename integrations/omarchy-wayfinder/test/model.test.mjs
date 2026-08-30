@@ -117,6 +117,10 @@ const setupBase = {
   reachable: false,
   missingEnvironment: []
 };
+const routerMissing = { ...setupBase, binaryInstalled: false };
+assert.equal(model.setupState(routerMissing).actionable, true);
+assert.equal(model.setupState(routerMissing).action, "Set up Wayfinder");
+assert.match(model.setupState(routerMissing).detail, /SHA-256/);
 assert.equal(model.setupState(setupBase).action, "Set up Wayfinder");
 assert.equal(model.setupState(setupBase).step, "policy");
 

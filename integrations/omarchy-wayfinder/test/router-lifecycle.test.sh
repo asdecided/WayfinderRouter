@@ -12,6 +12,14 @@ router_provenance_dir="$XDG_STATE_HOME/wayfinder"
 router_provenance_file="$router_provenance_dir/omarchy-router-install"
 source "$repo_root/scripts/router-lifecycle.sh"
 
+for invalid_version in 01.0.0 1.00.0 1.0.00 1.0.0-rc.1; do
+  if router_require_release_identity "$invalid_version" x86_64-unknown-linux-gnu \
+      >/dev/null 2>&1; then
+    printf 'accepted invalid Router release version: %s\n' "$invalid_version" >&2
+    exit 1
+  fi
+done
+
 make_router() {
   local destination="$1"
   local version="$2"
@@ -39,8 +47,8 @@ candidate_v3="$test_root/candidates/router-v3"
 candidate_v4="$test_root/candidates/router-v4"
 make_router "$candidate_v1" 2026.8.0 v1
 make_router "$candidate_v2" 2026.8.1 v2
-make_router "$candidate_v3" 2026.8.2 v3
-make_router "$candidate_v4" 2026.8.3 v4
+make_router "$candidate_v3" 1.0.0 v3
+make_router "$candidate_v4" 1.1.0 v4
 install -d -m 0755 "$(dirname -- "$router_path")"
 install -m 0755 "$candidate_v1" "$router_path"
 router_write_current_metadata 2026.8.0 x86_64-unknown-linux-gnu "$archive_v1" \
@@ -53,53 +61,48 @@ assert_version "$router_backup_binary" 2026.8.0
 [[ "$(router_metadata_value "$router_backup_metadata" router_version)" == "2026.8.0" ]]
 [[ ! -e "$router_transaction_file" ]]
 
-router_rollback
-assert_version "$router_path" 2026.8.0
-assert_version "$router_backup_binary" 2026.8.1
-[[ "$(router_metadata_value "$router_provenance_file" router_version)" == "2026.8.0" ]]
-
 printf '%s\n' "tampered" >> "$router_path"
-if router_promote_candidate "$candidate_v3" 2026.8.2 x86_64-unknown-linux-gnu "$archive_v3" \
+if router_promote_candidate "$candidate_v3" 1.0.0 x86_64-unknown-linux-gnu "$archive_v3" \
     >/dev/null 2>&1; then
   printf '%s\n' "promotion accepted a modified active Router" >&2
   exit 1
 fi
-install -m 0755 "$candidate_v1" "$router_path"
+install -m 0755 "$candidate_v2" "$router_path"
 
 router_lifecycle_hook() {
   [[ "$1" != "after-promotion" ]] || return 75
 }
-if router_promote_candidate "$candidate_v3" 2026.8.2 x86_64-unknown-linux-gnu "$archive_v3" \
+if router_promote_candidate "$candidate_v3" 1.0.0 x86_64-unknown-linux-gnu "$archive_v3" \
     >/dev/null 2>&1; then
   printf '%s\n' "interrupted promotion unexpectedly completed" >&2
   exit 1
 fi
-assert_version "$router_path" 2026.8.2
+assert_version "$router_path" 1.0.0
 [[ -f "$router_transaction_file" ]]
-[[ "$(router_metadata_value "$router_provenance_file" router_version)" == "2026.8.0" ]]
+[[ "$(router_metadata_value "$router_provenance_file" router_version)" == "2026.8.1" ]]
 router_lifecycle_hook() { :; }
 router_recover_transaction >/dev/null
-assert_version "$router_path" 2026.8.2
-[[ "$(router_metadata_value "$router_provenance_file" router_version)" == "2026.8.2" ]]
+assert_version "$router_path" 1.0.0
+[[ "$(router_metadata_value "$router_provenance_file" router_version)" == "1.0.0" ]]
 [[ ! -e "$router_transaction_file" ]]
 
 router_rollback >/dev/null
-assert_version "$router_path" 2026.8.0
+assert_version "$router_path" 2026.8.1
 
 router_lifecycle_hook() {
   [[ "$1" != "after-transaction" ]] || return 76
 }
-if router_promote_candidate "$candidate_v4" 2026.8.3 x86_64-unknown-linux-gnu "$archive_v4" \
+if router_promote_candidate "$candidate_v4" 1.1.0 x86_64-unknown-linux-gnu "$archive_v4" \
     >/dev/null 2>&1; then
   printf '%s\n' "pre-promotion interruption unexpectedly completed" >&2
   exit 1
 fi
-assert_version "$router_path" 2026.8.0
+assert_version "$router_path" 2026.8.1
 [[ -f "$router_transaction_file" ]]
 router_lifecycle_hook() { :; }
 router_recover_transaction >/dev/null
-assert_version "$router_path" 2026.8.0
-[[ "$(router_metadata_value "$router_provenance_file" router_version)" == "2026.8.0" ]]
+assert_version "$router_path" 2026.8.1
+[[ "$(router_metadata_value "$router_provenance_file" router_version)" == "2026.8.1" ]]
 [[ ! -e "$router_transaction_file" ]]
 
 rm -f -- "$router_backup_binary" "$router_backup_metadata"
@@ -111,7 +114,7 @@ fi
 router_load_current
 victim="$HOME/do-not-delete"
 printf '%s\n' "owned by the user" > "$victim"
-router_write_transaction 2026.8.3 x86_64-unknown-linux-gnu "$archive_v4" \
+router_write_transaction 1.1.0 x86_64-unknown-linux-gnu "$archive_v4" \
   "$(sha256sum "$candidate_v4" | cut -d ' ' -f 1)" "$victim"
 if router_recover_transaction >/dev/null 2>&1; then
   printf '%s\n' "recovery accepted a candidate path outside the promotion boundary" >&2

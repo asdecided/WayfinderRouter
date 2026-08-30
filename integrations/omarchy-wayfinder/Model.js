@@ -182,9 +182,9 @@ function setupState(state) {
       detail: "This endpoint is observed but not managed." }
   }
   if (!input.binaryInstalled) {
-    return { ready: false, actionable: false, step: "binary", status: "Router not installed",
-      title: "Install the Router", action: "Router missing",
-      detail: "Run the plugin installer to add the checksum-verified native Router." }
+    return { ready: false, actionable: true, step: "binary", status: "Setup required",
+      title: "Install the reviewed Router", action: "Set up Wayfinder",
+      detail: "Downloads the pinned native Router, verifies its SHA-256 digest, then continues setup." }
   }
   if (String(input.configPath || "") === "") {
     return { ready: false, actionable: false, step: "path", status: "Preparing setup",

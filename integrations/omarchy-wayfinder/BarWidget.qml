@@ -47,7 +47,7 @@ BarWidget {
   }
 
   function primaryAction() {
-    if (!wayfinder || !wayfinder.binaryInstalled || !wayfinder.localEndpoint) return
+    if (!wayfinder || !wayfinder.localEndpoint) return
     wayfinder.beginSetup()
   }
 
@@ -92,7 +92,6 @@ BarWidget {
     if (wayfinder.actionError !== "") return wayfinder.actionError
     if (wayfinder.actionMessage !== "") return wayfinder.actionMessage
     if (!wayfinder.localEndpoint) return "This remote endpoint is observed but not managed."
-    if (!wayfinder.binaryInstalled) return "Install the Rust router to activate this control surface."
     if (wayfinder.setupDetail !== "") return wayfinder.setupDetail
     if (wayfinder.operatorError !== "" && wayfinder.reachable) return wayfinder.operatorError
     return ""
@@ -631,8 +630,7 @@ BarWidget {
           text: root.wayfinder ? root.wayfinder.actionLabel() : "Starting…"
           foreground: root.foreground
           bordered: true
-          enabled: !!root.wayfinder && root.wayfinder.binaryInstalled
-            && root.wayfinder.localEndpoint && root.wayfinder.effectiveConfigPath !== ""
+          enabled: !!root.wayfinder && root.wayfinder.localEndpoint
             && root.wayfinder.setupState.actionable && !root.wayfinder.busy
           onClicked: root.primaryAction()
         }

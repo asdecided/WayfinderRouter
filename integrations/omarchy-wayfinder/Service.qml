@@ -9,6 +9,8 @@ Item {
 
   property var shell: null
   property var manifest: null
+  readonly property string pluginSourceDir: manifest && manifest.__sourceDir
+    ? String(manifest.__sourceDir) : ""
 
   property string endpoint: Model.DEFAULT_ENDPOINT
   property int refreshIntervalSec: 15
@@ -62,7 +64,7 @@ Item {
   property string actionKind: ""
   property double lastUpdatedMs: 0
 
-  readonly property bool busy: binaryProcess.running || unitProcess.running
+  readonly property bool busy: routerBootstrapProcess.running || binaryProcess.running || unitProcess.running
     || systemdProcess.running || healthProcess.running || modelsProcess.running
     || recentProcess.running || savingsProcess.running || actionProcess.running
     || defaultConfigProcess.running || configProbeProcess.running || doctorProcess.running
@@ -193,13 +195,21 @@ Item {
 
   function continueSetup() {
     if (!setupRequested || actionProcess.running || doctorProcess.running) return
-    if (!configExists) {
+    if (!binaryInstalled) {
+      bootstrapRouter()
+    } else if (effectiveConfigPath === "") {
+      if (String(configPath || "").trim() === "" && !defaultConfigProcess.running) {
+        defaultConfigProcess.running = true
+      }
+    } else if (!configChecked) {
+      probeConfig()
+    } else if (!configExists) {
       initializePolicy()
     } else if (!doctorChecked || !configValid) {
       validatePolicy(true)
     } else if (!unitInstalled) {
       installService(true)
-    } else if (!systemdActive) {
+    } else if (!systemdActive || !reachable) {
       startOrRestartService(true)
     } else {
       setupRequested = false
@@ -213,24 +223,29 @@ Item {
   }
 
   function beginSetup() {
-    if (!binaryInstalled || !localEndpoint || busy || effectiveConfigPath === "") return
+    if (!localEndpoint || busy) return
     actionMessage = ""
     actionError = ""
-    if (!configChecked) {
-      probeConfig()
+    if (binaryInstalled && setupState.step === "ready") {
+      startOrRestartService(false)
       return
     }
-    if (!configExists) {
-      initializePolicy()
-    } else if (!doctorChecked || !configValid) {
-      validatePolicy(true)
-    } else if (!unitInstalled) {
-      installService(true)
-    } else if (!systemdActive || !reachable) {
-      startOrRestartService(true)
-    } else {
-      startOrRestartService(false)
+    setupRequested = true
+    setupStage = binaryInstalled ? "setup" : "router"
+    continueSetup()
+  }
+
+  function bootstrapRouter() {
+    if (binaryInstalled || routerBootstrapProcess.running || !setupRequested) return
+    if (pluginSourceDir === "" || pluginSourceDir.charAt(0) !== "/") {
+      actionError = "Wayfinder could not resolve its installed plugin directory."
+      setupRequested = false
+      setupStage = "failed"
+      return
     }
+    setupStage = "router"
+    routerBootstrapProcess.command = [pluginSourceDir + "/install.sh", "--bootstrap-router"]
+    routerBootstrapProcess.running = true
   }
 
   function refreshCapabilities() {
@@ -313,6 +328,7 @@ Item {
   }
 
   function actionLabel() {
+    if (routerBootstrapProcess.running) return "Installing Router…"
     if (actionProcess.running) {
       if (actionKind === "initialize") return "Creating policy…"
       if (actionKind === "install") return "Installing service…"
@@ -375,7 +391,10 @@ Item {
         root.doctorOk = false
         root.doctorMissingEnvironment = []
         root.doctorError = ""
-      } else if (root.binaryInstalled) {
+      }
+      if (root.setupRequested) {
+        Qt.callLater(root.continueSetup)
+      } else if (root.configExists && root.binaryInstalled) {
         Qt.callLater(function() { root.validatePolicy(false) })
       }
     }
@@ -413,7 +432,8 @@ Item {
 
   Process {
     id: binaryProcess
-    command: ["bash", "-lc", "command -v wayfinder-router"]
+    command: ["bash", "-lc",
+      "command -v wayfinder-router || { candidate=\"${WAYFINDER_BIN_DIR:-$HOME/.local/bin}/wayfinder-router\"; test -x \"$candidate\" && printf '%s\\n' \"$candidate\"; }"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -421,8 +441,9 @@ Item {
         root.binaryPath = path
         root.binaryInstalled = path !== ""
         if (root.binaryInstalled) {
-          Qt.callLater(root.probeConfig)
+          if (!root.configChecked) Qt.callLater(root.probeConfig)
           Qt.callLater(root.refreshCapabilities)
+          if (root.setupRequested) Qt.callLater(root.continueSetup)
         }
       }
     }
@@ -433,6 +454,33 @@ Item {
         root.capabilityChecked = false
         root.projectSupported = false
         root.routerVersion = ""
+      }
+    }
+  }
+
+  Process {
+    id: routerBootstrapProcess
+    stdout: StdioCollector {
+      id: routerBootstrapStdout
+      waitForEnd: true
+    }
+    stderr: StdioCollector {
+      id: routerBootstrapStderr
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      var detail = String(routerBootstrapStderr.text || routerBootstrapStdout.text || "")
+        .replace(/\s+/g, " ").trim()
+      if (detail.length > 240) detail = detail.substring(0, 237) + "…"
+      if (exitCode === 0) {
+        root.actionMessage = "Router installed. Continuing setup…"
+        root.actionError = ""
+        if (!binaryProcess.running) binaryProcess.running = true
+      } else {
+        root.actionMessage = ""
+        root.actionError = detail || "The checksum-verified Router could not be installed."
+        root.setupRequested = false
+        root.setupStage = "failed"
       }
     }
   }

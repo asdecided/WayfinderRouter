@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "checkedAt": "2026-08-23",
+  "checkedAt": "2026-08-26",
   "plugin": {
     "id": "io.github.asdecided.wayfinder",
-    "version": "0.3.0"
+    "version": "0.3.2"
   },
   "omarchy": {
     "channel": "quattro",
@@ -17,13 +17,13 @@
     "contractCommit": "2c593dbbaad67698e7b9b0809d082d86540a7a1c"
   },
   "router": {
-    "release": "2026.8.0",
+    "release": "2026.8.1",
     "architectures": [
       "x86_64-unknown-linux-gnu",
       "aarch64-unknown-linux-gnu"
     ],
     "libc": "glibc",
-    "projectProfiles": "unavailable"
+    "projectProfiles": "available"
   },
   "codingAgents": [
     {
@@ -40,9 +40,20 @@
       "id": "opencode",
       "version": "1.18.21",
       "evidence": "real-stream-tool-error-cancel"
+    },
+    {
+      "id": "pi",
+      "version": "0.84.3",
+      "evidence": "real-stream-tool-error-cancel"
+    },
+    {
+      "id": "aider",
+      "version": "0.86.1",
+      "evidence": "real-stream-edit"
     }
   ],
   "lifecycle": {
+    "standardInstallation": "contract-validated",
     "freshInstall": "release-gated",
     "existingRouterNoClobber": "release-gated",
     "pluginSourceUpdate": "documented",
