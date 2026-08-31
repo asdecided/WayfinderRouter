@@ -14,6 +14,17 @@ cd ~/.config/omarchy/plugins/io.github.asdecided.wayfinder
 
 Then ask the user to open the Wayfinder bar item and choose **Set up Wayfinder**. The plugin creates only a missing policy, validates it, and installs the independent user service. Never replace an existing policy, provider credential, coding-agent configuration, or independently installed Router binary.
 
+For the local-only first-success path, discover fixed loopback catalogs, explicitly choose a returned model, initialize a no-clobber policy, start the Router, and prove one real routed response:
+
+```sh
+wayfinder-router local discover --json
+wayfinder-router init --preset local --endpoint http://127.0.0.1:11434 --model MODEL
+wayfinder-router serve
+wayfinder-router local probe --endpoint http://127.0.0.1:8787 --model local --json
+```
+
+Discovery never scans the network, installs a runtime, pulls a model, or chooses on the user's behalf. The probe sends one fixed public prompt and reports only bounded delivery evidence; it never prints the model response. A policy is not created and readiness is not claimed unless every explicit step succeeds.
+
 For a two-arm local/OpenAI policy outside the panel, run:
 
 ```sh

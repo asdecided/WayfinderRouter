@@ -7,13 +7,16 @@ use std::process::Command;
 #[cfg(test)]
 use std::fs;
 
-use crate::app_setup_command::{preset_config, write_new_config};
+use crate::app_setup_command::{local_preset_config, preset_config, write_new_config};
+use crate::local_command::{validate_identifier, validate_loopback_endpoint};
 use crate::{EXIT_OK, EXIT_USAGE, expand_tilde, write_error, write_output};
 
 const DEFAULT_CONFIG: &str = "wayfinder-router.toml";
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8088";
-const INIT_HELP: &str =
-    "usage: wayfinder-router init [--preset local|hybrid|openai|gemini|apple-local] [--path PATH]";
+const INIT_HELP: &str = concat!(
+    "usage: wayfinder-router init [--preset local|hybrid|openai|gemini|apple-local] [--path PATH]\n",
+    "       wayfinder-router init --preset local --endpoint URL --model MODEL [--path PATH]"
+);
 const CONNECT_HELP: &str =
     "usage: wayfinder-router connect codex|claude-code|opencode|pi|aider [--endpoint URL]";
 const OPEN_HELP: &str = "usage: wayfinder-router open [--print]";
@@ -29,6 +32,8 @@ pub(crate) fn run_init(
     }
     let mut preset = "local".to_owned();
     let mut path = PathBuf::from(DEFAULT_CONFIG);
+    let mut endpoint = None;
+    let mut model = None;
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
         match argument.as_str() {
@@ -46,15 +51,55 @@ pub(crate) fn run_init(
                 }
                 None => return usage_error(stderr, "--path needs a value"),
             },
+            "--endpoint" if endpoint.is_none() => match arguments.get(index + 1) {
+                Some(value) => {
+                    endpoint = Some(value.clone());
+                    index += 1;
+                }
+                None => return usage_error(stderr, "--endpoint needs a value"),
+            },
+            "--model" if model.is_none() => match arguments.get(index + 1) {
+                Some(value) => {
+                    model = Some(value.clone());
+                    index += 1;
+                }
+                None => return usage_error(stderr, "--model needs a value"),
+            },
+            "--endpoint" | "--model" => {
+                return usage_error(stderr, &format!("{argument} may only be supplied once"));
+            }
             value => return usage_error(stderr, &format!("unrecognized init argument: {value}")),
         }
         index += 1;
     }
-    let contents = match preset_config(&preset) {
-        Ok(Some(contents)) => contents,
-        Ok(None) => return usage_error(stderr, &format!("unknown init preset: {preset}")),
-        Err(message) => return usage_error(stderr, &message),
+    let custom_local = match (endpoint, model) {
+        (None, None) => None,
+        (Some(endpoint), Some(model)) if preset == "local" => {
+            if let Err(message) = validate_loopback_endpoint(&endpoint) {
+                return usage_error(stderr, &message);
+            }
+            if let Err(message) = validate_identifier(&model, "model id") {
+                return usage_error(stderr, &message);
+            }
+            match local_preset_config(&endpoint, &model) {
+                Ok(contents) => Some(contents),
+                Err(message) => return usage_error(stderr, &message),
+            }
+        }
+        (Some(_), Some(_)) => {
+            return usage_error(
+                stderr,
+                "--endpoint and --model are available only with --preset local",
+            );
+        }
+        _ => return usage_error(stderr, "--endpoint and --model must be supplied together"),
     };
+    let contents =
+        match custom_local.map_or_else(|| preset_config(&preset), |value| Ok(Some(value))) {
+            Ok(Some(contents)) => contents,
+            Ok(None) => return usage_error(stderr, &format!("unknown init preset: {preset}")),
+            Err(message) => return usage_error(stderr, &message),
+        };
     match write_new_config(&path, &contents) {
         Ok(()) => {
             write_output(
@@ -219,6 +264,64 @@ mod tests {
         assert!(generated.contains("min_score = 0.01"));
         fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn init_accepts_an_explicit_discovered_local_model_without_clobbering()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("wayfinder-init-{}", uuid::Uuid::new_v4()));
+        let path = root.join("wayfinder-router.toml");
+        let arguments = vec![
+            "--preset".to_owned(),
+            "local".to_owned(),
+            "--endpoint".to_owned(),
+            "http://127.0.0.1:11434/v1".to_owned(),
+            "--model".to_owned(),
+            "qwen2.5-coder:7b".to_owned(),
+            "--path".to_owned(),
+            path.display().to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(run_init(&arguments, &mut stdout, &mut stderr), EXIT_OK);
+        let generated = fs::read_to_string(&path)?;
+        assert!(generated.contains("base_url = \"http://127.0.0.1:11434/v1\""));
+        assert!(generated.contains("model = \"qwen2.5-coder:7b\""));
+        assert_eq!(run_init(&arguments, &mut stdout, &mut stderr), EXIT_USAGE);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_local_init_rejects_remote_and_partial_selection() {
+        for arguments in [
+            vec![
+                "--preset".to_owned(),
+                "local".to_owned(),
+                "--endpoint".to_owned(),
+                "https://example.com/v1".to_owned(),
+                "--model".to_owned(),
+                "model".to_owned(),
+            ],
+            vec![
+                "--preset".to_owned(),
+                "local".to_owned(),
+                "--model".to_owned(),
+                "model".to_owned(),
+            ],
+            vec![
+                "--preset".to_owned(),
+                "hybrid".to_owned(),
+                "--endpoint".to_owned(),
+                "http://127.0.0.1:11434/v1".to_owned(),
+                "--model".to_owned(),
+                "model".to_owned(),
+            ],
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            assert_eq!(run_init(&arguments, &mut stdout, &mut stderr), EXIT_USAGE);
+        }
     }
 
     #[test]

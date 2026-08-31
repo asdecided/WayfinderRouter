@@ -13,9 +13,14 @@ Install the flagship Omarchy experience:
 omarchy plugin add https://github.com/asdecided/omarchy-wayfinder.git
 cd ~/.config/omarchy/plugins/io.github.asdecided.wayfinder
 ./install.sh
-wayfinder-router init
+wayfinder-router local discover --json
+wayfinder-router init --preset local --endpoint http://127.0.0.1:11434/v1 --model qwen2.5-coder:7b
 wayfinder-router doctor
+wayfinder-router serve
+wayfinder-router local probe --model local --json
 ```
+
+Choose the endpoint and model from the discovery output rather than copying the example blindly. Discovery touches only fixed loopback catalogs and never installs or pulls a model; setup is not complete until the fixed public inference probe returns a local execution receipt.
 
 Point Codex, Claude Code, OpenCode, Pi, or Aider at the same loopback policy with
 `wayfinder-router connect <client>`. See the

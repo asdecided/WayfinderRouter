@@ -10,6 +10,7 @@ mod calibrate_command;
 mod codex_app_server;
 mod config_command;
 mod doctor_command;
+mod local_command;
 mod project_command;
 mod provider_command;
 mod service_command;
@@ -190,6 +191,7 @@ pub fn run(
         "init" => activation_command::run_init(&arguments[1..], stdout, stderr),
         "doctor" => doctor_command::run_doctor(&arguments[1..], stdout, stderr),
         "connect" => activation_command::run_connect(&arguments[1..], stdout, stderr),
+        "local" => local_command::run_local(&arguments[1..], stdout, stderr),
         "exec" => {
             write_error(
                 stderr,
@@ -368,8 +370,8 @@ fn run_capabilities(arguments: &[String], stdout: &mut dyn Write, stderr: &mut d
         "implementation": "rust",
         "version": product_version(),
         "target_architecture": target_architecture(),
-        "commands": ["init", "doctor", "connect", "exec", "provider", "open", "project", "route", "calibrate", "serve", "service", "keys", "capabilities", "app-setup-init", "app-configure-chatgpt", "config", "apple-foundation-live-smoke"],
-        "native_commands": ["init", "doctor", "connect", "exec", "provider presets", "provider preset", "open", "project setup", "project status", "project rollback", "route", "calibrate", "serve", "service", "keys new", "capabilities", "app-setup-init", "app-configure-chatgpt", "config read-routing", "config apply-routing", "apple-foundation-live-smoke"],
+        "commands": ["init", "doctor", "connect", "exec", "local", "provider", "open", "project", "route", "calibrate", "serve", "service", "keys", "capabilities", "app-setup-init", "app-configure-chatgpt", "config", "apple-foundation-live-smoke"],
+        "native_commands": ["init", "doctor", "connect", "exec", "local discover", "local probe", "provider presets", "provider preset", "open", "project setup", "project status", "project rollback", "route", "calibrate", "serve", "service", "keys new", "capabilities", "app-setup-init", "app-configure-chatgpt", "config read-routing", "config apply-routing", "apple-foundation-live-smoke"],
         "agent_exec": {
             "schema": "wf-agent-exec-v1",
             "schema_version": "1",
@@ -1552,6 +1554,7 @@ const TOP_LEVEL_HELP: &str = concat!(
     "  init           Create a no-clobber starter policy.\n",
     "  doctor         Check policy, credential references, and local gateway reachability.\n",
     "  connect        Print a verified configuration for Codex, Claude Code, OpenCode, Pi, or Aider.\n",
+    "  local          Discover fixed-loopback models or prove one real inference.\n",
     "  exec           Launch Codex, Claude Code, or OpenCode through a ready local Router.\n",
     "  provider       Print a hosted destination preset without changing routing.\n",
     "  project        Set up, inspect, or roll back a repository profile.\n",
@@ -1670,6 +1673,8 @@ mod tests {
                 "doctor",
                 "connect",
                 "exec",
+                "local discover",
+                "local probe",
                 "provider presets",
                 "provider preset",
                 "open",
