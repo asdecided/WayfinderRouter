@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use wayfinder_routing_core::ExecutionBoundary;
 
@@ -39,6 +39,9 @@ pub struct RecentEntry {
     /// Latest bounded delivery state observed for this request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<RecentOutcome>,
+    /// Explicit prompt-free user judgment linked to this retained receipt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_outcome: Option<UserOutcome>,
     /// Upstream HTTP status when one was observed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub http_status: Option<u16>,
@@ -75,6 +78,18 @@ pub enum RecentOutcome {
     Cancelled,
     /// The response was served from Wayfinder's local exact cache.
     CacheHit,
+}
+
+/// Explicit user judgment attached to one prompt-free retained receipt.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UserOutcome {
+    /// The served result was usable without a correction.
+    Success,
+    /// The served result required a user correction.
+    Correction,
+    /// The served result was not usable.
+    Failure,
 }
 
 /// Prompt-free realized cost metadata attached after a successful delivery.
@@ -150,6 +165,14 @@ pub struct RecentWorkspaceReport {
     pub in_progress: u64,
     /// Selected requests without a delivery observation.
     pub delivery_unobserved: u64,
+    /// Terminal receipts carrying an explicit user judgment.
+    pub user_labelled: u64,
+    /// Explicit usable-without-correction judgments.
+    pub user_successes: u64,
+    /// Explicit correction judgments.
+    pub user_corrections: u64,
+    /// Explicit unusable-result judgments.
+    pub user_failures: u64,
     /// Failed terminal deliveries divided by all terminal deliveries.
     pub failure_rate_pct: Option<f64>,
     /// Actual content execution boundaries across retained receipts.
@@ -162,6 +185,20 @@ pub struct RecentWorkspaceReport {
 /// Synchronization failure.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum RecentError {
+    /// Internal state could not be synchronized.
+    #[error("recent-route state lock is unavailable")]
+    LockPoisoned,
+}
+
+/// Outcome-label rejection that does not expose request content.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum UserOutcomeError {
+    /// The bounded receipt is absent or belongs to another workspace.
+    #[error("no retained receipt matches that request and workspace")]
+    ReceiptNotFound,
+    /// Only terminal delivery receipts can receive a user judgment.
+    #[error("the retained receipt is not terminal")]
+    ReceiptNotTerminal,
     /// Internal state could not be synchronized.
     #[error("recent-route state lock is unavailable")]
     LockPoisoned,
@@ -277,6 +314,47 @@ impl RecentRoutes {
         Ok(true)
     }
 
+    /// Attach or replace one explicit user judgment on a terminal workspace receipt.
+    pub fn label_user_outcome(
+        &self,
+        request_id: &str,
+        workspace: &str,
+        outcome: UserOutcome,
+    ) -> Result<(), UserOutcomeError> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| UserOutcomeError::LockPoisoned)?;
+        let Some(entry) = entries.iter_mut().rev().find(|entry| {
+            entry.request_id == request_id && entry.workspace.as_deref() == Some(workspace)
+        }) else {
+            return Err(UserOutcomeError::ReceiptNotFound);
+        };
+        if !matches!(
+            entry.outcome,
+            Some(
+                RecentOutcome::Succeeded
+                    | RecentOutcome::Failed
+                    | RecentOutcome::Cancelled
+                    | RecentOutcome::CacheHit
+            )
+        ) {
+            return Err(UserOutcomeError::ReceiptNotTerminal);
+        }
+        entry.user_outcome = Some(outcome);
+        Ok(())
+    }
+
+    /// Clone retained prompt-free receipts for one workspace.
+    pub fn entries_for_workspace(&self, workspace: &str) -> Result<Vec<RecentEntry>, RecentError> {
+        let entries = self.entries.lock().map_err(|_| RecentError::LockPoisoned)?;
+        Ok(entries
+            .iter()
+            .filter(|entry| entry.workspace.as_deref() == Some(workspace))
+            .cloned()
+            .collect())
+    }
+
     /// Snapshot current metadata with the Python `1..=200` query clamp.
     pub fn report(&self, requested_limit: i64) -> Result<RecentReport, RecentError> {
         let entries = self.entries.lock().map_err(|_| RecentError::LockPoisoned)?;
@@ -318,6 +396,10 @@ impl RecentRoutes {
         let mut cache_hits = 0_u64;
         let mut in_progress = 0_u64;
         let mut delivery_unobserved = 0_u64;
+        let mut user_labelled = 0_u64;
+        let mut user_successes = 0_u64;
+        let mut user_corrections = 0_u64;
+        let mut user_failures = 0_u64;
         let mut boundaries = RecentBoundaryCounts::default();
         let mut by_route = BTreeMap::new();
 
@@ -354,6 +436,21 @@ impl RecentRoutes {
                     delivery_unobserved = delivery_unobserved.saturating_add(1);
                 }
             }
+            match entry.user_outcome {
+                Some(UserOutcome::Success) => {
+                    user_labelled = user_labelled.saturating_add(1);
+                    user_successes = user_successes.saturating_add(1);
+                }
+                Some(UserOutcome::Correction) => {
+                    user_labelled = user_labelled.saturating_add(1);
+                    user_corrections = user_corrections.saturating_add(1);
+                }
+                Some(UserOutcome::Failure) => {
+                    user_labelled = user_labelled.saturating_add(1);
+                    user_failures = user_failures.saturating_add(1);
+                }
+                None => {}
+            }
             match entry.execution_boundary {
                 Some(ExecutionBoundary::OnDevice) => {
                     boundaries.on_device = boundaries.on_device.saturating_add(1);
@@ -389,6 +486,10 @@ impl RecentRoutes {
             cache_hits,
             in_progress,
             delivery_unobserved,
+            user_labelled,
+            user_successes,
+            user_corrections,
+            user_failures,
             failure_rate_pct,
             boundaries,
             by_route,
@@ -418,6 +519,7 @@ mod tests {
             served_by: None,
             execution_boundary: None,
             outcome: None,
+            user_outcome: None,
             http_status: None,
             error_type: None,
             ts: 1_700_000_000.0,
@@ -516,6 +618,42 @@ mod tests {
         assert_eq!(
             entry.error_type.as_deref(),
             Some("wayfinder_router_upstream_error")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn user_outcomes_require_a_terminal_receipt_in_the_same_workspace()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let recent = RecentRoutes::new(2);
+        let mut value = entry("request", "local", 0.3);
+        value.workspace = Some("project-a".to_owned());
+        recent.record(value)?;
+        assert_eq!(
+            recent.label_user_outcome("request", "project-a", UserOutcome::Correction),
+            Err(UserOutcomeError::ReceiptNotTerminal)
+        );
+        recent.update_delivery(
+            "request",
+            "local",
+            ExecutionBoundary::OnDevice,
+            RecentOutcome::Succeeded,
+            Some(200),
+            None,
+        )?;
+        assert_eq!(
+            recent.label_user_outcome("request", "project-b", UserOutcome::Correction),
+            Err(UserOutcomeError::ReceiptNotFound)
+        );
+        recent.label_user_outcome("request", "project-a", UserOutcome::Correction)?;
+        let report = recent.report_for_workspace("project-a")?;
+        assert_eq!(report.user_labelled, 1);
+        assert_eq!(report.user_corrections, 1);
+        assert_eq!(report.user_successes, 0);
+        assert_eq!(report.user_failures, 0);
+        assert_eq!(
+            recent.report(1)?.recent[0].user_outcome,
+            Some(UserOutcome::Correction)
         );
         Ok(())
     }

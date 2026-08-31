@@ -23,6 +23,7 @@ pub mod metrics;
 pub mod modalities;
 pub mod operator_auth;
 pub mod otel;
+pub mod outcome_policy;
 pub mod project_value;
 pub mod rate_limit;
 pub mod recent;
@@ -114,9 +115,12 @@ use crate::deployment_selection::{
 };
 use crate::evidence::{EvidenceError, EvidenceLabel, EvidenceReport, EvidenceStore};
 use crate::metrics::{DEFAULT_MAX_LABEL_SERIES, GatewayMetrics};
+use crate::outcome_policy::propose_local_threshold;
 use crate::project_value::{ProjectAccountingReport, ProjectValueReport};
 use crate::rate_limit::{RateResult, RateSnapshot};
-use crate::recent::{RecentCost, RecentEntry, RecentOutcome, RecentRoutes};
+use crate::recent::{
+    RecentCost, RecentEntry, RecentOutcome, RecentRoutes, UserOutcome, UserOutcomeError,
+};
 use crate::reliability::{ReliabilityAttempt, ReliabilityError, ReliabilityPolicy, sleep_retry};
 use crate::reload::LastGood;
 use crate::shadow::{ShadowJob, ShadowSnapshot, ShadowStore};
@@ -1840,6 +1844,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/router/routes", get(router_routes))
         .route("/router/profiles", get(router_profiles))
         .route("/router/recent", get(router_recent))
+        .route("/router/outcomes", post(record_user_outcome))
+        .route("/router/outcomes/policy", get(outcome_policy_report))
         .route("/router/evidence", get(evidence_report_json))
         .route("/router/evidence.txt", get(evidence_report_text))
         .route("/router/evidence/labels", post(evidence_labels))
@@ -1849,6 +1855,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/value", get(project_value_report))
         .route("/value", get(project_value_report))
         .route("/router/value", get(project_value_report))
+        .route("/v1/outcomes", post(record_user_outcome))
+        .route("/outcomes", post(record_user_outcome))
+        .route("/v1/outcomes/policy", get(outcome_policy_report))
+        .route("/outcomes/policy", get(outcome_policy_report))
         .route("/v1/evidence", get(evidence_report_json))
         .route("/evidence", get(evidence_report_json))
         .route("/v1/evidence.txt", get(evidence_report_text))
@@ -2272,6 +2282,140 @@ async fn router_recent(State(state): State<AppState>, uri: Uri) -> Response {
             HeaderMap::new(),
         ),
     }
+}
+
+const OUTCOME_LABEL_SCHEMA_VERSION: &str = "wf-outcome-label-v1";
+const MAX_OUTCOME_ID_BYTES: usize = 128;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserOutcomeRequest {
+    schema_version: String,
+    workspace_id: String,
+    request_id: String,
+    outcome: UserOutcome,
+}
+
+async fn record_user_outcome(
+    State(state): State<AppState>,
+    actor: Option<Extension<audit::AuditActor>>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => return body_rejection_response(&state, rejection),
+    };
+    let label = match serde_json::from_slice::<UserOutcomeRequest>(&body) {
+        Ok(label)
+            if label.schema_version == OUTCOME_LABEL_SCHEMA_VERSION
+                && !label.workspace_id.is_empty()
+                && label.workspace_id.len() <= MAX_OUTCOME_ID_BYTES
+                && !label.request_id.is_empty()
+                && label.request_id.len() <= MAX_OUTCOME_ID_BYTES =>
+        {
+            label
+        }
+        _ => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "wayfinder_router_bad_outcome_label",
+                "outcome label must use wf-outcome-label-v1 with bounded workspace_id, request_id, and success, correction, or failure outcome"
+                    .to_owned(),
+                HeaderMap::new(),
+            );
+        }
+    };
+    if let Err(error) =
+        state
+            .recent()
+            .label_user_outcome(&label.request_id, &label.workspace_id, label.outcome)
+    {
+        let status = match error {
+            UserOutcomeError::ReceiptNotFound => StatusCode::NOT_FOUND,
+            UserOutcomeError::ReceiptNotTerminal => StatusCode::CONFLICT,
+            UserOutcomeError::LockPoisoned => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        return error_response(
+            status,
+            "wayfinder_router_outcome_label_rejected",
+            error.to_string(),
+            HeaderMap::new(),
+        );
+    }
+    let actor = actor.as_ref().map_or("local", |actor| actor.0.0.as_str());
+    if let Err(error) = state
+        .record_audit(
+            actor,
+            "outcomes.label",
+            None,
+            Some(json!({
+                "workspace_id": label.workspace_id.clone(),
+                "request_id": label.request_id.clone(),
+                "outcome": label.outcome,
+            })),
+        )
+        .await
+    {
+        return audit_unavailable_response(error);
+    }
+    Json(json!({
+        "schema_version": OUTCOME_LABEL_SCHEMA_VERSION,
+        "accepted": true,
+        "workspace_id": label.workspace_id,
+        "request_id": label.request_id,
+        "outcome": label.outcome,
+        "retention": "process-local-bounded-shared-ring",
+    }))
+    .into_response()
+}
+
+async fn outcome_policy_report(
+    State(state): State<AppState>,
+    uri: Uri,
+    actor: Option<Extension<audit::AuditActor>>,
+) -> Response {
+    let workspace = match project_value_query(&uri) {
+        Ok(query) => query.workspace,
+        Err(message) => {
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "wayfinder_router_bad_outcome_policy_query",
+                message,
+                HeaderMap::new(),
+            );
+        }
+    };
+    let entries = match state.recent().entries_for_workspace(&workspace) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "wayfinder_router_state_error",
+                error.to_string(),
+                HeaderMap::new(),
+            );
+        }
+    };
+    let resolved_profile = state.resolve_policy_profile(BindingContext {
+        client_id: None,
+        workspace_id: Some(&workspace),
+        key_id: None,
+    });
+    let routing = resolved_profile.map_or_else(|| state.routing(), |profile| profile.routing);
+    let report = propose_local_threshold(&workspace, routing, state.models(), &entries);
+    let actor = actor.as_ref().map_or("local", |actor| actor.0.0.as_str());
+    if let Err(error) = state
+        .record_audit(
+            actor,
+            "outcomes.policy.export",
+            None,
+            Some(json!({"workspace_id": workspace})),
+        )
+        .await
+    {
+        return audit_unavailable_response(error);
+    }
+    Json(report).into_response()
 }
 
 #[derive(Deserialize)]
@@ -3298,6 +3442,7 @@ pub(crate) async fn chat_completions(
         served_by: None,
         execution_boundary: None,
         outcome: None,
+        user_outcome: None,
         http_status: None,
         error_type: None,
         ts: timestamp,
@@ -7829,7 +7974,8 @@ mod tests {
                     None,
                     true,
                 )
-                .with_cost_per_1k(Some(0.0)),
+                .with_cost_per_1k(Some(0.0))
+                .with_provider(ProviderKind::OpenAiCompatible, Some(ProviderTier::Local)),
                 ConfiguredModel::new(
                     "cloud",
                     "https://cloud.example/v1",
@@ -7861,6 +8007,7 @@ mod tests {
             served_by: Some("local".to_owned()),
             execution_boundary: Some(ExecutionBoundary::OnDevice),
             outcome: Some(RecentOutcome::Succeeded),
+            user_outcome: None,
             http_status: Some(200),
             error_type: None,
             ts: 1_777_680_000.0,
@@ -7886,6 +8033,37 @@ mod tests {
         assert_eq!(body["baseline"]["kind"], "dearest-configured-rate");
         assert_eq!(body["baseline"]["routes"], json!(["cloud"]));
         assert_eq!(body["baseline"]["rate_per_1k"], 0.01);
+
+        let labelled = post_json(
+            &state,
+            "/v1/outcomes",
+            &json!({
+                "schema_version": "wf-outcome-label-v1",
+                "workspace_id": "project one",
+                "request_id": "abcdef123456",
+                "outcome": "correction"
+            }),
+            &[],
+        )
+        .await?;
+        assert_eq!(labelled.status(), StatusCode::OK);
+        let labelled = json_body(labelled).await?;
+        assert_eq!(labelled["accepted"], true);
+        assert!(labelled.get("prompt").is_none());
+
+        let value = json_body(get(&state, "/v1/value?workspace=project%20one").await?).await?;
+        assert_eq!(value["quality"]["status"], "collected");
+        assert_eq!(value["quality"]["labelled_receipts"], 1);
+        assert_eq!(value["quality"]["coverage_pct"], 100.0);
+        assert_eq!(value["quality"]["correction_rate_pct"], 100.0);
+        assert_eq!(value["quality"]["failure_rate_pct"], 0.0);
+
+        let proposal =
+            json_body(get(&state, "/v1/outcomes/policy?workspace=project%20one").await?).await?;
+        assert_eq!(proposal["schema_version"], "wf-local-outcome-policy-v1");
+        assert_eq!(proposal["disposition"], "propose-narrower-local-range");
+        assert_eq!(proposal["current_threshold"], 0.5);
+        assert_eq!(proposal["proposed_threshold"], 0.1);
 
         let invalid = get(&state, "/v1/value?workspace=project-one&period=year").await?;
         assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);

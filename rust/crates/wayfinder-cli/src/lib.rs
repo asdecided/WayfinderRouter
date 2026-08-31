@@ -393,6 +393,20 @@ fn run_capabilities(arguments: &[String], stdout: &mut dyn Write, stderr: &mut d
                 "reason": "no-verified-no-write-endpoint-override"
             }]
         },
+        "outcome_labels": {
+            "schema": "wf-outcome-label-v1",
+            "endpoint": "/v1/outcomes",
+            "values": ["success", "correction", "failure"],
+            "retention": "process-local-bounded-shared-ring",
+            "content_retained": false
+        },
+        "local_outcome_policy": {
+            "schema": "wf-local-outcome-policy-v1",
+            "endpoint": "/v1/outcomes/policy",
+            "direction": "narrow-local-only",
+            "activation": "none",
+            "cross_boundary_evidence": "confounded"
+        },
         "delegated_commands": [],
         "delegation": null,
         "decision_schema_versions": ["3"],
@@ -1692,6 +1706,13 @@ mod tests {
         assert_eq!(payload["agent_exec"]["client_config_write"], false);
         assert_eq!(payload["agent_exec"]["fallback"], "none");
         assert_eq!(payload["agent_exec"]["unsupported"][0]["client"], "pi");
+        assert_eq!(payload["outcome_labels"]["schema"], "wf-outcome-label-v1");
+        assert_eq!(payload["outcome_labels"]["content_retained"], false);
+        assert_eq!(
+            payload["local_outcome_policy"]["direction"],
+            "narrow-local-only"
+        );
+        assert_eq!(payload["local_outcome_policy"]["activation"], "none");
         Ok(())
     }
 

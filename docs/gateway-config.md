@@ -34,7 +34,8 @@ admin_claim = "wayfinder_admin"
 ```
 
 `oidc` requires a signed RS256 bearer JWT for `/router/*`, `/metrics`,
-`/v1/savings`, `/savings`, `/v1/value`, `/value`, and configuration mutation.
+`/v1/savings`, `/savings`, `/v1/value`, `/value`, outcome labels/proposals, and
+configuration mutation.
 The token must have the
 configured issuer and audience, a live `exp`, a non-empty subject, and a truthy
 configured admin claim (`true`, `admin`, or `operator`, including in a list).
@@ -47,7 +48,7 @@ fail closed. See [WF-ADR-0057](../decisions/WF-ADR-0057-operator-oidc-auth.md).
 When the native CLI serves the gateway, operator events are appended to
 `wayfinder-audit.jsonl` beside the selected configuration. Override the path
 with `WAYFINDER_ROUTER_AUDIT_FILE`. Records cover configuration reloads,
-operator-auth failures, and routing/savings/project-value exports; they contain only a
+operator-auth failures, outcome labels/proposals, and routing/savings/project-value exports; they contain only a
 bounded actor, action, timestamp, UUID, content digest, and sanitized metadata.
 Prompt and provider payloads are never written. One bounded ordered worker
 acknowledges every configured destination; flush and shutdown durably synchronize
@@ -222,6 +223,8 @@ verification. See
 | `GET /router` | read-only dashboard of recent decisions, with `X-Wayfinder-Debug: true` surfacing one in the body |
 | `GET /v1/savings?period=today\|7d\|30d\|all` | realized vs always-frontier cost and the savings between them, per route (WF-DESIGN-0007) |
 | `GET /v1/value?workspace=<id>&period=...` | prompt-free per-project accounting plus bounded actual delivery outcomes; accepts `today`, `7d`, `30d`, or `all`, defaults to 30 days, and exposes price, baseline, denominator, and missing-evidence limits (WF-ADR-0082) |
+| `POST /v1/outcomes` | attach a bounded explicit `success`, `correction`, or `failure` to one retained terminal workspace receipt without accepting free-form or request content (WF-ADR-0085) |
+| `GET /v1/outcomes/policy?workspace=<id>` | review-only `wf-local-outcome-policy-v1` report that can propose a narrower local score range but never edit or activate policy (WF-ADR-0085) |
 | `GET /v1/evidence` / `GET /v1/evidence.txt` | quality/efficiency report over bounded shadow records; below the minimum decisive sample or with conflicting provenance it returns `keep-shadowing` rather than claiming significance (WF-ADR-0064) |
 | `WAYFINDER_ROUTER_SAVINGS_FILE` | where the savings ledger is persisted (default `<config-dir>/wayfinder-savings.json`) |
 
@@ -305,9 +308,9 @@ separate:
   200-entry recent ring. It reports actual on-device, local-network, hosted,
   and unknown boundaries plus terminal successes, failures, cancellations,
   cache hits, in-progress requests, and delivery-unobserved selections.
-- `quality` states that user corrections are not collected by this schema.
-  `correction_rate_pct` is therefore `null`; no correction is ever inferred
-  from missing evidence.
+- `quality` reports explicit outcome-label coverage plus correction and failure
+  rates over labelled retained receipts. Rates remain `null` when no explicit
+  label exists; no success or correction is inferred from missing evidence.
 
 `baseline` identifies the `dearest-configured-rate` counterfactual already used
 by savings arithmetic, every route currently tied at that rate, its unit, and
@@ -317,6 +320,39 @@ is explicit in `limitations`. When no real `cost_per_1k` values are configured,
 amounts are clearly marked `relative`. The endpoint is operator-authenticated,
 audit-recorded, prompt-free, and read-only; it never changes project policy or
 Automatic eligibility (WF-ADR-0082).
+
+## Prompt-free outcome labels and policy proposals
+
+`wayfinder-router capabilities --json` advertises the
+`wf-outcome-label-v1` and `wf-local-outcome-policy-v1` contracts, including
+their canonical endpoints and review-only safety boundary.
+
+The local operator surface accepts only the versioned body below at
+`POST /v1/outcomes` (plus `/outcomes` and `/router/outcomes`):
+
+```json
+{
+  "schema_version": "wf-outcome-label-v1",
+  "workspace_id": "project-a",
+  "request_id": "abcdef123456",
+  "outcome": "correction"
+}
+```
+
+The request ID must name a terminal receipt still retained for that exact
+workspace. Unknown fields and free-form content are rejected. Labels share the
+receipt ring's 200-entry, process-local retention and disappear with eviction
+or restart.
+
+`GET /v1/outcomes/policy?workspace=project-a` returns a structured, review-only
+comparison for a scored two-tier local/hosted policy. Only labels where the
+selected tier and actual execution boundary agree are actionable. Cross-tier
+fallback is counted as confounded, including a hosted selection served by a
+local fallback. A negative local outcome can propose lowering the inclusive
+hosted threshold, which narrows local routing; the report counts labelled local
+successes that would also move. It cannot expand local routing, alter a
+classifier, write configuration, activate policy, or trigger reload
+(WF-ADR-0085).
 
 ## Privacy and capability eligibility
 
