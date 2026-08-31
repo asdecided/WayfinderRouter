@@ -8,6 +8,18 @@ details, release history over commit history.
 
 ### Added
 
+- **Operator-owned local runtime proof** (WF-ADR-0086). Local discovery and
+  first-inference checks distinguish configured from genuinely proven delivery;
+  mocks validate only the contract and never stand in for loaded-model evidence.
+
+- **Proven local first run** (WF-ADR-0087, issue #207). The Router can discover
+  model IDs only from fixed literal-loopback runtime catalogs and run one fixed
+  public inference probe. The versioned probe succeeds only when the matching
+  bounded receipt proves a terminal on-device or local-network delivery; it
+  emits no response text, credentials, repository paths, tool arguments, or
+  private reasoning and never installs, pulls, selects, or activates a model
+  silently.
+
 - **Prompt-free outcomes and review-only local policy proposals** (WF-ADR-0085,
   issue #207). Authenticated local operators can attach an explicit success,
   correction, or failure to a retained terminal workspace receipt without

@@ -7,7 +7,26 @@ the selected destination.
 
 ## Start Wayfinder
 
-From a directory that does not already contain `wayfinder-router.toml`:
+For an honest local-only first run, discover only the supported fixed-loopback runtime catalogs and review one candidate:
+
+```sh
+wayfinder-router local discover --json
+wayfinder-router init --preset local \
+  --endpoint http://127.0.0.1:11434/v1 \
+  --model qwen2.5-coder:7b
+wayfinder-router doctor
+wayfinder-router serve
+```
+
+In another terminal, prove one real delivery through the running Router:
+
+```sh
+wayfinder-router local probe --model local --json
+```
+
+Discovery never scans arbitrary ports, installs a runtime, pulls a model, selects a candidate, or writes configuration. `init` retains its no-clobber contract. The fixed public probe reports `passed` only when its matching bounded receipt proves a successful on-device or local-network execution; it does not emit the request or response text. An empty candidate list means that no supported fixed-loopback catalog answered, not that the machine has no local runtime.
+
+For a two-arm local/hosted policy, start from a directory that does not already contain `wayfinder-router.toml`:
 
 ```sh
 wayfinder-router init --preset hybrid
