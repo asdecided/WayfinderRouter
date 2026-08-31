@@ -47,11 +47,11 @@ PATH="/usr/bin:/bin" \
 
 router="$test_home/bin/wayfinder-router"
 test -x "$router"
-"$router" --version | grep -F "2026.8.1"
+"$router" --version | grep -F "1.0.0"
 
 provenance="$test_home/.local/state/wayfinder/omarchy-router-install"
 test -f "$provenance"
-grep -F "router_version=2026.8.1" "$provenance"
+grep -F "router_version=1.0.0" "$provenance"
 grep -F "router_path=$router" "$provenance"
 
 plugin_dir="$test_home/config/omarchy/plugins/io.github.asdecided.wayfinder"

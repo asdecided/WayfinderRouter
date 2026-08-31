@@ -44,7 +44,7 @@ assert.equal(model.doctor("not-json").valid, false);
 const capabilityReport = model.capabilities(JSON.stringify({
   schema_version: "1",
   implementation: "rust",
-  version: "2026.8.1",
+  version: "1.0.0",
   native_commands: ["project setup", "project status", "project rollback"]
 }));
 assert.equal(capabilityReport.valid, true);
@@ -103,6 +103,100 @@ assert.equal(model.projectState({ configured: true, capabilityChecked: true, sup
 assert.equal(model.validProjectToken("correct horse battery staple"), true);
 assert.equal(model.validProjectToken("bad\nsecret"), false);
 assert.equal(model.projectError("Wayfinder project token (input is not persisted):\nwayfinder-router: failed"), "wayfinder-router: failed");
+
+const projectValuePayload = {
+  schema_version: "wf-project-value-v1",
+  workspace_id: "project-abc",
+  generated_at_ts: 1788041000,
+  accounting: {
+    period_days: 30,
+    through_utc: "2026-08-29",
+    first_observed_utc: "2026-08-20",
+    last_observed_utc: "2026-08-29",
+    attribution_scope: "workspace-attributed-requests-recorded-after-schema-activation",
+    unit: "usd",
+    priced: true,
+    requests: 4,
+    estimated_requests: 1,
+    tokens: 8000,
+    realized: 0.04,
+    baseline: 0.08,
+    saved: 0.04,
+    saved_pct: 50,
+    by_route: { local: { requests: 3 }, cloud: { requests: 1 } }
+  },
+  delivery: {
+    retention: "process-local-bounded-shared-ring",
+    shared_capacity: 200,
+    retained: 5,
+    first_observed_ts: 1788030000,
+    last_observed_ts: 1788040000,
+    terminal: 4,
+    succeeded: 2,
+    failed: 1,
+    cancelled: 0,
+    cache_hits: 1,
+    in_progress: 1,
+    delivery_unobserved: 0,
+    failure_rate_pct: 25,
+    boundaries: { on_device: 2, local_network: 1, hosted: 1, unknown: 1 },
+    by_route: { local: 3, cloud: 2 }
+  },
+  quality: {
+    status: "not-collected",
+    eligible_receipts: 4,
+    labelled_receipts: 0,
+    coverage_pct: 0,
+    correction_rate_pct: null,
+    reason: "explicit user outcome labels are not collected by this schema"
+  },
+  baseline: {
+    kind: "dearest-configured-rate",
+    routes: ["cloud"],
+    rate_per_1k: 0.01,
+    unit: "usd",
+    price_table_version: "abcdef012345"
+  },
+  limitations: ["delivery evidence is bounded to the current process shared ring"]
+};
+const projectValue = model.projectValue(JSON.stringify(projectValuePayload));
+assert.equal(projectValue.valid, true);
+assert.equal(projectValue.workspaceId, "project-abc");
+assert.equal(projectValue.accounting.estimatedRequests, 1);
+assert.equal(projectValue.delivery.failureRatePct, 25);
+assert.equal(projectValue.quality.correctionRatePct, null);
+assert.equal(model.projectValueWindow(projectValue), "30 DAYS");
+assert.equal(model.projectValueSavingsLabel(projectValue), "$0.04 saved");
+assert.equal(model.projectFailureLabel(projectValue), "25.0% delivery failures");
+assert.equal(model.projectQualityLabel(projectValue), "Corrections not collected · 0 / 4 labelled");
+assert.equal(model.projectBaselineLabel(projectValue), "$0.0100/1k current baseline · cloud · prices abcdef01");
+assert.match(model.projectValueRemediation(projectValue), /1 recent delivery failure needs attention/);
+assert.deepEqual(
+  JSON.parse(JSON.stringify(model.projectBoundaryStats(projectValue))),
+  {
+    onDevice: 2,
+    localNetwork: 1,
+    local: 3,
+    hosted: 1,
+    unknown: 1,
+    total: 5,
+    onDeviceFraction: 0.4,
+    localNetworkFraction: 0.2,
+    hostedFraction: 0.2,
+    unknownFraction: 0.2
+  }
+);
+assert.equal(model.projectValue('{"schema_version":"wrong"}').valid, false);
+const aboveBaselinePayload = structuredClone(projectValuePayload);
+aboveBaselinePayload.accounting.saved = -0.02;
+aboveBaselinePayload.accounting.saved_pct = -25;
+assert.equal(
+  model.projectValueSavingsLabel(model.projectValue(JSON.stringify(aboveBaselinePayload))),
+  "$0.02 above baseline"
+);
+const missingCorrectionField = structuredClone(projectValuePayload);
+delete missingCorrectionField.quality.correction_rate_pct;
+assert.equal(model.projectValue(JSON.stringify(missingCorrectionField)).valid, false);
 
 const setupBase = {
   localEndpoint: true,
@@ -172,6 +266,7 @@ const parsedRecent = model.recent(JSON.stringify({
     outcome: "failed",
     http_status: 502,
     error_type: "wayfinder_router_upstream_error",
+    workspace: "project-abc",
     ts: 1700000000
   }]
 }));
@@ -189,6 +284,8 @@ assert.match(model.receiptDetail(parsedRecent.recent[0]), /HOSTED · PROFILE wor
 assert.match(model.receiptDetail(parsedRecent.recent[0]), /Selected local · Automatic · score 0.20/);
 assert.equal(model.receiptNeedsAttention(parsedRecent.recent[0]), true);
 assert.equal(model.latestActionableReceipt(parsedRecent.recent), parsedRecent.recent[0]);
+assert.equal(model.workspaceReceipts(parsedRecent, "project-abc", 4, true).length, 1);
+assert.equal(model.workspaceReceipts(parsedRecent, "other-project", 4, true).length, 0);
 assert.equal(
   model.receiptRemediation(parsedRecent.recent[0]),
   "Retry, then inspect Router logs if it repeats."

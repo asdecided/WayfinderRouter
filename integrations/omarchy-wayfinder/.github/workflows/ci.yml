@@ -73,7 +73,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: asdecided/WayfinderRouter
-          ref: d7052c87e7296e06f5ea8072ada090982edb0f8b
+          ref: 536cb6bb299e80b54f7cd0ee77260aab8bb63973
           path: .router-source
       - uses: actions/setup-node@v4
         with:

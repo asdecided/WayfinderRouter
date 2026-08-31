@@ -10,17 +10,19 @@ the choice.
 Install the flagship Omarchy experience:
 
 ```sh
-omarchy plugin add https://github.com/asdecided/omarchy-wayfinder.git
-cd ~/.config/omarchy/plugins/io.github.asdecided.wayfinder
-./install.sh
-wayfinder-router local discover --json
-wayfinder-router init --preset local --endpoint http://127.0.0.1:11434/v1 --model qwen2.5-coder:7b
-wayfinder-router doctor
-wayfinder-router serve
-wayfinder-router local probe --model local --json
+omarchy plugin add https://github.com/asdecided/omarchy-wayfinder.git --enable
 ```
 
-Choose the endpoint and model from the discovery output rather than copying the example blindly. Discovery touches only fixed loopback catalogs and never installs or pulls a model; setup is not complete until the fixed public inference probe returns a local execution receipt.
+Open Wayfinder in the Omarchy bar and choose **Set up Wayfinder**. The native
+flow installs the checksum-pinned Router when it is missing, creates a
+no-clobber local policy, validates it, and installs and starts the user service.
+It needs no Rust, Cargo, hand-written unit file, or copied endpoint.
+
+When a local runtime is present, the Router discovers model IDs only from fixed
+loopback catalogs and proves a loaded model with one bounded public inference
+probe. It never downloads, pulls, selects, or activates a model silently. If a
+provider requirement is missing, the panel names the requirement and the next
+safe action.
 
 Point Codex, Claude Code, OpenCode, Pi, or Aider at the same loopback policy with
 `wayfinder-router connect <client>`. See the

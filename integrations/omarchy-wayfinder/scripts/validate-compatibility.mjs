@@ -34,6 +34,8 @@ assert.equal(compatibility.quickshell.package, "quickshell");
 assert.match(compatibility.quickshell.versionFloor, semver);
 assert.match(compatibility.quickshell.contractCommit, fullCommit);
 assert.match(compatibility.router.release, semver);
+assert.equal(compatibility.router.tag, `router-v${compatibility.router.release}`);
+assert.match(compatibility.router.sourceCommit, fullCommit);
 assert.equal(compatibility.router.libc, "glibc");
 assert.deepEqual(compatibility.router.architectures, [
   "x86_64-unknown-linux-gnu",
@@ -47,7 +49,15 @@ const installerVersion = installer.match(
 assert.equal(installerVersion, compatibility.router.release);
 for (const target of compatibility.router.architectures) {
   const architecture = target.split("-")[0];
-  assert.ok(installer.includes(`router_sha256_${architecture}=`), `missing ${architecture} digest`);
+  const asset = compatibility.router.assets[target];
+  const expectedUrl = `https://github.com/asdecided/WayfinderRouter/releases/download/`
+    + `${compatibility.router.tag}/wayfinder-router-${target}.tar.gz`;
+  assert.equal(asset.url, expectedUrl);
+  assert.match(asset.sha256, /^[0-9a-f]{64}$/);
+  assert.ok(
+    installer.includes(`router_sha256_${architecture}="${asset.sha256}"`),
+    `installer must pin the reviewed ${architecture} archive digest`
+  );
 }
 
 const agents = new Map(compatibility.codingAgents.map(agent => [agent.id, agent]));
@@ -63,6 +73,10 @@ assert.ok(workflow.includes(`opencode-linux-x64@${agents.get("opencode")?.versio
 assert.ok(workflow.includes(`@earendil-works/pi-coding-agent@${agents.get("pi")?.version}`));
 assert.ok(workflow.includes(`aider-chat==${agents.get("aider")?.version}`));
 assert.ok(workflow.includes("compatibility.json"), "CI must read the Omarchy compatibility pin");
+assert.ok(
+  workflow.includes(`ref: ${compatibility.router.sourceCommit}`),
+  "coding-agent contracts must build the released Router source commit"
+);
 
 assert.equal(compatibility.lifecycle.freshInstall, "release-gated");
 assert.equal(compatibility.lifecycle.standardInstallation, "contract-validated");

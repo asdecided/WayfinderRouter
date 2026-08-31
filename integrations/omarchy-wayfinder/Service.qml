@@ -55,6 +55,9 @@ Item {
   property var modelDetails: []
   property var recentReport: ({ valid: false, total: 0, byModel: {}, recent: [] })
   property var savingsReport: ({ valid: false, requests: 0, saved: 0, savedPct: 0, unit: "relative", priced: false })
+  property bool projectValueChecked: false
+  property var projectValueReport: Model.emptyProjectValue()
+  property string projectValueError: ""
   readonly property var routingStats: Model.routingStats(recentReport, modelDetails)
 
   property string lastError: ""
@@ -69,8 +72,9 @@ Item {
     || recentProcess.running || savingsProcess.running || actionProcess.running
     || defaultConfigProcess.running || configProbeProcess.running || doctorProcess.running
     || capabilityProcess.running || projectStatusProcess.running || projectActionProcess.running
+    || projectValueProcess.running
   readonly property bool projectBusy: capabilityProcess.running || projectStatusProcess.running
-    || projectActionProcess.running
+    || projectActionProcess.running || projectValueProcess.running
   readonly property bool localEndpoint: Model.serviceInstallArguments(endpoint, effectiveConfigPath) !== null
   readonly property var setupState: Model.setupState({
     localEndpoint: localEndpoint,
@@ -127,6 +131,7 @@ Item {
       doctorOk = false
       doctorMissingEnvironment = []
       doctorError = ""
+      resetProjectValue()
       Qt.callLater(refresh)
     }
     if (projectChanged) {
@@ -134,6 +139,7 @@ Item {
       projectReport = Model.emptyProjectStatus()
       projectError = ""
       projectMessage = ""
+      resetProjectValue()
       if (projectSupported && projectRoot !== "") Qt.callLater(refreshProject)
     }
   }
@@ -166,6 +172,7 @@ Item {
     }
     if (binaryInstalled && !capabilityChecked && !capabilityProcess.running) refreshCapabilities()
     if (projectSupported && projectRoot !== "" && !projectActionProcess.running) refreshProject()
+    if (projectState.ready && projectReport.workspaceId !== "") refreshProjectValue()
   }
 
   function probeConfig() {
@@ -259,6 +266,21 @@ Item {
         || projectStatusProcess.running || projectActionProcess.running) return
     projectStatusProcess.command = [binaryPath, "project", "status", "--root", projectRoot, "--json"]
     projectStatusProcess.running = true
+  }
+
+  function resetProjectValue() {
+    projectValueChecked = false
+    projectValueReport = Model.emptyProjectValue()
+    projectValueError = ""
+  }
+
+  function refreshProjectValue() {
+    if (!reachable || !projectState.ready || projectReport.workspaceId === ""
+        || projectValueProcess.running || projectStatusProcess.running
+        || projectActionProcess.running) return
+    var workspace = encodeURIComponent(String(projectReport.workspaceId))
+    projectValueProcess.command = curlCommand("/v1/value?workspace=" + workspace + "&period=30d")
+    projectValueProcess.running = true
   }
 
   function setupProject(token) {
@@ -503,6 +525,7 @@ Item {
       if (!root.projectSupported) {
         root.projectChecked = false
         root.projectReport = Model.emptyProjectStatus()
+        root.resetProjectValue()
       } else if (root.projectRoot !== "") {
         Qt.callLater(root.refreshProject)
       }
@@ -525,8 +548,14 @@ Item {
         var report = Model.projectStatus(projectStatusStdout.text)
         root.projectReport = report
         root.projectError = report.valid ? "" : "The Router returned an invalid project status."
+        if (report.valid && !report.setupRequired && report.workspaceId !== "") {
+          Qt.callLater(root.refreshProjectValue)
+        } else {
+          root.resetProjectValue()
+        }
       } else {
         root.projectReport = Model.emptyProjectStatus()
+        root.resetProjectValue()
         var detail = Model.projectError(projectStatusStderr.text || projectStatusStdout.text)
         root.projectError = detail || "The repository could not be inspected."
       }
@@ -562,16 +591,54 @@ Item {
             ? "Owned project state rolled back."
             : (report.status === "unchanged" ? "Project profile already active."
               : "Project profile created; the Router will hot reload it.")
+          if (!report.setupRequired && report.workspaceId !== "") {
+            Qt.callLater(root.refreshProjectValue)
+          } else {
+            root.resetProjectValue()
+          }
         } else {
           root.projectReport = Model.emptyProjectStatus()
+          root.resetProjectValue()
           root.projectMessage = ""
           root.projectError = "The Router returned an invalid project result."
         }
       } else {
         root.projectMessage = ""
+        root.resetProjectValue()
         var detail = Model.projectError(projectActionStderr.text || projectActionStdout.text)
         root.projectError = detail || (root.projectActionKind === "project-rollback"
           ? "Project rollback failed." : "Project setup failed.")
+      }
+    }
+  }
+
+  Process {
+    id: projectValueProcess
+    stdout: StdioCollector {
+      id: projectValueStdout
+      waitForEnd: true
+    }
+    stderr: StdioCollector {
+      id: projectValueStderr
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      root.projectValueChecked = true
+      if (exitCode === 0) {
+        var report = Model.projectValue(projectValueStdout.text)
+        if (report.valid && report.workspaceId === root.projectReport.workspaceId) {
+          root.projectValueReport = report
+          root.projectValueError = ""
+        } else {
+          root.projectValueReport = Model.emptyProjectValue()
+          root.projectValueError = "The Router returned an invalid project value report."
+        }
+      } else {
+        root.projectValueReport = Model.emptyProjectValue()
+        var detail = String(projectValueStderr.text || "").replace(/\s+/g, " ").trim()
+        root.projectValueError = detail.indexOf("401") !== -1 || detail.indexOf("403") !== -1
+          ? "Project value metadata requires operator access."
+          : "Project value reporting is unavailable from this Router."
       }
     }
   }

@@ -17,8 +17,14 @@ BarWidget {
   readonly property color statusColor: !wayfinder || !wayfinder.reachable
     ? Color.urgent
     : (wayfinder.degraded ? Color.urgent : Color.accent)
+  readonly property var projectValue: wayfinder
+    ? wayfinder.projectValueReport : Model.emptyProjectValue()
+  readonly property bool scopedProjectValue: !!wayfinder && wayfinder.projectState.ready
+    && projectValue.valid
+  readonly property var projectBoundaries: Model.projectBoundaryStats(projectValue)
   readonly property var recentEntries: wayfinder && wayfinder.recentReport.valid
-    ? wayfinder.recentReport.recent.slice(0, 4) : []
+    ? Model.workspaceReceipts(wayfinder.recentReport,
+      wayfinder.projectReport.workspaceId, scopedProjectValue ? 3 : 4, scopedProjectValue) : []
   readonly property var actionableReceipt: Model.latestActionableReceipt(recentEntries)
   readonly property var visibleModels: wayfinder ? wayfinder.modelDetails.slice(0, 5) : []
 
@@ -70,21 +76,10 @@ BarWidget {
     wayfinder.rollbackProject()
   }
 
-  function modelFor(name) {
-    if (!wayfinder) return null
-    for (var i = 0; i < wayfinder.modelDetails.length; i++) {
-      if (wayfinder.modelDetails[i].name === name) return wayfinder.modelDetails[i]
-    }
-    return null
-  }
-
-  function routeColor(name) {
-    var model = modelFor(name)
-    return model && Model.isLocalModel(model) ? Color.accent : foreground
-  }
-
   function receiptColor(entry) {
-    return Model.receiptNeedsAttention(entry) ? Color.urgent : routeColor(entry.servedBy || entry.model)
+    if (Model.receiptNeedsAttention(entry)) return Color.urgent
+    var boundary = String(entry && entry.executionBoundary || "")
+    return boundary === "on-device" || boundary === "local-network" ? Color.accent : foreground
   }
 
   function actionDetail() {
@@ -369,6 +364,204 @@ BarWidget {
 
       Column {
         width: parent.width
+        visible: !!root.wayfinder && root.wayfinder.projectState.ready
+        spacing: Style.space(6)
+
+        Row {
+          width: parent.width
+
+          Text {
+            text: "PROJECT VALUE"
+            color: Qt.darker(root.foreground, 1.5)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            font.letterSpacing: 1.1
+          }
+
+          Item {
+            width: Math.max(0, parent.width - parent.children[0].implicitWidth
+              - projectValueWindow.implicitWidth)
+            height: 1
+          }
+
+          Text {
+            id: projectValueWindow
+            text: Model.projectValueWindow(root.projectValue)
+            color: root.projectValue.valid ? Qt.darker(root.foreground, 1.5) : Color.urgent
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+          }
+        }
+
+        Column {
+          width: parent.width
+          visible: !root.projectValue.valid
+          spacing: Style.space(2)
+
+          Text {
+            text: root.wayfinder && !root.wayfinder.projectValueChecked
+              ? "Loading project value…" : "Project value report unavailable"
+            color: root.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+          }
+
+          Text {
+            width: parent.width
+            text: root.wayfinder && root.wayfinder.projectValueError !== ""
+              ? root.wayfinder.projectValueError
+              : "This panel requires the Router's wf-project-value-v1 contract."
+            color: root.wayfinder && root.wayfinder.projectValueChecked
+              ? Color.urgent : Qt.darker(root.foreground, 1.5)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.Wrap
+          }
+        }
+
+        Row {
+          width: parent.width
+          visible: root.projectValue.valid
+          spacing: Style.space(12)
+
+          Column {
+            width: (parent.width - Style.space(12)) / 2
+            spacing: Style.space(1)
+            Text {
+              text: Model.projectValueSavingsLabel(root.projectValue)
+              color: root.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.subtitle
+              font.bold: true
+            }
+            Text {
+              text: root.projectValue.accounting.requests + " accounted"
+                + (root.projectValue.accounting.estimatedRequests > 0
+                  ? " · " + root.projectValue.accounting.estimatedRequests + " estimated" : "")
+              color: Qt.darker(root.foreground, 1.55)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+
+          Column {
+            width: (parent.width - Style.space(12)) / 2
+            spacing: Style.space(1)
+            Text {
+              text: Model.projectFailureLabel(root.projectValue)
+              color: root.projectValue.delivery.failed > 0 ? Color.urgent : root.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.subtitle
+              font.bold: true
+            }
+            Text {
+              text: root.projectValue.delivery.terminal + " terminal · "
+                + root.projectValue.delivery.retained + " retained"
+              color: Qt.darker(root.foreground, 1.55)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+        }
+
+        Rectangle {
+          id: projectBoundaryBar
+          width: parent.width
+          height: Style.space(6)
+          radius: height / 2
+          visible: root.projectValue.valid
+          color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12)
+          clip: true
+
+          Row {
+            anchors.fill: parent
+            Rectangle {
+              width: projectBoundaryBar.width * root.projectBoundaries.onDeviceFraction
+              height: parent.height
+              color: Color.accent
+            }
+            Rectangle {
+              width: projectBoundaryBar.width * root.projectBoundaries.localNetworkFraction
+              height: parent.height
+              color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.55)
+            }
+            Rectangle {
+              width: projectBoundaryBar.width * root.projectBoundaries.hostedFraction
+              height: parent.height
+              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.8)
+            }
+            Rectangle {
+              width: projectBoundaryBar.width * root.projectBoundaries.unknownFraction
+              height: parent.height
+              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.24)
+            }
+          }
+        }
+
+        Row {
+          width: parent.width
+          visible: root.projectValue.valid
+          Text {
+            text: "On device " + root.projectBoundaries.onDevice
+              + " · LAN " + root.projectBoundaries.localNetwork
+            color: Color.accent
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+          Item {
+            width: Math.max(0, parent.width - parent.children[0].implicitWidth
+              - projectHostedLabel.implicitWidth)
+            height: 1
+          }
+          Text {
+            id: projectHostedLabel
+            text: "Hosted " + root.projectBoundaries.hosted
+              + (root.projectBoundaries.unknown > 0 ? " · ? " + root.projectBoundaries.unknown : "")
+            color: root.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+
+        Text {
+          width: parent.width
+          visible: root.projectValue.valid
+          text: Model.projectBaselineLabel(root.projectValue)
+          color: Qt.darker(root.foreground, 1.55)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+
+        Text {
+          width: parent.width
+          visible: root.projectValue.valid
+          text: Model.projectQualityLabel(root.projectValue)
+          color: Qt.darker(root.foreground, 1.55)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+
+        Text {
+          width: parent.width
+          visible: root.projectValue.valid
+            && Model.projectValueRemediation(root.projectValue) !== ""
+          text: Model.projectValueRemediation(root.projectValue)
+          color: root.projectValue.delivery.failed > 0
+            ? Color.urgent : Qt.darker(root.foreground, 1.45)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.Wrap
+        }
+      }
+
+      Column {
+        width: parent.width
+        visible: !root.wayfinder || !root.wayfinder.projectState.ready || !root.projectValue.valid
         spacing: Style.space(7)
 
         Row {
@@ -429,6 +622,16 @@ BarWidget {
         width: parent.width
         visible: root.recentEntries.length > 0
         spacing: Style.space(7)
+
+        Text {
+          visible: root.scopedProjectValue
+          text: "PROJECT RECEIPTS"
+          color: Qt.darker(root.foreground, 1.5)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          font.letterSpacing: 1.1
+        }
 
         Repeater {
           model: root.recentEntries
@@ -528,7 +731,7 @@ BarWidget {
           width: (parent.width - Style.space(12)) / 2
           spacing: Style.space(2)
           Text {
-            text: "SAVINGS"
+            text: "ALL SAVINGS"
             color: Qt.darker(root.foreground, 1.5)
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.caption
@@ -544,7 +747,7 @@ BarWidget {
           }
           Text {
             text: root.wayfinder && root.wayfinder.savingsReport.valid
-              ? root.wayfinder.savingsReport.requests + " accounted requests" : "Waiting for gateway"
+              ? root.wayfinder.savingsReport.requests + " router-wide requests" : "Waiting for gateway"
             color: Qt.darker(root.foreground, 1.55)
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.caption

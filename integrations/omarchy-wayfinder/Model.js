@@ -85,6 +85,187 @@ function emptyProjectStatus() {
   }
 }
 
+function emptyProjectValue() {
+  return {
+    valid: false,
+    workspaceId: "",
+    generatedAt: 0,
+    accounting: {
+      periodDays: null,
+      throughUtc: "",
+      firstObservedUtc: "",
+      lastObservedUtc: "",
+      attributionScope: "",
+      unit: "relative",
+      priced: false,
+      requests: 0,
+      estimatedRequests: 0,
+      tokens: 0,
+      realized: 0,
+      baseline: 0,
+      saved: 0,
+      savedPct: 0,
+      byRoute: {}
+    },
+    delivery: {
+      retention: "",
+      sharedCapacity: 0,
+      retained: 0,
+      firstObservedTs: null,
+      lastObservedTs: null,
+      terminal: 0,
+      succeeded: 0,
+      failed: 0,
+      cancelled: 0,
+      cacheHits: 0,
+      inProgress: 0,
+      deliveryUnobserved: 0,
+      failureRatePct: null,
+      boundaries: { onDevice: 0, localNetwork: 0, hosted: 0, unknown: 0 },
+      byRoute: {}
+    },
+    quality: {
+      status: "",
+      eligibleReceipts: 0,
+      labelledReceipts: 0,
+      coveragePct: null,
+      correctionRatePct: null,
+      reason: ""
+    },
+    baseline: { kind: "", routes: [], ratePer1k: 0, unit: "relative", priceTableVersion: "" },
+    limitations: []
+  }
+}
+
+function optionalFinite(value) {
+  if (value === null || value === undefined) return null
+  var number = Number(value)
+  return isFinite(number) ? number : null
+}
+
+function projectValue(raw) {
+  var value = parsedObject(raw)
+  var accounting = value && value.accounting
+  var delivery = value && value.delivery
+  var quality = value && value.quality
+  var baseline = value && value.baseline
+  var boundaries = delivery && delivery.boundaries
+  if (!value || String(value.schema_version || "") !== "wf-project-value-v1"
+      || String(value.workspace_id || "") === ""
+      || !accounting || typeof accounting !== "object" || Array.isArray(accounting)
+      || !delivery || typeof delivery !== "object" || Array.isArray(delivery)
+      || !quality || typeof quality !== "object" || Array.isArray(quality)
+      || !baseline || typeof baseline !== "object" || Array.isArray(baseline)
+      || !boundaries || typeof boundaries !== "object" || Array.isArray(boundaries)
+      || typeof accounting.priced !== "boolean"
+      || !accounting.by_route || typeof accounting.by_route !== "object"
+      || Array.isArray(accounting.by_route)
+      || !delivery.by_route || typeof delivery.by_route !== "object"
+      || Array.isArray(delivery.by_route)
+      || !Array.isArray(baseline.routes) || !Array.isArray(value.limitations)) {
+    return emptyProjectValue()
+  }
+  var requiredNumbers = [
+    value.generated_at_ts,
+    accounting.requests,
+    accounting.estimated_requests,
+    accounting.tokens,
+    accounting.realized,
+    accounting.baseline,
+    accounting.saved,
+    accounting.saved_pct,
+    delivery.shared_capacity,
+    delivery.retained,
+    delivery.terminal,
+    delivery.succeeded,
+    delivery.failed,
+    delivery.cancelled,
+    delivery.cache_hits,
+    delivery.in_progress,
+    delivery.delivery_unobserved,
+    boundaries.on_device,
+    boundaries.local_network,
+    boundaries.hosted,
+    boundaries.unknown,
+    quality.eligible_receipts,
+    quality.labelled_receipts,
+    baseline.rate_per_1k
+  ]
+  for (var index = 0; index < requiredNumbers.length; index++) {
+    if (typeof requiredNumbers[index] !== "number" || !isFinite(requiredNumbers[index])) {
+      return emptyProjectValue()
+    }
+  }
+  var periodDays = optionalFinite(accounting.period_days)
+  if (accounting.period_days !== null && periodDays === null) return emptyProjectValue()
+  var failureRatePct = optionalFinite(delivery.failure_rate_pct)
+  var coveragePct = optionalFinite(quality.coverage_pct)
+  var correctionRatePct = optionalFinite(quality.correction_rate_pct)
+  if (delivery.failure_rate_pct !== null && failureRatePct === null) return emptyProjectValue()
+  if (quality.coverage_pct !== null && coveragePct === null) return emptyProjectValue()
+  if (quality.correction_rate_pct !== null && correctionRatePct === null) return emptyProjectValue()
+  return {
+    valid: true,
+    workspaceId: String(value.workspace_id),
+    generatedAt: Number(value.generated_at_ts),
+    accounting: {
+      periodDays: periodDays,
+      throughUtc: String(accounting.through_utc || ""),
+      firstObservedUtc: String(accounting.first_observed_utc || ""),
+      lastObservedUtc: String(accounting.last_observed_utc || ""),
+      attributionScope: String(accounting.attribution_scope || ""),
+      unit: String(accounting.unit || "relative"),
+      priced: accounting.priced === true,
+      requests: Math.max(0, Number(accounting.requests)),
+      estimatedRequests: Math.max(0, Number(accounting.estimated_requests)),
+      tokens: Math.max(0, Number(accounting.tokens)),
+      realized: Number(accounting.realized),
+      baseline: Number(accounting.baseline),
+      saved: Number(accounting.saved),
+      savedPct: Number(accounting.saved_pct),
+      byRoute: accounting.by_route
+    },
+    delivery: {
+      retention: String(delivery.retention || ""),
+      sharedCapacity: Math.max(0, Number(delivery.shared_capacity)),
+      retained: Math.max(0, Number(delivery.retained)),
+      firstObservedTs: optionalFinite(delivery.first_observed_ts),
+      lastObservedTs: optionalFinite(delivery.last_observed_ts),
+      terminal: Math.max(0, Number(delivery.terminal)),
+      succeeded: Math.max(0, Number(delivery.succeeded)),
+      failed: Math.max(0, Number(delivery.failed)),
+      cancelled: Math.max(0, Number(delivery.cancelled)),
+      cacheHits: Math.max(0, Number(delivery.cache_hits)),
+      inProgress: Math.max(0, Number(delivery.in_progress)),
+      deliveryUnobserved: Math.max(0, Number(delivery.delivery_unobserved)),
+      failureRatePct: failureRatePct,
+      boundaries: {
+        onDevice: Math.max(0, Number(boundaries.on_device)),
+        localNetwork: Math.max(0, Number(boundaries.local_network)),
+        hosted: Math.max(0, Number(boundaries.hosted)),
+        unknown: Math.max(0, Number(boundaries.unknown))
+      },
+      byRoute: delivery.by_route
+    },
+    quality: {
+      status: String(quality.status || ""),
+      eligibleReceipts: Math.max(0, Number(quality.eligible_receipts)),
+      labelledReceipts: Math.max(0, Number(quality.labelled_receipts)),
+      coveragePct: coveragePct,
+      correctionRatePct: correctionRatePct,
+      reason: String(quality.reason || "")
+    },
+    baseline: {
+      kind: String(baseline.kind || ""),
+      routes: baseline.routes.map(String),
+      ratePer1k: Number(baseline.rate_per_1k),
+      unit: String(baseline.unit || "relative"),
+      priceTableVersion: String(baseline.price_table_version || "")
+    },
+    limitations: value.limitations.map(String)
+  }
+}
+
 function projectStatus(raw) {
   var value = parsedObject(raw)
   if (!value || Number(value.schema_version) !== 1 || typeof value.status !== "string"
@@ -290,6 +471,7 @@ function recent(raw) {
       saved: item.cost && isFinite(Number(item.cost.saved)) ? Number(item.cost.saved) : null,
       unit: item.cost ? String(item.cost.unit || "") : "",
       estimated: !!(item.cost && item.cost.estimated),
+      workspace: String(item.workspace || ""),
       cache: String(item.cache || "")
     })
   }
@@ -420,6 +602,108 @@ function savings(raw) {
     realized: Number(value.realized || 0),
     baseline: Number(value.baseline || 0)
   }
+}
+
+function workspaceReceipts(report, workspaceId, limit, restrict) {
+  var entries = report && Array.isArray(report.recent) ? report.recent : []
+  var workspace = String(workspaceId || "")
+  var maximum = Math.max(0, Number(limit || 0))
+  var output = []
+  for (var index = 0; index < entries.length; index++) {
+    if (restrict && workspace !== "" && String(entries[index].workspace || "") !== workspace) continue
+    output.push(entries[index])
+    if (maximum > 0 && output.length >= maximum) break
+  }
+  return output
+}
+
+function projectBoundaryStats(report) {
+  var source = report && report.valid && report.delivery && report.delivery.boundaries
+    ? report.delivery.boundaries : { onDevice: 0, localNetwork: 0, hosted: 0, unknown: 0 }
+  var onDevice = Math.max(0, Number(source.onDevice || 0))
+  var localNetwork = Math.max(0, Number(source.localNetwork || 0))
+  var hosted = Math.max(0, Number(source.hosted || 0))
+  var unknown = Math.max(0, Number(source.unknown || 0))
+  var total = onDevice + localNetwork + hosted + unknown
+  return {
+    onDevice: onDevice,
+    localNetwork: localNetwork,
+    local: onDevice + localNetwork,
+    hosted: hosted,
+    unknown: unknown,
+    total: total,
+    onDeviceFraction: total > 0 ? onDevice / total : 0,
+    localNetworkFraction: total > 0 ? localNetwork / total : 0,
+    hostedFraction: total > 0 ? hosted / total : 0,
+    unknownFraction: total > 0 ? unknown / total : 0
+  }
+}
+
+function projectValueWindow(report) {
+  if (!report || !report.valid) return "REPORT UNAVAILABLE"
+  var days = report.accounting.periodDays
+  if (days === null) return "ALL RETAINED"
+  if (days === 1) return "TODAY"
+  return String(days) + " DAYS"
+}
+
+function projectValueSavingsLabel(report) {
+  if (!report || !report.valid || report.accounting.requests === 0) return "No project accounting"
+  if (report.accounting.priced && report.accounting.unit === "usd") {
+    return report.accounting.saved < 0
+      ? "$" + fixed(Math.abs(report.accounting.saved), 2) + " above baseline"
+      : "$" + fixed(report.accounting.saved, 2) + " saved"
+  }
+  return report.accounting.savedPct < 0
+    ? fixed(Math.abs(report.accounting.savedPct), 1) + "% above baseline"
+    : fixed(report.accounting.savedPct, 1) + "% relative savings"
+}
+
+function projectFailureLabel(report) {
+  if (!report || !report.valid || report.delivery.terminal === 0) return "No terminal receipts"
+  if (report.delivery.failureRatePct === null) return "Failure rate unavailable"
+  return fixed(report.delivery.failureRatePct, 1) + "% delivery failures"
+}
+
+function projectQualityLabel(report) {
+  if (!report || !report.valid) return "Quality evidence unavailable"
+  if (report.quality.status === "not-collected") {
+    return report.quality.eligibleReceipts > 0
+      ? "Corrections not collected · 0 / " + report.quality.eligibleReceipts + " labelled"
+      : "Corrections not collected · no eligible receipts"
+  }
+  if (report.quality.coveragePct === null) return "Quality coverage unavailable"
+  return fixed(report.quality.coveragePct, 1) + "% outcome coverage"
+}
+
+function projectBaselineLabel(report) {
+  if (!report || !report.valid) return "Baseline unavailable"
+  var routes = report.baseline.routes.length > 0 ? report.baseline.routes.join(", ") : "no route"
+  var version = report.baseline.priceTableVersion !== ""
+    ? " · prices " + report.baseline.priceTableVersion.substring(0, 8) : ""
+  if (report.accounting.priced && report.baseline.unit === "usd") {
+    return "$" + fixed(report.baseline.ratePer1k, 4) + "/1k current baseline · " + routes + version
+  }
+  return fixed(report.baseline.ratePer1k, 3) + " relative /1k current baseline · " + routes + version
+}
+
+function projectValueRemediation(report) {
+  if (!report || !report.valid) return ""
+  if (report.accounting.requests === 0 && report.delivery.retained === 0) {
+    return "Use this project through Wayfinder to begin a prompt-free value record."
+  }
+  if (report.delivery.failed > 0) {
+    return report.delivery.failed + " recent delivery failure"
+      + (report.delivery.failed === 1 ? " needs" : "s need") + " attention."
+  }
+  if (!report.accounting.priced) {
+    return "Add reviewed cost_per_1k values to turn relative savings into currency."
+  }
+  if (report.accounting.estimatedRequests > 0) {
+    return report.accounting.estimatedRequests + " of " + report.accounting.requests
+      + " accounting records use estimated token counts."
+  }
+  return ""
 }
 
 function isLoopbackEndpoint(endpoint) {
