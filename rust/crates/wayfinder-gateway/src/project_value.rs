@@ -89,7 +89,7 @@ pub struct ProjectBaseline {
     pub price_table_version: String,
 }
 
-/// Deliberately explicit absence of user-reported correction evidence.
+/// Explicit user-reported quality evidence retained with delivery receipts.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ProjectQualityReport {
     /// Current collection state.
@@ -102,7 +102,9 @@ pub struct ProjectQualityReport {
     pub coverage_pct: Option<f64>,
     /// Explicit corrections divided by labelled receipts.
     pub correction_rate_pct: Option<f64>,
-    /// Why quality values are absent.
+    /// Explicit failures divided by labelled receipts.
+    pub failure_rate_pct: Option<f64>,
+    /// Why quality values are present or absent.
     pub reason: &'static str,
 }
 
@@ -119,7 +121,7 @@ pub struct ProjectValueReport {
     pub accounting: ProjectAccountingReport,
     /// Bounded process-local delivery evidence.
     pub delivery: RecentWorkspaceReport,
-    /// Explicitly missing user outcome evidence.
+    /// Explicit prompt-free user outcome evidence.
     pub quality: ProjectQualityReport,
     /// Disclosed counterfactual and price-table identity.
     pub baseline: ProjectBaseline,
@@ -149,21 +151,53 @@ impl ProjectValueReport {
                 }
             })
             .collect();
-        let coverage_pct = (delivery.terminal > 0).then_some(0.0);
+        let coverage_pct = (delivery.terminal > 0).then(|| {
+            wayfinder_routing_core::python_round(
+                100.0 * delivery.user_labelled as f64 / delivery.terminal as f64,
+                1,
+            )
+        });
+        let correction_rate_pct = (delivery.user_labelled > 0).then(|| {
+            wayfinder_routing_core::python_round(
+                100.0 * delivery.user_corrections as f64 / delivery.user_labelled as f64,
+                1,
+            )
+        });
+        let failure_rate_pct = (delivery.user_labelled > 0).then(|| {
+            wayfinder_routing_core::python_round(
+                100.0 * delivery.user_failures as f64 / delivery.user_labelled as f64,
+                1,
+            )
+        });
         let quality = ProjectQualityReport {
-            status: "not-collected",
+            status: if delivery.user_labelled > 0 {
+                "collected"
+            } else {
+                "not-collected"
+            },
             eligible_receipts: delivery.terminal,
-            labelled_receipts: 0,
+            labelled_receipts: delivery.user_labelled,
             coverage_pct,
-            correction_rate_pct: None,
-            reason: "explicit user outcome labels are not collected by this schema",
+            correction_rate_pct,
+            failure_rate_pct,
+            reason: if delivery.user_labelled > 0 {
+                "rates use only explicit prompt-free user outcomes on retained terminal receipts"
+            } else {
+                "no retained terminal receipt has an explicit user outcome label"
+            },
         };
         let mut limitations = vec![
             "pre-activation aggregate accounting has no workspace attribution",
             "delivery evidence is bounded to the current process shared ring",
-            "correction evidence is unavailable until explicit outcome labels exist",
             "historical amounts retain their recorded baseline but not each prior price-table fingerprint",
         ];
+        if delivery.user_labelled == 0 {
+            limitations
+                .push("correction evidence is unavailable until explicit outcome labels exist");
+        } else if delivery.user_labelled < delivery.terminal {
+            limitations
+                .push("user outcome evidence covers only explicitly labelled retained receipts");
+        }
         if accounting.requests == 0 {
             limitations.push("no workspace-attributed accounting exists in this window");
         }

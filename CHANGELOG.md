@@ -8,6 +8,15 @@ details, release history over commit history.
 
 ### Added
 
+- **Prompt-free outcomes and review-only local policy proposals** (WF-ADR-0085,
+  issue #207). Authenticated local operators can attach an explicit success,
+  correction, or failure to a retained terminal workspace receipt without
+  storing prompt, response, tool, repository, credential, or free-form content.
+  Project value reports expose label coverage and correction/failure rates, and
+  a bounded offline report can propose only a narrower local score range. A
+  selected-hosted/served-local result is explicitly confounded rather than
+  actionable lower-tier evidence, and no proposal edits or activates policy.
+
 - **No-write coding-agent launch contract** (WF-ADR-0084). `wayfinder-router
   exec` now validates a ready loopback Router, its Wayfinder-owned `auto`
   model, and the required client wire interface before launching Codex, Claude
