@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.asdecided.wayfinder",
   "name": "Wayfinder",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "author": "Tom Ballard",
   "license": "Apache-2.0",
-  "description": "Native AI model routing with in-panel setup, project profiles, status, and controls for Omarchy.",
+  "description": "Native AI model routing with in-panel setup, project profiles, prompt-free value, status, and controls for Omarchy.",
   "kinds": [
     "service",
     "bar-widget"
@@ -17,7 +17,7 @@
   },
   "barWidget": {
     "displayName": "Wayfinder",
-    "description": "First-run setup, repository profiles, gateway health, routes, readiness, savings, and service controls.",
+    "description": "First-run setup, repository profiles, project value, gateway health, routes, readiness, savings, and service controls.",
     "category": "AI",
     "aliases": [
       "router",

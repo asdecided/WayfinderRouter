@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "checkedAt": "2026-08-26",
+  "checkedAt": "2026-08-30",
   "plugin": {
     "id": "io.github.asdecided.wayfinder",
-    "version": "0.3.2"
+    "version": "0.3.3"
   },
   "omarchy": {
     "channel": "quattro",
@@ -17,11 +17,23 @@
     "contractCommit": "2c593dbbaad67698e7b9b0809d082d86540a7a1c"
   },
   "router": {
-    "release": "2026.8.1",
+    "release": "1.0.0",
+    "tag": "router-v1.0.0",
+    "sourceCommit": "536cb6bb299e80b54f7cd0ee77260aab8bb63973",
     "architectures": [
       "x86_64-unknown-linux-gnu",
       "aarch64-unknown-linux-gnu"
     ],
+    "assets": {
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/asdecided/WayfinderRouter/releases/download/router-v1.0.0/wayfinder-router-x86_64-unknown-linux-gnu.tar.gz",
+        "sha256": "ed1c851d134222b357a496852a2b3df9931fdc40dde2bb0f0db899302604112a"
+      },
+      "aarch64-unknown-linux-gnu": {
+        "url": "https://github.com/asdecided/WayfinderRouter/releases/download/router-v1.0.0/wayfinder-router-aarch64-unknown-linux-gnu.tar.gz",
+        "sha256": "c44c8e765b68b6ceae51526b28fa8ae268dc7693f18895b90602b4881ac68fb6"
+      }
+    },
     "libc": "glibc",
     "projectProfiles": "available"
   },

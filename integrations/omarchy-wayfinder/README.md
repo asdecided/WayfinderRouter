@@ -3,7 +3,7 @@
 Wayfinder is the model router built for Omarchy. One plugin installs the native
 Rust Router, gives supported coding agents a shared local endpoint, and exposes
 health, delivery receipts, local-versus-hosted distribution, model readiness,
-and savings in the Omarchy bar.
+global savings, and honest per-project value evidence in the Omarchy bar.
 
 The plugin is the flagship product surface; the independently supervised
 `wayfinder-router` process remains the only routing authority. Reloading or
@@ -37,7 +37,7 @@ omarchy plugin add https://github.com/asdecided/omarchy-wayfinder.git --enable
 Open the Wayfinder bar item and choose **Set up Wayfinder**. When the Router is
 missing, that explicit action runs the plugin's bounded bootstrap mode: it
 downloads the native
-`router-v2026.8.1` archive for the current architecture and verifies its pinned
+`router-v1.0.0` archive for the current architecture and verifies its pinned
 SHA-256 digest before extraction. It does not require Rust or Cargo. An existing
 `wayfinder-router` executable is never replaced.
 
@@ -67,10 +67,10 @@ Omarchy may set `WAYFINDER_BIN_DIR` when another user-owned binary directory is
 required. Router upgrades remain explicit plugin changes: the
 release version and both architecture digests are reviewed before these pins
 move. The installer records the exact release, target, archive digest, binary
-digest, and user-owned path for a binary that it installs. Router `2026.8.1` is
-the immutable final DateVer pin. Subsequent Router releases
-use SemVer; lifecycle operations treat exact versions and reviewed checksums as
-identities and do not compare the two numbering schemes.
+digest, and user-owned path for a binary that it installs. Router `1.0.0` is the
+current reviewed pin; `2026.8.1` is the immutable final DateVer release.
+Lifecycle operations treat exact versions and reviewed checksums as identities
+and do not compare the two numbering schemes.
 
 When a later reviewed plugin pin changes, upgrade only that plugin-owned binary
 with:
@@ -86,6 +86,10 @@ Interrupted transactions recover automatically; `./install.sh --recover-router`
 also makes that recovery explicit. Independently installed or modified Router
 binaries are never replaced. Promotion changes the on-disk executable; restart
 `wayfinder-router.service` from the panel after upgrade or rollback to run it.
+The first rollback after upgrading from `2026.8.1` restores that exact verified
+binary; running the explicit upgrade again returns to the reviewed `1.0.0`
+archive. The recorded archive and installed-binary digests are checked on every
+transition.
 
 Without `--enable`, Omarchy clones third-party plugins disabled so their source
 can be reviewed before enablement. The standard command above requests enablement
@@ -137,9 +141,39 @@ it does not touch the repository or unrelated project profiles.
 
 These controls are capability-gated through
 `wayfinder-router capabilities --json`. The pinned
-`router-v2026.8.1` release exposes authenticated local project profiles; when
+`router-v1.0.0` release exposes authenticated local project profiles; when
 that capability is absent or a different Router is on `PATH`, the panel fails
 closed instead of editing QML or project state.
+
+### Project value
+
+When the selected Router exposes `wf-project-value-v1`, an active project
+profile gains a 30-day value card. It renders Router-owned facts rather than
+recalculating them in QML:
+
+- durable successful-request accounting, with accounted and estimated-token
+  denominators;
+- actual on-device, local-network, hosted, and unknown delivery boundaries
+  from the selected project's bounded recent receipts;
+- retained terminal successes, failures, cancellations, cache hits, and the
+  resulting delivery failure rate;
+- the exact real-or-relative price unit, current price-table fingerprint, and
+  current `dearest-configured-rate` counterfactual; historical totals retain
+  their recorded baseline amounts but not every prior table fingerprint; and
+- explicit evidence gaps. User corrections are not collected by this schema,
+  so correction rate remains unavailable rather than appearing as zero.
+
+The accounting and delivery windows remain separate: costs use the durable
+daily ledger, while delivery health uses the shared 200-entry process-local
+ring. Requests recorded before workspace attribution are not guessed into a
+project. The card also filters displayed receipts to the verified workspace;
+global Router savings remain separately labelled **All savings**.
+
+Older Router builds fail closed with “project value report unavailable.” The
+plugin does not create a parallel store or derive a fallback score. The
+checksum-pinned bootstrap remains on its reviewed release until a later Router
+release containing this schema has its version and both architecture digests
+reviewed.
 
 ## Verified coding agents
 
@@ -213,9 +247,11 @@ the wider disconnect-cancellation and Anthropic/OpenAI error-envelope matrix.
   owned repository profile without changing the repository or main policy.
 - **Roll back**: confirm twice, then remove only the selected Router-owned
   project state.
+- **Project value**: inspect prompt-free workspace accounting, actual delivery
+  boundaries, failure evidence, baseline, and known evidence gaps.
 
 When operator endpoints are protected by OIDC, the plugin continues to show
-health but hides unavailable model, recent-route, and savings metadata. It does
+health but hides unavailable model, recent-route, savings, and project-value metadata. It does
 not ask for or persist an operator token.
 
 Each recent route shows the destination that actually served it, its execution

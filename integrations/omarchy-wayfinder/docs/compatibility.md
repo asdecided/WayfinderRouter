@@ -2,14 +2,14 @@
 
 This matrix is the supported surface for the current Wayfinder plugin source. It is deliberately narrower than generic QML, OpenAI, or Anthropic compatibility. The machine-readable authority is [`compatibility.json`](../compatibility.json); CI rejects drift between it, the manifest, installer, coding-agent pins, and this document.
 
-Checked: 2026-08-26.
+Checked: 2026-08-30.
 
 | Surface | Supported contract | Evidence in this repository |
 | --- | --- | --- |
-| Wayfinder plugin | `0.3.2`, manifest schema `1` | Local package validation plus the official Omarchy validator |
+| Wayfinder plugin | `0.3.3`, manifest schema `1` | Local package validation plus the official Omarchy validator |
 | Omarchy | Quattro `4.0.0.alpha` at [`f4f3d4c71a0a5c392b20ce05291531881a1b3bfe`](https://github.com/basecamp/omarchy/commit/f4f3d4c71a0a5c392b20ce05291531881a1b3bfe) | CI checks out that exact source commit and runs its `omarchy-plugin-validate` against this plugin |
 | Quickshell | Omarchy-packaged `quickshell` `0.3.1` or newer | The pinned Omarchy source contains the reviewed switch to packaged Quickshell at [`2c593dbbaad67698e7b9b0809d082d86540a7a1c`](https://github.com/basecamp/omarchy/commit/2c593dbbaad67698e7b9b0809d082d86540a7a1c); model and package tests run without a graphical shell |
-| Router | `router-v2026.8.1` | Native archive download, SHA-256 verification, layout inspection, execution, provenance, no-clobber, and ownership-checked removal tests |
+| Router | [`router-v1.0.0`](https://github.com/asdecided/WayfinderRouter/releases/tag/router-v1.0.0) at [`536cb6bb299e80b54f7cd0ee77260aab8bb63973`](https://github.com/asdecided/WayfinderRouter/commit/536cb6bb299e80b54f7cd0ee77260aab8bb63973) | Native archive download, SHA-256 verification, layout inspection, execution, provenance, no-clobber, and ownership-checked removal tests |
 | Linux | glibc `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` | Both release archives are pinned by digest; Router release CI builds and smokes both targets |
 | Codex | `0.149.0` | Real streaming `/v1/responses` tool round-trip through a candidate Router |
 | Claude Code | `2.1.241` | Real streaming `/v1/messages` tool round-trip through the same candidate Router |
@@ -37,7 +37,7 @@ The official Omarchy manifest validator is contract evidence, not a substitute f
 | Plugin source rollback | Documented | Disable, select the previously reviewed source commit, validate, then re-enable |
 | Router upgrade | Contract-validated | Replaces only a digest-matched plugin-owned on-disk binary through a recoverable atomic promotion; service restart remains explicit |
 | Router rollback | Contract-validated | Swaps to the verified last-known-good on-disk binary and retains the displaced version as the next rollback target |
-| Project profiles | Available in the install pin | The `2026.8.1` Router exposes authenticated local project profiles; the panel still fails closed when the capability is absent |
+| Project profiles | Available in the install pin | The `1.0.0` Router exposes authenticated local project profiles; the panel still fails closed when the capability is absent |
 
 The automated lifecycle harness proves ownership refusal, atomic promotion,
 last-known-good retention, rollback, and recovery both before and after the
@@ -61,8 +61,8 @@ candidate. It writes a mode-0600, host-identity-free
 that record to the release evidence before changing the compatibility status
 to release-gated.
 
-`2026.8.1` is the immutable final Router DateVer release. Router `1.0.0` and
-later use SemVer. The lifecycle validates strict numeric SemVer cores and uses
+`2026.8.1` is the immutable final Router DateVer release and `1.0.0` is the
+current reviewed pin. The lifecycle validates strict numeric SemVer cores and uses
 exact versions plus reviewed checksums as identities; it never orders versions
 across the numbering change.
 

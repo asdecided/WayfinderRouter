@@ -63,7 +63,7 @@ For Codex, review `~/.codex/config.toml` and remove the `wayfinder` provider/mod
 
 ## Project profile controls
 
-The pinned `router-v2026.8.1` exposes authenticated local project profiles. If the panel reports them as unavailable, confirm `wayfinder-router --version` and `wayfinder-router capabilities --json`, then check whether a different executable appears first on `PATH`. Do not work around the capability gate by editing QML or project state.
+The pinned `router-v1.0.0` exposes authenticated local project profiles. If the panel reports them as unavailable, confirm `wayfinder-router --version` and `wayfinder-router capabilities --json`, then check whether a different executable appears first on `PATH`. Do not work around the capability gate by editing QML or project state.
 
 ## Review and update plugin source
 
@@ -126,8 +126,8 @@ Promotion intent is recorded before the atomic rename. The next installer action
 Do not edit or delete transaction/provenance files during recovery. If the active digest matches neither side, Wayfinder fails closed and requires manual inspection. Removing the plugin or disabling the widget does not stop the independently supervised Router service.
 
 The lifecycle remains contract-validated for upgrade and rollback. The plugin
-pins the immutable final DateVer Router `2026.8.1`; subsequent Router releases
-use SemVer. The next stronger release-gated claim requires a recorded
+pins Router `1.0.0`; `2026.8.1` remains the immutable final DateVer release.
+The next stronger release-gated claim requires a recorded
 `2026.8.1` → `1.0.0` → `2026.8.1` → `1.0.0` cycle between checksum-verified
 releases. Lifecycle decisions use exact versions and reviewed checksums, never
 ordering across the numbering change.
