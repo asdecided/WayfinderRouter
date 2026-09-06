@@ -20,7 +20,7 @@ reqwest = { workspace = true, features = ["blocking"] }
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-std"] }
 uuid.workspace = true
 wayfinder-apple-foundation-xpc = { path = "../wayfinder-apple-foundation-xpc" }
 wayfinder-codex-app-server = { path = "../wayfinder-codex-app-server" }
@@ -30,8 +30,14 @@ wayfinder-gateway = { path = "../wayfinder-gateway" }
 wayfinder-providers = { path = "../wayfinder-providers" }
 wayfinder-service = { path = "../wayfinder-service" }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["fs", "process"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 wayfinder-macos-xpc = { path = "../wayfinder-macos-xpc" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+axum.workspace = true
