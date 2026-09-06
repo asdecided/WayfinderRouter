@@ -64,3 +64,21 @@ version change in the other. The Desktop release includes the native Rust
 router and follows
 [`macos/WayfinderMac/Packaging/RELEASE.md`](macos/WayfinderMac/Packaging/RELEASE.md).
 The retired package distribution is not a release or rollback channel.
+
+### Prepare a Router release in GitHub
+
+1. Merge the Router version, lockfile and `docs/releases/router-v<VERSION>.md`
+   updates through a reviewed PR.
+2. Open **Actions → Router Release → Run workflow**, leave **Branch: main**,
+   and click **Run workflow**. No local Git credentials or manual tag are needed.
+3. Wait for both native Linux builds and packaged binary checks. The workflow
+   creates `router-v<VERSION>` at the exact run commit and attaches both archives
+   and SHA-256 files to a draft. Follow **Review and publish** in the run summary.
+4. Review the notes and four assets, then click **Publish release**.
+
+The button becomes available after the workflow is merged into the default
+branch. A failed build creates no tag or release. Rerun a failed job from the
+same run to retain its source revision. An existing tag at another commit is
+rejected; published assets are never replaced. A new release from changed source
+requires a version bump. Pushing a release tag remains supported for maintainers
+who prefer Git. Downstream plugin pins are updated after publication.
