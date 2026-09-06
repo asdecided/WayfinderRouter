@@ -132,7 +132,7 @@ jobs:
           tar -xzf "$archive" -C smoke
           binary="smoke/wayfinder-router-$TARGET/wayfinder-router"
           test "$("$binary" --version)" = "wayfinder-router $VERSION"
-          "$binary" capabilities --json | jq -e --arg version "$VERSION" '.version == $version'
+          "$binary" capabilities --json | jq -e --arg version "$VERSION" '.version == $version and .setup_schema_version == 1 and (.native_commands | index("setup") != null)'
           "$binary" service --print install | grep -q '^ExecStart='
       - name: Upload immutable release inputs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
