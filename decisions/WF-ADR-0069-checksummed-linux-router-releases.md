@@ -24,7 +24,12 @@ that replaces an unrelated local Router would weaken that boundary.
 
 ## Decision
 
-1. Router tags named `router-v<workspace-version>` build native GNU/Linux
+1. The GitHub Actions **Router Release → Run workflow** entry point on `main`
+   builds the committed workspace version, creates its tag only after both
+   native builds pass, and prepares a populated draft. Existing tags must resolve
+   to the exact run commit and are never moved. The same run creates the draft;
+   it does not depend on another workflow firing from its token-created tag.
+   Router tags named `router-v<workspace-version>` build native GNU/Linux
    archives for `x86_64` and `aarch64` on matching GitHub-hosted architectures.
 2. Each archive contains `wayfinder-router`, `LICENSE`, and `NOTICE` beneath one
    target-named directory. Stable timestamps, ordering, ownership, permissions,

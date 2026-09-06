@@ -4,6 +4,14 @@ User-visible changes to Wayfinder, by release. Follows the spirit of
 [Keep a Changelog](https://keepachangelog.com/): user impact over implementation
 details, release history over commit history.
 
+## Router — Unreleased
+
+### Changed
+
+- Prepare Linux releases from GitHub Actions with **Run workflow** on `main`,
+  without manually pushing a tag. Both native archives are checked before the
+  immutable source tag and populated draft are created (WF-ADR-0069).
+
 ## Router 1.1.0 — 2026-09-06
 
 ### Added
