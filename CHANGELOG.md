@@ -4,7 +4,7 @@ User-visible changes to Wayfinder, by release. Follows the spirit of
 [Keep a Changelog](https://keepachangelog.com/): user impact over implementation
 details, release history over commit history.
 
-## Router — Unreleased
+## Router 1.1.0 — 2026-09-06
 
 ### Added
 
