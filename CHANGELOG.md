@@ -8,9 +8,9 @@ details, release history over commit history.
 
 ### Changed
 
-- Prepare Linux releases from GitHub Actions with **Run workflow** on `main`,
-  without manually pushing a tag. Both native archives are checked before the
-  immutable source tag and populated draft are created (WF-ADR-0069).
+- Publishing a Router release in GitHub now automatically builds, checks and
+  attaches both native Linux archives and SHA-256 files. No manual workflow run
+  or tag push is required; existing downloads are never overwritten (WF-ADR-0069).
 
 ## Router 1.1.0 — 2026-09-06
 

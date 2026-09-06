@@ -1,16 +1,14 @@
 name: Router Release
 
 on:
-  workflow_dispatch:
+  release:
+    types: [published]
   pull_request:
     paths:
       - ".github/workflows/router-release.yml"
       - "docs/releases/router-v*.md"
       - "packaging/linux/**"
       - "rust/**"
-  push:
-    tags:
-      - "router-v*"
 
 permissions:
   contents: read
@@ -22,6 +20,7 @@ concurrency:
 jobs:
   preflight:
     name: Validate Router source
+    if: github.event_name == 'pull_request' || startsWith(github.event.release.tag_name, 'router-v')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -36,14 +35,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          workspace_version="$(sed -n '/^\[workspace.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' rust/Cargo.toml)"
-          version="$workspace_version"
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
-            test "$GITHUB_REF" = "refs/heads/main" || {
-              echo "::error::Run Router Release from main"
+          if [[ "$GITHUB_EVENT_NAME" == "release" ]]; then
+            jq -e '.release.draft == false and .release.immutable != true' "$GITHUB_EVENT_PATH" >/dev/null || {
+              echo "::error::Published release must allow asset uploads; immutable releases cannot use this sequence"
               exit 1
             }
           fi
+          workspace_version="$(sed -n '/^\[workspace.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' rust/Cargo.toml)"
+          version="$workspace_version"
           if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
             if [[ ! "$GITHUB_REF_NAME" =~ ^router-v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]]; then
               echo "::error::invalid Router release tag: $GITHUB_REF_NAME"
@@ -68,9 +67,6 @@ jobs:
               echo "::error::Router releases must point to a commit on main"
               exit 1
             }
-          elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
-            [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-            test -f "docs/releases/router-v$version.md"
           elif [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
             echo "::error::unsupported Router workflow event: $GITHUB_EVENT_NAME"
             exit 1
@@ -155,9 +151,9 @@ jobs:
           retention-days: 7
 
   release:
-    name: Create draft Router release
+    name: Attach verified Router downloads
     needs: [preflight, build]
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'release'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -179,53 +175,9 @@ jobs:
           for checksum in *.sha256; do sha256sum --check "$checksum"; done
           test "$(find . -maxdepth 1 -name '*.tar.gz' -type f | wc -l)" -eq 2
           test "$(find . -maxdepth 1 -name '*.sha256' -type f | wc -l)" -eq 2
-      - name: Create or verify immutable source tag
+      - name: Attach verified downloads without replacing existing assets
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.preflight.outputs.version }}
-        run: |
-          set -euo pipefail
-          tag="router-v$VERSION"
-          # A failed lookup must not be mistaken for an absent tag.
-          refs="$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")"
-          if [[ -z "$refs" ]]; then
-            test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
-            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
-              -f "ref=refs/tags/$tag" -f "sha=$GITHUB_SHA" >/dev/null
-          fi
-          git fetch --no-tags origin "refs/tags/$tag"
-          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$GITHUB_SHA" || {
-            echo "::error::release tag already points to different source; bump the version"
-            exit 1
-          }
-      - name: Create or update draft GitHub release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.preflight.outputs.version }}
-        run: |
-          set -euo pipefail
-          tag="router-v$VERSION"
-          notes="docs/releases/router-v$VERSION.md"
-          assets=("$RUNNER_TEMP"/router-dist/*)
-          if gh release view "$tag" >/dev/null 2>&1; then
-            is_draft="$(gh release view "$tag" --json isDraft --jq .isDraft)"
-            test "$is_draft" = "true" || {
-              echo "::error::refusing to replace assets on a published release"
-              exit 1
-            }
-            gh release upload "$tag" "${assets[@]}" --clobber
-            gh release edit "$tag" \
-              --draft \
-              --title "Wayfinder Router $VERSION" \
-              --notes-file "$notes"
-          else
-            gh release create "$tag" "${assets[@]}" \
-              --verify-tag \
-              --draft \
-              --title "Wayfinder Router $VERSION" \
-              --notes-file "$notes"
-          fi
-          url="$(gh release view "$tag" --json url --jq .url)"
-          printf '### Router %s draft ready\n\n[Review and publish](%s)\n\nSource: `%s`\n' "$VERSION" "$url" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+        run: packaging/linux/upload_release_assets.sh

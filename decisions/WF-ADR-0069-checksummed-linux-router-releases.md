@@ -24,22 +24,20 @@ that replaces an unrelated local Router would weaken that boundary.
 
 ## Decision
 
-1. The GitHub Actions **Router Release → Run workflow** entry point on `main`
-   builds the committed workspace version, creates its tag only after both
-   native builds pass, and prepares a populated draft. Existing tags must resolve
-   to the exact run commit and are never moved. The same run creates the draft;
-   it does not depend on another workflow firing from its token-created tag.
-   Router tags named `router-v<workspace-version>` build native GNU/Linux
-   archives for `x86_64` and `aarch64` on matching GitHub-hosted architectures.
+1. Publishing a GitHub release tagged `router-v<workspace-version>` triggers
+   native GNU/Linux builds for `x86_64` and `aarch64` on matching runners.
+   There is no manual workflow dispatch or tag-push prerequisite.
 2. Each archive contains `wayfinder-router`, `LICENSE`, and `NOTICE` beneath one
    target-named directory. Stable timestamps, ordering, ownership, permissions,
    and gzip metadata make the packaging layer reproducible.
-3. Every archive is smoke-tested on its native runner before a draft GitHub
-   release is created. A sibling SHA-256 file is published for independent
+3. Every archive is smoke-tested on its native runner before downloads are attached to the published GitHub
+   release. A sibling SHA-256 file is published for independent
    verification.
 4. Release tags must match the Rust workspace version, point to `main`, and have
-   committed release notes. Published release assets are immutable; reruns may
-   replace assets only while a release remains a draft.
+   committed release notes. Existing asset bytes are never replaced: retries retain identical assets
+   and reject conflicting content. GitHub immutable releases are incompatible
+   with post-publication uploads; the workflow rejects them without changing
+   repository settings.
 5. A commit-pinned SurfaceCheck gate derives a temporary manifest from the Rust
    workspace version and verifies the release notes and public installation
    facts before packaging. The temporary adapter does not become another
@@ -57,9 +55,10 @@ that replaces an unrelated local Router would weaken that boundary.
 - Omarchy users can install a complete Wayfinder runtime without Rust or Cargo.
 - The shell plugin still contains no routing implementation, provider
   credential, or in-process gateway.
-- Linux release publication adds two native CI builds and a manual review step:
-  GitHub creates a draft release, which a maintainer publishes only after
-  checking its assets and digests.
+- A maintainer publishes the release once. Downloads appear automatically after
+  both native CI builds pass. The page is public while building; failed builds
+  leave downloads unavailable until repaired and rerun. Downstream consumers
+  wait for all archives and digests before updating pins.
 - The first release targets glibc-based Linux. Other libc or operating-system
   targets require separately built and tested artifacts rather than fallback
   execution of an incompatible binary.
