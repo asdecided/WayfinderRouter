@@ -14,6 +14,7 @@ mod local_command;
 mod project_command;
 mod provider_command;
 mod service_command;
+mod setup_command;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -209,6 +210,13 @@ pub fn run(
         "app-configure-chatgpt" => {
             app_setup_command::run_configure_chatgpt(&arguments[1..], stdout, stderr)
         }
+        "setup" => {
+            write_error(
+                stderr,
+                "wayfinder-router: setup must be invoked through the process entry point",
+            );
+            EXIT_USAGE
+        }
         "service" => service_command::run_service(&arguments[1..], stdout, stderr),
         "capabilities" => run_capabilities(&arguments[1..], stdout, stderr),
         "apple-foundation-live-smoke" => {
@@ -370,8 +378,9 @@ fn run_capabilities(arguments: &[String], stdout: &mut dyn Write, stderr: &mut d
         "implementation": "rust",
         "version": product_version(),
         "target_architecture": target_architecture(),
-        "commands": ["init", "doctor", "connect", "exec", "local", "provider", "open", "project", "route", "calibrate", "serve", "service", "keys", "capabilities", "app-setup-init", "app-configure-chatgpt", "config", "apple-foundation-live-smoke"],
-        "native_commands": ["init", "doctor", "connect", "exec", "local discover", "local probe", "provider presets", "provider preset", "open", "project setup", "project status", "project rollback", "route", "calibrate", "serve", "service", "keys new", "capabilities", "app-setup-init", "app-configure-chatgpt", "config read-routing", "config apply-routing", "apple-foundation-live-smoke"],
+        "setup_schema_version": if cfg!(target_os = "linux") { Some(1) } else { None },
+        "commands": ["setup", "init", "doctor", "connect", "exec", "local", "provider", "open", "project", "route", "calibrate", "serve", "service", "keys", "capabilities", "app-setup-init", "app-configure-chatgpt", "config", "apple-foundation-live-smoke"],
+        "native_commands": ["setup", "init", "doctor", "connect", "exec", "local discover", "local probe", "provider presets", "provider preset", "open", "project setup", "project status", "project rollback", "route", "calibrate", "serve", "service", "keys new", "capabilities", "app-setup-init", "app-configure-chatgpt", "config read-routing", "config apply-routing", "apple-foundation-live-smoke"],
         "agent_exec": {
             "schema": "wf-agent-exec-v1",
             "schema_version": "1",
@@ -1552,6 +1561,7 @@ const TOP_LEVEL_HELP: &str = concat!(
     "Local execution policy for AI.\n\n",
     "Start here:\n",
     "  init           Create a no-clobber starter policy.\n",
+    "  setup          Connect, activate, test, repair, or disconnect a desktop provider.\n",
     "  doctor         Check policy, credential references, and local gateway reachability.\n",
     "  connect        Print a verified configuration for Codex, Claude Code, OpenCode, Pi, or Aider.\n",
     "  local          Discover fixed-loopback models or prove one real inference.\n",
@@ -1577,6 +1587,11 @@ const TOP_LEVEL_HELP: &str = concat!(
 const ROUTE_HELP: &str = "usage: wayfinder-router route [-h] [--threshold THRESHOLD] [--json] [--explain] prompt\n\nScore a prompt and recommend a model.";
 const KEYS_HELP: &str = "usage: wayfinder-router keys new [--id ID] [--workspace ID] [--json]\n\nMint a virtual gateway key. The plaintext is printed once; only its SHA-256 hash belongs in config.";
 const SERVE_HELP: &str = "usage: wayfinder-router serve [-h] [--host HOST] [--port PORT] [--surface local|data-plane] [--dry-run] [--timeout TIMEOUT] [--config CONFIG]\n\nRun the bounded HTTP gateway. Non-loopback serving requires the authenticated data-plane surface.";
+
+/// Execute the native desktop setup process with bounded stdin and cancellation.
+pub fn run_setup_process(arguments: &[OsString], stdout: &mut dyn Write) -> i32 {
+    setup_command::run_process(arguments, stdout)
+}
 
 #[cfg(test)]
 mod tests {
@@ -1669,6 +1684,7 @@ mod tests {
         assert_eq!(
             payload["native_commands"],
             json!([
+                "setup",
                 "init",
                 "doctor",
                 "connect",

@@ -2425,7 +2425,9 @@ dependencies = [
 name = "wayfinder-cli"
 version = "1.0.0"
 dependencies = [
+ "axum",
  "reqwest",
+ "rustix",
  "serde_json",
  "sha2",
  "thiserror",

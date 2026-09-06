@@ -4,7 +4,9 @@ fn main() {
     let arguments = std::env::args_os()
         .skip(1)
         .collect::<Vec<std::ffi::OsString>>();
-    let code = if wayfinder_cli::is_serve_command(&arguments) {
+    let code = if arguments.first().is_some_and(|s| s == "setup") {
+        wayfinder_cli::run_setup_process(&arguments[1..], &mut io::stdout().lock())
+    } else if wayfinder_cli::is_serve_command(&arguments) {
         let runtime = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()

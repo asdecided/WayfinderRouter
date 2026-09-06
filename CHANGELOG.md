@@ -4,6 +4,16 @@ User-visible changes to Wayfinder, by release. Follows the spirit of
 [Keep a Changelog](https://keepachangelog.com/): user impact over implementation
 details, release history over commit history.
 
+## Router — Unreleased
+
+### Added
+
+- Native Linux `setup` commands for OpenAI discovery, Secret Service credentials,
+  explicit policy activation, verified first request, repair, and disconnect
+  (WF-ADR-0088). Omarchy can use the existing Rust binary for the complete
+  provider setup lifecycle, without a Python helper. Custom policies are
+  preserved and interrupted changes retain recovery state.
+
 ## Desktop v0.1.0 — Unreleased
 
 ### Added
