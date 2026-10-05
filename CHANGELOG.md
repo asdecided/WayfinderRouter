@@ -6,6 +6,12 @@ details, release history over commit history.
 
 ## Router — Unreleased
 
+### Added
+
+- A standalone, opt-in decision-engine comparison experiment with explicit
+  inconclusive outcomes, disclosure consent and labelled local contract doubles.
+  Production routing remains deterministic; no preview API client is claimed.
+
 ### Changed
 
 - Publishing a Router release in GitHub now automatically builds, checks and

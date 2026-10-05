@@ -165,7 +165,7 @@ impl StreamingDeliveryResponse {
     }
 
     /// Consume and transfer the cancellable byte stream.
-    #[must_use]
+    #[must_use = "the stream must be consumed to receive the delivery response"]
     pub fn into_stream(self) -> DeliveryByteStream {
         self.stream
     }

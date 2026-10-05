@@ -1,0 +1,6 @@
+[
+  {"id":"greeting","question":"Which routing tier should handle this prompt?","answers":["local","cloud"],"context":{"prompt":"Hi"},"expected":"local"},
+  {"id":"short-fact","question":"Which routing tier should handle this prompt?","answers":["local","cloud"],"context":{"prompt":"Name a colour"},"expected":"local"},
+  {"id":"reasoning","question":"Which routing tier should handle this prompt?","answers":["local","cloud"],"context":{"prompt":"Prove the theorem by induction and derive the optimal complexity without violating any invariant."},"expected":"cloud"},
+  {"id":"constraints","question":"Which routing tier should handle this prompt?","answers":["local","cloud"],"context":{"prompt":"Ensure exactly one concurrent transaction commits while preserving the invariant. Explain the proof and guarantee no deadlock."},"expected":"cloud"}
+]
