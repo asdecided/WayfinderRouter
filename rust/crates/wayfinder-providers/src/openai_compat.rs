@@ -238,7 +238,7 @@ impl StreamingProviderResponse {
     }
 
     /// Consume the response and transfer its cancellable byte stream.
-    #[must_use]
+    #[must_use = "the stream must be consumed to receive the provider response"]
     pub fn into_stream(self) -> ProviderByteStream {
         self.stream
     }

@@ -44,6 +44,9 @@ pub enum TierOrderPolicy {
 /// Configuration error with a path/source label safe for presentation.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ConfigError {
+    /// An explicitly selected policy is absent; defaults are not authorised.
+    #[error("required configuration absent at {path}; create it or remove the explicit selection")]
+    Missing { path: String },
     /// TOML syntax is invalid.
     #[error("{where_}: invalid TOML: {message}")]
     InvalidToml {
@@ -70,6 +73,42 @@ pub enum ConfigError {
     },
 }
 
+/// Observable policy state. Invalid and unreadable policy never imply defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PolicyLoadState {
+    Loaded,
+    Absent,
+    Invalid,
+    Unreadable,
+}
+
+impl ConfigError {
+    pub fn load_state(&self) -> PolicyLoadState {
+        match self {
+            Self::Missing { .. } => PolicyLoadState::Absent,
+            Self::Read { .. } => PolicyLoadState::Unreadable,
+            Self::InvalidToml { .. } | Self::InvalidValue { .. } => PolicyLoadState::Invalid,
+        }
+    }
+
+    /// Runtime diagnostics must not include parser excerpts or configured values.
+    pub fn redacted(self) -> Self {
+        match self {
+            Self::InvalidToml { where_, .. } => Self::InvalidToml {
+                where_,
+                message: "check TOML syntax locally (source text omitted)".into(),
+            },
+            Self::InvalidValue { where_, .. } => Self::InvalidValue {
+                where_,
+                message:
+                    "invalid configuration; check schema and references locally (values omitted)"
+                        .into(),
+            },
+            other => other,
+        }
+    }
+}
+
 impl From<CoreError> for ConfigError {
     fn from(error: CoreError) -> Self {
         Self::InvalidValue {
@@ -81,19 +120,66 @@ impl From<CoreError> for ConfigError {
 
 /// Find an explicit file or the nearest ancestor config.
 ///
-/// An explicit missing file returns `None` and suppresses ancestor discovery,
-/// matching the current Python implementation. The caller decides whether that
-/// means defaults or a hard error.
+/// Explicit selections are retained even when missing. Existing unusable paths
+/// and discovery errors are retained so loaders fail rather than skip policy.
 #[must_use]
 pub fn find_config_file(start_dir: &Path, explicit: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = explicit {
-        return path.is_file().then(|| path.to_path_buf());
+        return Some(path.to_path_buf());
     }
+    let start_dir = if start_dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        start_dir
+    };
     let resolved = start_dir.canonicalize().ok()?;
     resolved
         .ancestors()
         .map(|directory| directory.join(CONFIG_FILE))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| match fs::symlink_metadata(candidate) {
+            Ok(_) => true,
+            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        })
+}
+
+/// Read exactly the selected file. Only optional, undiscovered configuration
+/// may be absent. Broken symlinks and non-files are unreadable, not absent.
+pub fn read_config_source(
+    start_dir: &Path,
+    explicit: Option<&Path>,
+) -> Result<Option<(PathBuf, String)>, ConfigError> {
+    let start_dir = if start_dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        start_dir
+    };
+    if explicit.is_none() && !start_dir.canonicalize().is_ok_and(|path| path.is_dir()) {
+        return Err(ConfigError::Read {
+            path: start_dir.display().to_string(),
+            message: "cannot discover configuration; check the starting directory and permissions"
+                .into(),
+        });
+    }
+    let Some(path) = find_config_file(start_dir, explicit) else {
+        return Ok(None);
+    };
+    let label = path.display().to_string();
+    let unreadable = || ConfigError::Read {
+        path: label.clone(),
+        message: "check regular-file type, UTF-8 encoding and read permissions".into(),
+    };
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ConfigError::Missing { path: label });
+        }
+        Err(_) => return Err(unreadable()),
+        Ok(_) => {}
+    }
+    if !fs::metadata(&path).map_err(|_| unreadable())?.is_file() {
+        return Err(unreadable());
+    }
+    let text = fs::read_to_string(&path).map_err(|_| unreadable())?;
+    Ok(Some((path, text)))
 }
 
 /// Load routing configuration from discovery or return the binary defaults.
@@ -103,20 +189,30 @@ pub fn load_routing_config(
     threshold_environment: Option<&str>,
     tier_order: TierOrderPolicy,
 ) -> Result<RoutingConfig, ConfigError> {
-    let Some(path) = find_config_file(start_dir, explicit) else {
+    load_routing_config_with_state(start_dir, explicit, threshold_environment, tier_order)
+        .map(|(_, config)| config)
+}
+
+/// Load with an explicit success state; failures expose their state through
+/// ConfigError::load_state. Only optional absence returns built-in defaults.
+pub fn load_routing_config_with_state(
+    start_dir: &Path,
+    explicit: Option<&Path>,
+    threshold_environment: Option<&str>,
+    tier_order: TierOrderPolicy,
+) -> Result<(PolicyLoadState, RoutingConfig), ConfigError> {
+    let Some((path, text)) = read_config_source(start_dir, explicit)? else {
         let threshold = parse_environment_threshold(threshold_environment, DEFAULT_THRESHOLD)?;
-        return Ok(RoutingConfig::binary(threshold));
+        return Ok((PolicyLoadState::Absent, RoutingConfig::binary(threshold)));
     };
-    let text = fs::read_to_string(&path).map_err(|error| ConfigError::Read {
-        path: path.display().to_string(),
-        message: error.to_string(),
-    })?;
     routing_config_from_toml(
         &text,
         &path.display().to_string(),
         threshold_environment,
         tier_order,
     )
+    .map(|config| (PolicyLoadState::Loaded, config))
+    .map_err(ConfigError::redacted)
 }
 
 /// Parse routing TOML with an explicit tier-order policy and optional threshold
