@@ -439,3 +439,24 @@ Multi-turn chats remain stateless: clients resend their full transcript, while
 For a non-loopback listener, follow the [managed gateway deployment](managed-gateway-deployment.md)
 contract. The local surface refuses external binds; the managed surface omits
 operator metadata and authenticates its model inventory as well as inference.
+
+## Required and optional configuration
+
+An explicit `--config` path or `WAYFINDER_CONFIG` selection is required: a
+missing, unreadable or invalid file fails startup/routing. It never substitutes
+binary defaults or a parent file. Automatic discovery also stops at an existing
+unusable config, including broken symlinks and directories. Valid symlinks are
+supported. Only optional discovery with no file permits the ordinary binary
+routing defaults (gateway startup still needs valid model configuration).
+
+Policy loading distinguishes loaded, absent, invalid and unreadable outcomes.
+Runtime syntax/schema diagnostics omit source excerpts and configured values;
+check the named file locally. A failed live reload retains the existing validated
+snapshot; it does not activate defaults. Protect config directories from
+untrusted writes. Existing requests finish under the snapshot they captured.
+
+Restricting provider destinations uses model-alias allowlists and the existing
+privacy/locality requirements. Fallback delivery remains subject to those
+checks. Restrict every alias and deployment endpoint for a provider; protocol
+kind alone does not identify a provider. This is independent of Claude Code's
+managed settings and does not implement host shell, IDE or MCP permissions.

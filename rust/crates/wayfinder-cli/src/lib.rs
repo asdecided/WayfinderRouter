@@ -800,10 +800,9 @@ async fn build_serve_state<W: Write>(
             .map(PathBuf::from)
             .map(expand_tilde)
     });
-    let selected = find_config_file(Path::new("."), explicit.as_deref());
-    let (text, where_) = if let Some(path) = selected {
-        let text = fs::read_to_string(&path)
-            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let selected = wayfinder_config::read_config_source(Path::new("."), explicit.as_deref())
+        .map_err(|error| error.to_string())?;
+    let (text, where_) = if let Some((path, text)) = selected {
         (text, path.display().to_string())
     } else {
         (
@@ -821,9 +820,9 @@ async fn build_serve_state<W: Write>(
         threshold_environment.as_deref(),
         development_tier_policy(),
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| error.redacted().to_string())?;
     let mut gateway =
-        gateway_config_from_toml(&text, &where_).map_err(|error| error.to_string())?;
+        gateway_config_from_toml(&text, &where_).map_err(|error| error.redacted().to_string())?;
     let project_count = project_command::merge_owned_projects(&mut gateway)?;
     if project_count > 0 && !host_is_literal_loopback(&options.host) {
         return Err(

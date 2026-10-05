@@ -18,6 +18,12 @@ details, release history over commit history.
   attaches both native Linux archives and SHA-256 files. No manual workflow run
   or tag push is required; existing downloads are never overwritten (WF-ADR-0069).
 
+### Fixed
+
+- Explicit missing configuration and unusable discovered config paths now fail
+  instead of falling back to defaults or a parent policy. Runtime config errors
+  omit source text, and a regression verifies restrictions survive delivery fallback.
+
 ## Router 1.1.0 — 2026-09-06
 
 ### Added

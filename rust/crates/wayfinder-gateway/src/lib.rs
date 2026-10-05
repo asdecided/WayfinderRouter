@@ -10459,6 +10459,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn denied_fallback_is_never_delivered_after_primary_failure() -> TestResult {
+        let mut config = GatewayConfig {
+            retries: 0,
+            failover: "same-tier".to_owned(),
+            ..GatewayConfig::default()
+        };
+        let mut key = access_key("wf-secret");
+        key.models = vec!["cloud".to_owned()];
+        config.keys.insert("team-a".to_owned(), key);
+        let (state, seen) = reliability_live_state(
+            &config,
+            vec!["cloud-backup".to_owned()],
+            BTreeMap::from([
+                (
+                    "cloud".to_owned(),
+                    VecDeque::from([ScriptedOutcome::Transport]),
+                ),
+                (
+                    "cloud-backup".to_owned(),
+                    VecDeque::from([ScriptedOutcome::Response(StatusCode::OK, EXACT_USAGE_BODY)]),
+                ),
+            ]),
+        )?;
+        let state = state.with_access_policy(AccessPolicy::from_gateway_config_with_clock(
+            &config,
+            || 1_000.0,
+        )?);
+        let response = post_json(
+            &state, "/v1/chat/completions",
+            &json!({"model": "auto", "messages": [{"role": "user", "content": "Prove the halting problem is undecidable."}]}),
+            &[("authorization", "Bearer wf-secret"), ("x-wayfinder-threshold", "0.1")],
+        ).await?;
+        assert!(!response.status().is_success());
+        assert_eq!(
+            seen.lock()
+                .map_err(|_| std::io::Error::other("seen lock poisoned"))?
+                .as_slice(),
+            ["cloud"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn transient_exhaustion_retries_then_uses_ordered_fallback() -> TestResult {
         let config = GatewayConfig {
             retries: 1,
