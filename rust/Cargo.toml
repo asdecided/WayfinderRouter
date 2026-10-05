@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/wayfinder-decision-experiment",
     "crates/wayfinder-routing-core",
     "crates/wayfinder-runtime-contracts",
     "crates/wayfinder-apple-ffi",

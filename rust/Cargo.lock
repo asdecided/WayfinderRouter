@@ -2484,6 +2484,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wayfinder-decision-experiment"
+version = "1.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+ "wayfinder-routing-core",
+]
+
+[[package]]
 name = "wayfinder-gateway"
 version = "1.1.0"
 dependencies = [

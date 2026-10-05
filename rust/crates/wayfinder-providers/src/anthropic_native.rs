@@ -832,7 +832,7 @@ impl StreamingAnthropicResponse {
     }
 
     /// Consume the cancellable stream.
-    #[must_use]
+    #[must_use = "the stream must be consumed to receive the provider response"]
     pub fn into_stream(self) -> AnthropicByteStream {
         self.stream
     }
