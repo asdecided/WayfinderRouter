@@ -8,6 +8,11 @@ details, release history over commit history.
 
 ### Added
 
+- An isolated Rust subscription-aware agent planning experiment, reusing the
+  deterministic routing policy and emitting prompt-free previews. Native agent
+  dispatch remains blocked until account and billing contracts are verified
+  (WF-DESIGN-0023).
+
 - A standalone, opt-in decision-engine comparison experiment with explicit
   inconclusive outcomes, disclosure consent and labelled local contract doubles.
   Production routing remains deterministic; no preview API client is claimed.

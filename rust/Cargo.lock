@@ -2402,6 +2402,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wayfinder-agent-delegation"
+version = "1.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "wayfinder-config",
+ "wayfinder-routing-core",
+]
+
+[[package]]
 name = "wayfinder-apple-ffi"
 version = "1.1.0"
 dependencies = [

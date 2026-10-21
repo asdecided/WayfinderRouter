@@ -1,0 +1,16 @@
+{
+  "kind": "review",
+  "request": {
+    "schema_version": 1,
+    "request_id": "synthetic-review-1",
+    "prompt": "Review the Rust error handling in this change",
+    "privacy_posture": "hosted-allowed",
+    "requirements": {
+      "context_tokens": null,
+      "image_input": false,
+      "tools": true,
+      "streaming": false,
+      "surface": "text"
+    }
+  }
+}

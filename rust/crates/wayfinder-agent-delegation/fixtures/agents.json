@@ -1,0 +1,22 @@
+[
+  {
+    "id": "personal-codex",
+    "client": "codex",
+    "route_tier": "coding",
+    "enabled": true,
+    "declared_access": "subscription",
+    "reported_readiness": "ready",
+    "task_kinds": ["review", "edit", "test"],
+    "context_window": null
+  },
+  {
+    "id": "personal-claude",
+    "client": "claude-code",
+    "route_tier": "coding",
+    "enabled": true,
+    "declared_access": "subscription",
+    "reported_readiness": "usage-limited",
+    "task_kinds": ["review", "edit", "test"],
+    "context_window": null
+  }
+]
