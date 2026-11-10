@@ -92,14 +92,15 @@ use crate::access::{
     AccessGrant, AccessPolicy, AccessPolicyError, TokenReservation, TokenReservationDecision,
 };
 use crate::admission::{AdmissionError, AdmissionPermit, AdmissionPolicy};
-use crate::budget::{BudgetDecision, BudgetPolicy, degrade_target, format_limit};
+use crate::budget::BudgetPolicy;
 use crate::cache::{
     CACHE_KEY_SCHEMA_VERSION, CacheError, CacheSettings, CachedResponse, ResponseCache,
     cache_key_with_version, decode_shared_response, encode_shared_response, is_cacheable,
     is_storable,
 };
-use crate::canary::{CANARY_COHORT_HEADER, CANARY_IDENTITY_HEADER, CANARY_RESPONSE_HEADER};
+use crate::canary::{CANARY_COHORT_HEADER, CANARY_IDENTITY_HEADER};
 use crate::chat_pipeline::{
+    RequestAccess, RoutingHeaderInput, apply_budget, build_routing_headers, clamp_route_to_key,
     enforce_destination_eligibility, resolve_request_options, score_request, select_route,
 };
 use crate::control_plane::{
@@ -3071,130 +3072,19 @@ pub(crate) async fn chat_completions(
         return *response;
     }
 
-    let mut budget_state = None;
-    // The pre-degrade route, kept only when the budget actually rerouted, so
-    // a later key clamp that restores it cannot leave a false `degraded`.
-    let mut budget_rerouted_from = None;
-    if state.budget_policy().active() && state.price_table().priced {
-        let today = match utc_today() {
-            Ok(today) => today,
-            Err(error) => {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "wayfinder_router_state_error",
-                    error.to_string(),
-                    request_id_headers(&request_id),
-                );
-            }
+    let access = RequestAccess {
+        grant: access_grant,
+        key_id,
+        workspace_id,
+    };
+    let mut budget =
+        match apply_budget(&state, access, &options, &decision, &request_id, &mut route).await {
+            Ok(budget) => budget,
+            Err(response) => return *response,
         };
-        let budget_decision = if let Some(backend) = state
-            .shared_state_backend()
-            .filter(|backend| backend.backend_name() == "redis")
-        {
-            match state
-                .budget_policy()
-                .evaluate_shared_for(backend.as_ref(), true, workspace_id, key_id, today, offline)
-                .await
-            {
-                Ok(decision) => Ok(decision),
-                Err(_) => state
-                    .budget_policy()
-                    .evaluate_for(
-                        state.savings_ledger(),
-                        true,
-                        workspace_id,
-                        key_id,
-                        today,
-                        offline,
-                    )
-                    .map_err(|error| error.to_string()),
-            }
-        } else {
-            state
-                .budget_policy()
-                .evaluate_for(
-                    state.savings_ledger(),
-                    true,
-                    workspace_id,
-                    key_id,
-                    today,
-                    offline,
-                )
-                .map_err(|error| error.to_string())
-        };
-        match budget_decision {
-            Ok(BudgetDecision::Allow) => {}
-            Ok(BudgetDecision::Degrade) => {
-                // `exhausted` unless the budget really lowers the route below.
-                // Offline delivery already converges on the cheapest local
-                // tier later, so the budget itself does not reroute there.
-                budget_state = Some("exhausted");
-                let allowed_models = state
-                    .access_policy()
-                    .and_then(|policy| access_grant.map(|grant| policy.allowed_models(grant)))
-                    .filter(|allowed| !allowed.is_empty());
-                let target = (!offline)
-                    .then(|| {
-                        degrade_target(
-                            decision.tiers.as_deref(),
-                            decision.models.as_deref(),
-                            &state.price_table().costs,
-                            allowed_models,
-                            &route.chosen,
-                        )
-                    })
-                    .flatten();
-                if let Some(target) = target {
-                    budget_state = Some("degraded");
-                    budget_rerouted_from = Some(std::mem::replace(&mut route.chosen, target));
-                    route.mode = RouteMode::BudgetDegraded;
-                    route.preset_models = None;
-                    route.preset_name = None;
-                    route.preset_route_active = false;
-                }
-            }
-            Ok(BudgetDecision::Block { window, limit }) => {
-                let mut headers = request_id_headers(&request_id);
-                headers.insert(ROUTER_BUDGET_HEADER, HeaderValue::from_static("blocked"));
-                return error_response(
-                    StatusCode::PAYMENT_REQUIRED,
-                    "wayfinder_router_budget_exhausted",
-                    format!("{window} budget of {} reached", format_limit(limit)),
-                    headers,
-                );
-            }
-            Err(error) => {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "wayfinder_router_state_error",
-                    error,
-                    request_id_headers(&request_id),
-                );
-            }
-        }
-    }
-    if let (Some(policy), Some(grant)) = (state.access_policy(), access_grant) {
-        let allowed = policy.allowed_models(grant);
-        if !allowed.is_empty() {
-            let mut ladder = decision
-                .tiers
-                .as_ref()
-                .map(|tiers| tiers.iter().collect::<Vec<_>>())
-                .unwrap_or_default();
-            ladder.sort_by(|left, right| left.min_score.total_cmp(&right.min_score));
-            let ladder = ladder
-                .into_iter()
-                .map(|tier| tier.model.as_str())
-                .collect::<Vec<_>>();
-            let clamped = clamp_to_allowed(&route.chosen, &ladder, allowed);
-            if clamped != route.chosen {
-                route.chosen = clamped;
-                route.mode = RouteMode::KeyScoped;
-            }
-        }
-    }
-    if budget_rerouted_from.as_deref() == Some(route.chosen.as_str()) {
-        budget_state = Some("exhausted");
+    clamp_route_to_key(&state, access_grant, &decision, &mut route);
+    if budget.rerouted_from.as_deref() == Some(route.chosen.as_str()) {
+        budget.state = Some("exhausted");
     }
     let canary_guard =
         if !state.dry_run() && !route.preset_route_active && route.mode == RouteMode::Scored {
@@ -3225,112 +3115,25 @@ pub(crate) async fn chat_completions(
         route.chosen = candidate;
         route.mode = RouteMode::Canary;
     }
-    let mut routing_headers = match decision_headers(
-        &route.chosen,
-        decision.score,
-        route.mode,
-        &request_id,
-        offline,
-        DecisionPolicyReceipt {
-            version: state.policy_version(),
-            snapshot_id: state.policy_snapshot_id(),
-            profile_id: policy_profile_id,
+    let routing_headers = match build_routing_headers(
+        &state,
+        RoutingHeaderInput {
+            route: &route,
+            score: decision.score,
+            request_id: &request_id,
+            offline,
+            privacy_posture,
+            policy_profile_id,
+            budget_state: budget.state,
+            canary_assigned: canary_guard.is_some(),
+            access_grant,
         },
-    ) {
+    )
+    .await
+    {
         Ok(headers) => headers,
-        Err(message) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "wayfinder_router_misconfigured",
-                message,
-                request_id_headers(&request_id),
-            );
-        }
+        Err(response) => return *response,
     };
-    if let Err(message) = insert_header(
-        &mut routing_headers,
-        ROUTER_PRIVACY_POSTURE_HEADER,
-        privacy_posture_name(privacy_posture),
-    ) {
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "wayfinder_router_misconfigured",
-            message,
-            request_id_headers(&request_id),
-        );
-    }
-    if let Some(budget_state) = budget_state {
-        routing_headers.insert(ROUTER_BUDGET_HEADER, HeaderValue::from_static(budget_state));
-    }
-    if canary_guard.is_some() {
-        if let Err(message) = insert_header(
-            &mut routing_headers,
-            CANARY_RESPONSE_HEADER,
-            &state.canary_config().rollout_id,
-        ) {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "wayfinder_router_misconfigured",
-                message,
-                request_id_headers(&request_id),
-            );
-        }
-    }
-    if let Some(route_name) = route.preset_name.as_deref() {
-        if let Err(message) = insert_header(
-            &mut routing_headers,
-            ROUTER_ROUTE_HEADER,
-            &format!("{ROUTE_PRESET_PREFIX}{route_name}"),
-        ) {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "wayfinder_router_misconfigured",
-                message,
-                request_id_headers(&request_id),
-            );
-        }
-    }
-    if let (Some(policy), Some(grant)) = (state.access_policy(), access_grant) {
-        if let Some(workspace) = policy.workspace_id(grant) {
-            let value = match HeaderValue::from_str(workspace) {
-                Ok(value) => value,
-                Err(_) => {
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "wayfinder_router_misconfigured",
-                        "workspace id cannot be represented as a response header".to_owned(),
-                        request_id_headers(&request_id),
-                    );
-                }
-            };
-            routing_headers.insert(ROUTER_WORKSPACE_HEADER, value);
-        }
-        match policy.tightest_snapshot_shared(grant).await {
-            Ok(Some(snapshot)) => {
-                let _ = state.metrics().set_state_degraded(state.state_degraded());
-                if let Err(message) = insert_rate_snapshot_headers(&mut routing_headers, snapshot) {
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "wayfinder_router_state_error",
-                        message,
-                        request_id_headers(&request_id),
-                    );
-                }
-            }
-            Ok(None) => {
-                let _ = state.metrics().set_state_degraded(state.state_degraded());
-            }
-            Err(error) => {
-                let _ = state.metrics().set_state_degraded(state.state_degraded());
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "wayfinder_router_state_error",
-                    error.to_string(),
-                    request_id_headers(&request_id),
-                );
-            }
-        }
-    }
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
