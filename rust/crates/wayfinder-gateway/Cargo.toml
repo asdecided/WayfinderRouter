@@ -24,7 +24,6 @@ base64.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 http.workspace = true
-http-body-util.workspace = true
 indexmap.workspace = true
 opentelemetry = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
@@ -40,7 +39,6 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tower.workspace = true
-tower-http.workspace = true
 tracing.workspace = true
 tracing-opentelemetry = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
