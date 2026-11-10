@@ -68,6 +68,7 @@ struct MetricsState {
     requests: BTreeMap<(String, String), u64>,
     upstream_errors: BTreeMap<String, u64>,
     reload_failures: u64,
+    savings_persist_failures: u64,
     decision: Histogram<9>,
     upstream: BTreeMap<String, Histogram<10>>,
     deployment_ttft: BTreeMap<String, Histogram<10>>,
@@ -97,6 +98,7 @@ impl Default for MetricsState {
             requests: BTreeMap::new(),
             upstream_errors: BTreeMap::new(),
             reload_failures: 0,
+            savings_persist_failures: 0,
             decision: Histogram::new(DECISION_BUCKETS),
             upstream: BTreeMap::new(),
             deployment_ttft: BTreeMap::new(),
@@ -366,6 +368,13 @@ impl GatewayMetrics {
     pub fn record_reload_failure(&self) -> Result<(), MetricsError> {
         let mut state = self.state.lock().map_err(|_| MetricsError::LockPoisoned)?;
         state.reload_failures = state.reload_failures.saturating_add(1);
+        Ok(())
+    }
+
+    /// Record a failed savings-ledger write; the ledger stays dirty and is retried.
+    pub fn record_savings_persist_failure(&self) -> Result<(), MetricsError> {
+        let mut state = self.state.lock().map_err(|_| MetricsError::LockPoisoned)?;
+        state.savings_persist_failures = state.savings_persist_failures.saturating_add(1);
         Ok(())
     }
 
@@ -650,6 +659,14 @@ fn render_state(version: &str, state: &MetricsState) -> String {
         state.reload_failures
     );
 
+    output.push_str("# HELP wayfinder_router_savings_persist_failures_total Savings ledger writes that failed and will be retried.\n");
+    output.push_str("# TYPE wayfinder_router_savings_persist_failures_total counter\n");
+    let _ = writeln!(
+        output,
+        "wayfinder_router_savings_persist_failures_total {}",
+        state.savings_persist_failures
+    );
+
     output.push_str("# HELP wayfinder_state_degraded Shared-state backend unavailable; process-local fallback is active.\n");
     output.push_str("# TYPE wayfinder_state_degraded gauge\n");
     let _ = writeln!(
@@ -829,6 +846,7 @@ mod tests {
         metrics.observe_admission_rejected("queue-full")?;
         metrics.observe_admission_release()?;
         metrics.record_reload_failure()?;
+        metrics.record_savings_persist_failure()?;
         metrics.observe_cost(0.01, 0.02)?;
         metrics.set_model_costs(&BTreeMap::from([
             ("cloud".to_owned(), 10.0),
@@ -844,6 +862,7 @@ mod tests {
             text.contains("wayfinder_router_upstream_latency_seconds_count{model=\"local\"} 1")
         );
         assert!(text.contains("wayfinder_router_cache_avoided_cost_total 0.01"));
+        assert!(text.contains("wayfinder_router_savings_persist_failures_total 1"));
         assert!(text.contains("wayfinder_router_model_cost_per_1k{model=\"cloud\"} 10"));
         assert!(text.contains("wayfinder_router_savings_cost_total 0.01"));
         assert!(text.contains(
