@@ -833,7 +833,10 @@ fn stream_stop_reason(reason: Option<&str>) -> &'static str {
 
 fn stream_error(event_type: &str, payload: &Value, raw: &str) -> Option<(String, String)> {
     let object = payload.as_object();
-    let nested = object.and_then(|object| object.get("error"));
+    // An explicit `"error": null` on an ordinary chunk is not an error.
+    let nested = object
+        .and_then(|object| object.get("error"))
+        .filter(|error| !error.is_null());
     let is_error = nested.is_some()
         || event_type == "error"
         || object
@@ -1243,6 +1246,29 @@ mod tests {
         assert_eq!(event_names(&events), ["message_start", "error"]);
         assert_eq!(events[1].1["error"]["type"], "api_error");
         assert_eq!(events[1].1["error"]["message"], "connection refused");
+        Ok(())
+    }
+
+    #[test]
+    fn null_error_field_on_a_content_chunk_is_not_an_error() -> Result<(), String> {
+        let frames = translate_openai_sse_fragments(
+            [
+                &b"data: {\"error\":null,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"[..],
+                &b"data: {\"error\":null,\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"[..],
+                &b"data: [DONE]\n\n"[..],
+            ],
+            "m",
+            "i",
+            0,
+        )
+        .map_err(|error| error.to_string())?;
+        let events = parsed_events(&frames)?;
+        let names = event_names(&events);
+        assert!(
+            !names.contains(&"error"),
+            "unexpected error event: {names:?}"
+        );
+        assert_eq!(names.last().copied(), Some("message_stop"));
         Ok(())
     }
 

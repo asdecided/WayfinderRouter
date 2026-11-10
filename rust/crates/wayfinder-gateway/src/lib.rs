@@ -1,8 +1,9 @@
 //! Local HTTP gateway and operational policy.
 //!
-//! This bounded gateway surface exposes configuration-derived health/model
-//! discovery and deterministic decision-only chat. It never reads environment
-//! variables, resolves secrets, probes or calls providers, or starts a process.
+//! This crate is the HTTP data and control plane: authentication, routing
+//! decisions, budgets, rate limits, caching, reliability, and delivery to
+//! configured providers. The scored decision itself stays offline and keyless;
+//! credentials are resolved and providers called only for delivery.
 
 #![forbid(unsafe_code)]
 
@@ -1549,10 +1550,12 @@ impl AppState {
         routing_request: &RoutingRequest,
         production_model: &str,
         production_score: f64,
-        request_body: &Value,
+        request_body: &serde_json::Map<String, Value>,
         provider_consent: bool,
     ) {
-        let config = self.shadow_config.as_ref().clone();
+        // Decide on the borrowed config first: with shadow evaluation disabled
+        // or the request unsampled, nothing is cloned on the request path.
+        let config = self.shadow_config.as_ref();
         if !config.enabled
             || config.candidate_routes.is_empty()
             || !crate::shadow::deterministic_sample(
@@ -1578,9 +1581,10 @@ impl AppState {
             routing_request: routing_request.clone(),
             production_model: production_model.to_owned(),
             production_score,
-            request_body: request_body.clone(),
+            request_body: Value::Object(request_body.clone()),
             provider_consent,
         };
+        let config = config.clone();
         let state = self.clone();
         let store = Arc::clone(&self.shadow_store);
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
@@ -3171,7 +3175,7 @@ pub(crate) async fn chat_completions(
         &options.routing_request,
         &route.chosen,
         decision.score,
-        &Value::Object(body.clone()),
+        &body,
         crate::shadow::provider_consent(&headers),
     );
 
@@ -4190,6 +4194,11 @@ async fn streaming_chat_response(input: StreamingChatInput) -> Response {
                         );
                     }
                 }
+            }
+            // A stream is already open on this deployment: do not call the
+            // remaining deployments of the pool as well.
+            if established.is_some() {
+                break;
             }
         }
         if established.is_some() {

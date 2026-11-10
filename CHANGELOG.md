@@ -39,6 +39,13 @@ details, release history over commit history.
 - Explicit missing configuration and unusable discovered config paths now fail
   instead of falling back to defaults or a parent policy. Runtime config errors
   omit source text, and a regression verifies restrictions survive delivery fallback.
+- A streaming request to a model with several pooled deployments no longer calls
+  every deployment. Previously each remaining deployment was also sent the
+  request after a stream was already open, and the last one to answer was served.
+- Non-streaming Apple Foundation Models replies containing newlines, quotes,
+  backslashes or slashes no longer fail as malformed.
+- `/v1/messages` streaming no longer ends with an error when an upstream chunk
+  carries an explicit `"error": null`.
 - Workspace spend caps are now enforced without a Redis state backend and when
   Redis is unavailable. Previously a workspace's spend read as zero there, so a
   `block` or `degrade` budget never triggered.

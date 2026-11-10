@@ -372,6 +372,87 @@ async fn streaming_pool_never_crosses_the_offline_boundary() -> TestResult {
     Ok(())
 }
 
+struct AcceptingStreamingDelivery {
+    seen: SeenTargets,
+}
+
+impl StreamingDelivery for AcceptingStreamingDelivery {
+    fn send_stream<'a>(
+        &'a self,
+        model: &'a ConfiguredModel,
+        _body: Value,
+    ) -> StreamingDeliveryFuture<'a> {
+        Box::pin(async move {
+            self.seen
+                .lock()
+                .map_err(|_| {
+                    DeliveryError::Provider(
+                        wayfinder_providers::openai_compat::ProviderError::Transport,
+                    )
+                })?
+                .push(model.provider_model().to_owned());
+            Ok(StreamingDeliveryResponse::new(
+                StatusCode::OK,
+                "text/event-stream",
+                Box::pin(futures_util::stream::iter([Ok(Bytes::from_static(
+                    b"data: [DONE]\n\n",
+                ))])),
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn streaming_pool_stops_at_the_first_established_deployment() -> TestResult {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let model = ConfiguredModel::new(
+        "local",
+        "http://127.0.0.1:11434/v1",
+        "local-default",
+        None,
+        true,
+    )
+    .with_deployments(vec![ConfiguredDeployment::new(
+        "second",
+        "http://127.0.0.1:11435/v1",
+        "local-second",
+        None,
+        true,
+        1,
+    )]);
+    let state = AppState::new(RoutingConfig::binary(0.5), vec![model], false, "test")
+        .with_gateway_reliability(&GatewayConfig {
+            retries: 0,
+            ..GatewayConfig::default()
+        })?
+        .with_streaming_delivery(Arc::new(AcceptingStreamingDelivery {
+            seen: Arc::clone(&seen),
+        }));
+
+    let response = post_json(
+        &state,
+        "/v1/chat/completions",
+        &json!({
+            "model": "local",
+            "stream": true,
+            "messages": [{"role": "user", "content": "one upstream call"}]
+        }),
+        &[],
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = to_bytes(response.into_body(), usize::MAX).await?;
+    assert_eq!(
+        seen.lock()
+            .map_err(|_| std::io::Error::other("seen lock poisoned"))?
+            .len(),
+        1,
+        "an established stream must not be followed by calls to the pool's other deployments"
+    );
+    Ok(())
+}
+
 const EXACT_USAGE_BODY: &[u8] =
     br#"{"object":"chat.completion","usage":{"prompt_tokens":1000,"completion_tokens":25},"choices":[{"message":{"content":"ok"}}]}"#;
 
