@@ -38,6 +38,17 @@ details, release history over commit history.
 - Workspace spend caps are now enforced without a Redis state backend and when
   Redis is unavailable. Previously a workspace's spend read as zero there, so a
   `block` or `degrade` budget never triggered.
+- An exhausted `degrade` budget now lowers the route in classifier mode too: it
+  moves to the cheapest classifier model with a configured `cost_per_1k`
+  (ties go to the first in `routing.classifier.models` order). Previously the
+  route was left unchanged while the response still claimed `degraded`.
+- `x-wayfinder-router-budget: degraded` now appears only when the budget
+  actually moved the route. **New header value:** clients will see
+  `x-wayfinder-router-budget: exhausted` when a `degrade` budget is exhausted
+  but the route is unchanged — the request was already on the cheapest route,
+  no cheaper priced model exists, a key allowlist kept the original route, or
+  the request is offline. These responses previously said `degraded`
+  (WF-ADR-0032).
 
 ## Router 1.1.0 — 2026-09-06
 

@@ -74,6 +74,27 @@ The same constraint as failover frames this:
    absent means no cap. `limit` must be positive; `window` ∈ {day, month, all}; `on_breach`
    ∈ {degrade, block}.
 
+## Amendment (2026-11-10 — classifier-mode degrade and an honest budget header)
+
+Rules 3 and 6 are refined; where this amendment conflicts with them, it supersedes them:
+
+- **Classifier-mode degrade target.** A classifier has no tier ladder, so a degrade is no
+  longer a no-op there: it routes to the **cheapest priced model** among the classifier's
+  configured models, using the active price table. A classifier model with no configured
+  `cost_per_1k` is never a candidate (the gateway never degrades to a model whose cost is
+  unknown), and when the authenticated key has a `models` allowlist only allowed models are
+  candidates. Equal-cost candidates resolve to the first in the configured
+  `routing.classifier.models` order. The switch happens only when the target differs from the
+  chosen model and the chosen model is unpriced or strictly dearer; an equal-cost model is not
+  a downgrade. Tier mode keeps rule 3's target (the lowest rung of the ladder).
+- **The header reports what the budget did.** `x-wayfinder-router-budget: degraded` now means
+  the budget actually changed the route (`mode: budget-degraded`). When a degrade budget is
+  exhausted but the route is unchanged — already on the cheapest route, no cheaper priced
+  classifier model, no candidate at all, a key allowlist clamping the request back to its
+  original route, or an offline request (offline delivery already uses the cheapest local
+  tier, WF-ADR-0039) — the header is the new value **`exhausted`**. `blocked` is unchanged.
+  This applies to tier and classifier mode alike.
+
 ## Consequences
 
 - **Cost safety without a kill-switch**: the default keeps the gateway useful through a spend
