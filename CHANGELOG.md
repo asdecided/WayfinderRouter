@@ -21,6 +21,14 @@ details, release history over commit history.
   Dependabot proposes weekly Rust, npm and GitHub Actions updates. The lockfile
   moves to `rustls` 0.23.46, `rustls-webpki` 0.103.16 and `tokio` 1.53.3 to
   clear RUSTSEC-2026-0285, -0346, -0348, -0349, -0382 and -0386.
+- The savings ledger is no longer written synchronously after every completed
+  turn. A background writer saves it at most once a second when it changed,
+  and graceful shutdown (SIGINT/SIGTERM) writes any remaining changes, so a
+  clean stop loses nothing. Large ledgers previously cost up to ~200 ms of
+  blocking I/O per turn. Trade-off: an unclean crash can lose up to one second
+  of recorded spend from the file; budgets are still enforced from in-memory
+  totals within a running process. Failed writes are now logged, counted in
+  `wayfinder_router_savings_persist_failures_total` and retried.
 
 ### Fixed
 

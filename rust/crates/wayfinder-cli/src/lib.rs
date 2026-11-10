@@ -478,7 +478,8 @@ pub async fn run_serve_process(
         }
     };
     let mut startup_warnings = Vec::new();
-    let state = match build_serve_state(&options, &mut startup_warnings).await {
+    let state = match build_serve_state(&options, &mut startup_warnings, SavingsSource::Load).await
+    {
         Ok(state) => state,
         Err(message) => {
             write_error(stderr, &format!("wayfinder-router: {message}"));
@@ -506,6 +507,15 @@ pub async fn run_serve_process(
     };
     let reload_path = selected_config_path(&options);
     let initial_version = combined_config_source_version(&reload_path);
+    // One process-lifetime savings writer; config reloads adopt it through
+    // `with_runtime_state_from` rather than starting another.
+    if let Err(error) = state.start_savings_persister() {
+        write_error(
+            stderr,
+            &format!("wayfinder-router: cannot start savings persister: {error}"),
+        );
+        return EXIT_CONFIG;
+    }
     let audit_log = state.audit_log().clone();
     let holder = Arc::new(LastGood::new(state, initial_version));
     let reload_holder = Arc::clone(&holder);
@@ -520,7 +530,13 @@ pub async fn run_serve_process(
                 continue;
             }
             let mut diagnostics = Vec::new();
-            let loaded = match build_serve_state(&reload_options, &mut diagnostics).await {
+            let loaded = match build_serve_state(
+                &reload_options,
+                &mut diagnostics,
+                SavingsSource::Inherited,
+            )
+            .await
+            {
                 Ok(next) => {
                     let validated = if reload_options.surface == ServeSurface::DataPlane {
                         validate_data_plane_state(&next).map_err(|error| error.to_string())
@@ -589,6 +605,7 @@ pub async fn run_serve_process(
     let shutdown = async {
         let _: Result<(), wayfinder_gateway::server::ServerError> = shutdown_signal().await;
     };
+    let savings_holder = Arc::clone(&holder);
     let application = match options.surface {
         ServeSurface::Local => build_reloadable_router(holder),
         ServeSurface::DataPlane => build_reloadable_data_plane_router(holder),
@@ -597,6 +614,22 @@ pub async fn run_serve_process(
         serve_with_shutdown(listener, application, shutdown, DEFAULT_DRAIN_TIMEOUT).await;
     reload_task.abort();
     let _ = reload_task.await;
+    let savings_result = match savings_holder.current() {
+        Ok(current) => {
+            match tokio::time::timeout(DEFAULT_DRAIN_TIMEOUT, current.shutdown_savings_persister())
+                .await
+            {
+                Ok(result) => result.map_err(|error| format!("savings flush failed: {error}")),
+                Err(_) => Err(format!(
+                    "savings persister did not flush within {DEFAULT_DRAIN_TIMEOUT:?}"
+                )),
+            }
+        }
+        Err(error) => Err(format!("savings flush failed: {error}")),
+    };
+    if let Err(message) = &savings_result {
+        write_error(stderr, &format!("wayfinder-router: {message}"));
+    }
     let audit_result = tokio::time::timeout(DEFAULT_DRAIN_TIMEOUT, audit_log.shutdown()).await;
     let audit_result = match audit_result {
         Ok(result) => result.map_err(|error| error.to_string()),
@@ -605,7 +638,8 @@ pub async fn run_serve_process(
         )),
     };
     match (server_result, audit_result) {
-        (Ok(()), Ok(())) => EXIT_OK,
+        (Ok(()), Ok(())) if savings_result.is_ok() => EXIT_OK,
+        (Ok(()), Ok(())) => EXIT_CONFIG,
         (Err(server), Ok(())) => {
             write_error(stderr, &format!("wayfinder-router: {server}"));
             EXIT_CONFIG
@@ -790,9 +824,21 @@ fn validate_serve_security(options: &ServeOptions, state: &AppState) -> Result<(
     Ok(())
 }
 
+/// Where a built serve state's savings ledger comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SavingsSource {
+    /// Startup: load (and recover) the persisted ledger from disk.
+    Load,
+    /// Config reload: the ledger, path, and single background writer are
+    /// adopted from the running state by `with_runtime_state_from`, so the
+    /// file is neither re-read nor rewritten by a second writer.
+    Inherited,
+}
+
 async fn build_serve_state<W: Write>(
     options: &ServeOptions,
     stderr: &mut W,
+    savings: SavingsSource,
 ) -> Result<AppState, String> {
     let explicit = options.config.clone().or_else(|| {
         std::env::var_os(CONFIG_PATH_ENV)
@@ -880,21 +926,23 @@ async fn build_serve_state<W: Write>(
         .with_gateway_operator_auth(&gateway)
         .map_err(|error| error.to_string())?;
     state = with_local_project_profiles(state, &gateway)?;
-    let savings_path = std::env::var_os(SAVINGS_FILE_ENV)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("wayfinder-savings.json"));
-    let (ledger, loaded) = load_savings_ledger(&savings_path)?;
-    if let LedgerLoad::Recovered { quarantine } = loaded {
-        let _ = writeln!(
-            stderr,
-            "wayfinder-router: recovered savings ledger; corrupt state quarantined at {}",
-            quarantine.display()
-        );
+    if savings == SavingsSource::Load {
+        let savings_path = std::env::var_os(SAVINGS_FILE_ENV)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("wayfinder-savings.json"));
+        let (ledger, loaded) = load_savings_ledger(&savings_path)?;
+        if let LedgerLoad::Recovered { quarantine } = loaded {
+            let _ = writeln!(
+                stderr,
+                "wayfinder-router: recovered savings ledger; corrupt state quarantined at {}",
+                quarantine.display()
+            );
+        }
+        state = state
+            .with_savings_ledger(Arc::new(ledger))
+            .with_savings_path(savings_path);
     }
-    state = state
-        .with_savings_ledger(Arc::new(ledger))
-        .with_savings_path(savings_path);
     state = state
         .with_gateway_admission(&gateway)
         .map_err(|error| error.to_string())?

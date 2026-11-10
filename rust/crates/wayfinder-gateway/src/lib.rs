@@ -30,6 +30,7 @@ pub mod recent;
 pub mod reliability;
 pub mod reload;
 pub mod responses;
+pub mod savings_persistence;
 pub mod server;
 pub mod shadow;
 pub mod state;
@@ -796,6 +797,7 @@ pub struct AppState {
     price_table_version: Arc<str>,
     savings_ledger: Arc<SavingsLedger>,
     savings_path: Option<Arc<std::path::PathBuf>>,
+    savings_persistence: Arc<savings_persistence::SavingsPersistence>,
     codex_control: Option<Arc<dyn codex_control::CodexControl>>,
     operator_auth: Option<Arc<operator_auth::OperatorAuthenticator>>,
     audit_log: Arc<audit::AuditLog>,
@@ -880,6 +882,7 @@ impl AppState {
             price_table_version: Arc::from(price_table_version),
             savings_ledger,
             savings_path: None,
+            savings_persistence: Arc::default(),
             codex_control: None,
             operator_auth: None,
             audit_log: Arc::new(audit::AuditLog::disabled()),
@@ -1279,21 +1282,89 @@ impl AppState {
     #[must_use]
     pub fn with_savings_ledger(mut self, ledger: Arc<SavingsLedger>) -> Self {
         self.savings_ledger = ledger;
+        // A rebound ledger never shares a writer bound to the previous one.
+        self.savings_persistence = Arc::default();
         self
     }
 
-    /// Persist realized accounting to this path after each completed turn.
+    /// Persist realized accounting to this path.
+    ///
+    /// Completed turns only mark the ledger dirty. Writes happen in the
+    /// background once [`Self::start_savings_persister`] has been called (the
+    /// `serve` entry point does this), at most once per
+    /// [`savings_persistence::SAVINGS_PERSIST_INTERVAL`], with a final write
+    /// from [`Self::shutdown_savings_persister`]. Without a started persister,
+    /// the owner must call [`Self::persist_savings`] or
+    /// [`Self::shutdown_savings_persister`] to write recorded turns.
     #[must_use]
     pub fn with_savings_path(mut self, path: std::path::PathBuf) -> Self {
         self.savings_path = Some(Arc::new(path));
+        // A rebound path never shares a writer bound to the previous one.
+        self.savings_persistence = Arc::default();
         self
     }
 
-    /// Flush the current ledger when persistence is configured.
+    /// Synchronously write the current ledger when persistence is configured.
+    ///
+    /// This writes even when nothing is marked dirty, blocks the calling
+    /// thread on file I/O, and is intended for tests, embedders without a
+    /// background persister, and startup. A failure is logged, counted in
+    /// `wayfinder_router_savings_persist_failures_total`, and leaves the
+    /// ledger dirty for a running persister to retry.
     pub fn persist_savings(&self) -> Result<(), wayfinder_service::pricing::LedgerError> {
+        self.savings_target().map_or(Ok(()), |target| {
+            self.savings_persistence.save_now(&target, true).map(|_| ())
+        })
+    }
+
+    /// Start the single background savings persister for this ledger and path.
+    ///
+    /// Returns `Ok(false)` when no savings path is configured or a persister
+    /// was already started for this process-lifetime persistence authority
+    /// (including one carried over by [`Self::with_runtime_state_from`]). The
+    /// persister binds the ledger and path configured at call time. Requires a
+    /// Tokio runtime; construction of [`AppState`] never starts it.
+    pub fn start_savings_persister(
+        &self,
+    ) -> Result<bool, savings_persistence::SavingsPersistError> {
+        self.savings_target()
+            .map_or(Ok(false), |target| self.savings_persistence.start(target))
+    }
+
+    /// Stop the background persister after a final write of any dirty state.
+    ///
+    /// When no persister is running, dirty state is still written once on the
+    /// blocking pool, so a graceful stop loses nothing either way.
+    pub async fn shutdown_savings_persister(
+        &self,
+    ) -> Result<(), savings_persistence::SavingsPersistError> {
+        match self.savings_target() {
+            Some(target) => self.savings_persistence.shutdown(target).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Process-lifetime savings persistence state, for diagnostics and tests.
+    #[must_use]
+    pub fn savings_persistence(&self) -> &savings_persistence::SavingsPersistence {
+        &self.savings_persistence
+    }
+
+    /// Cheap request-path hook: mark the ledger dirty for the persister.
+    fn note_savings_recorded(&self) {
+        if self.savings_path.is_some() {
+            self.savings_persistence.mark_dirty();
+        }
+    }
+
+    fn savings_target(&self) -> Option<savings_persistence::SavingsTarget> {
         self.savings_path
-            .as_deref()
-            .map_or(Ok(()), |path| self.savings_ledger.save(path))
+            .as_ref()
+            .map(|path| savings_persistence::SavingsTarget {
+                ledger: Arc::clone(&self.savings_ledger),
+                path: Arc::clone(path),
+                metrics: Arc::clone(&self.metrics),
+            })
     }
 
     /// Preserve process-lifetime runtime authorities across a config snapshot swap.
@@ -1304,6 +1375,8 @@ impl AppState {
     /// snapshot are still in flight would let each generation admit up to its
     /// own limit. Concurrency-limit changes therefore take effect on process
     /// restart rather than weakening the active bound during hot reload.
+    /// Savings persistence is likewise one authority: the ledger, its path,
+    /// the dirty flag, and the single background writer all carry over.
     #[must_use]
     pub fn with_runtime_state_from(mut self, previous: &Self) -> Self {
         self.admission_policy = Arc::clone(&previous.admission_policy);
@@ -1318,6 +1391,7 @@ impl AppState {
         self.evidence_labels = Arc::clone(&previous.evidence_labels);
         self.savings_ledger = Arc::clone(&previous.savings_ledger);
         self.savings_path = previous.savings_path.clone();
+        self.savings_persistence = Arc::clone(&previous.savings_persistence);
         self.audit_log = Arc::clone(&previous.audit_log);
         self
     }
@@ -6227,10 +6301,14 @@ async fn record_accounted_usage(
     let workspace_id = state
         .access_policy()
         .and_then(|policy| access_grant.and_then(|grant| policy.workspace_id(grant)));
-    let _ = state
+    if state
         .savings_ledger()
-        .record_attributed(&cost, today, key_id, workspace_id);
-    let _ = state.persist_savings();
+        .record_attributed(&cost, today, key_id, workspace_id)
+        .is_ok()
+    {
+        // Only mark dirty here; the background persister writes the file.
+        state.note_savings_recorded();
+    }
     if let Some(backend) = state
         .shared_state_backend()
         .filter(|backend| backend.backend_name() == "redis")
