@@ -285,11 +285,12 @@ async fn replicated_accounting_admission_and_health_are_atomic() -> TestResult {
             .await,
         "health first",
     )?);
-    assert!(!redis_step(
+    // A closed circuit admits concurrent attempts across replicas.
+    assert!(redis_step(
         second
             .begin_provider_health("cloud-eu", 1, 20, "probe-b")
             .await,
-        "health concurrent",
+        "health concurrent while closed",
     )?);
     redis_step(
         first
@@ -310,12 +311,46 @@ async fn replicated_accounting_admission_and_health_are_atomic() -> TestResult {
             .await,
         "health probe",
     )?);
+    // Half-open admits exactly one probe fleet-wide.
+    assert!(!redis_step(
+        first
+            .begin_provider_health("cloud-eu", 1, 20, "probe-c")
+            .await,
+        "health second probe",
+    )?);
+    // An attempt admitted before the circuit opened may finish now; it is
+    // accepted but must not decide the circuit while the probe is in flight.
+    redis_step(
+        first
+            .complete_provider_health("cloud-eu", 1, 20, "probe-late", true)
+            .await,
+        "health late completion",
+    )?;
+    assert!(!redis_step(
+        first
+            .begin_provider_health("cloud-eu", 1, 20, "probe-c")
+            .await,
+        "health still half-open after late completion",
+    )?);
     redis_step(
         second
             .complete_provider_health("cloud-eu", 1, 20, "probe-b", true)
             .await,
         "health recovery",
     )?;
+    // Recovered: closed again, so concurrent attempts are admitted.
+    assert!(redis_step(
+        first
+            .begin_provider_health("cloud-eu", 1, 20, "probe-d")
+            .await,
+        "health after recovery first",
+    )?);
+    assert!(redis_step(
+        second
+            .begin_provider_health("cloud-eu", 1, 20, "probe-e")
+            .await,
+        "health after recovery second",
+    )?);
 
     let namespace_component = URL_SAFE_NO_PAD.encode(namespace.as_bytes());
     let keys: Vec<String> = redis::cmd("KEYS")
