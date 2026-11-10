@@ -6,7 +6,7 @@
 //! the handler's original order, so request validation, side effects and the
 //! first error a request reports are the same as before the split.
 
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use serde_json::{Map, Value};
 use wayfinder_routing_core::{
@@ -16,6 +16,8 @@ use wayfinder_routing_core::{
 use wayfinder_service::pricing::estimate_tokens;
 
 use crate::access::AccessGrant;
+use crate::budget::{BudgetDecision, degrade_target, format_limit};
+use crate::canary::CANARY_RESPONSE_HEADER;
 use crate::decision_policy::{
     ROUTE_ON_HEADER, RouteOn, STICKY_COOLDOWN_HEADER, STICKY_HEADER, THRESHOLD_HEADER,
     TUNING_FIELD, apply_scoring_overrides, conversation_high_water, extract_prompt,
@@ -24,10 +26,13 @@ use crate::decision_policy::{
 };
 use crate::route_mode::RouteMode;
 use crate::{
-    AppState, ConfiguredModel, RequestSelection, assess_model, bad_override_response,
-    destination_ineligible_response, error_response, exclusion_reason_name, offline_override,
-    parse_privacy_posture, privacy_response_headers, request_header, request_id_headers,
-    request_requirements, resolve_request_selection,
+    AppState, ConfiguredModel, DecisionPolicyReceipt, ROUTE_PRESET_PREFIX, ROUTER_BUDGET_HEADER,
+    ROUTER_PRIVACY_POSTURE_HEADER, ROUTER_ROUTE_HEADER, ROUTER_WORKSPACE_HEADER, RequestSelection,
+    assess_model, bad_override_response, clamp_to_allowed, decision_headers,
+    destination_ineligible_response, error_response, exclusion_reason_name, insert_header,
+    insert_rate_snapshot_headers, offline_override, parse_privacy_posture, privacy_posture_name,
+    privacy_response_headers, request_header, request_id_headers, request_requirements,
+    resolve_request_selection, utc_today,
 };
 
 /// Per-request routing options resolved from headers, the tuning field and
@@ -383,4 +388,291 @@ pub(crate) fn enforce_destination_eligibility(
         }
     }
     Ok(())
+}
+
+/// The caller's virtual-key grant and the key and workspace it resolves to.
+#[derive(Clone, Copy)]
+pub(crate) struct RequestAccess<'a> {
+    /// The authenticated grant, when an access policy is configured.
+    pub(crate) grant: Option<AccessGrant>,
+    /// Virtual-key id of the grant.
+    pub(crate) key_id: Option<&'a str>,
+    /// Workspace id of the grant.
+    pub(crate) workspace_id: Option<&'a str>,
+}
+
+/// What the spend budget did to this request's route.
+pub(crate) struct BudgetRouting {
+    /// Value for the budget response header: `exhausted` or `degraded`.
+    pub(crate) state: Option<&'static str>,
+    /// The pre-degrade route, kept only when the budget actually rerouted, so
+    /// a later key clamp that restores it cannot leave a false `degraded`.
+    pub(crate) rerouted_from: Option<String>,
+}
+
+/// Evaluate the spend budget: allow, block the request, or degrade the route
+/// to a cheaper tier the key may use.
+pub(crate) async fn apply_budget(
+    state: &AppState,
+    access: RequestAccess<'_>,
+    options: &RequestOptions,
+    decision: &ComplexityScore,
+    request_id: &str,
+    route: &mut RouteSelection,
+) -> Result<BudgetRouting, Box<Response>> {
+    let RequestAccess {
+        grant: access_grant,
+        key_id,
+        workspace_id,
+    } = access;
+    let offline = options.offline;
+    let mut budget = BudgetRouting {
+        state: None,
+        rerouted_from: None,
+    };
+    if state.budget_policy().active() && state.price_table().priced {
+        let today = match utc_today() {
+            Ok(today) => today,
+            Err(error) => {
+                return Err(internal_error(
+                    "wayfinder_router_state_error",
+                    error.to_string(),
+                    request_id,
+                ));
+            }
+        };
+        let budget_decision = if let Some(backend) = state
+            .shared_state_backend()
+            .filter(|backend| backend.backend_name() == "redis")
+        {
+            match state
+                .budget_policy()
+                .evaluate_shared_for(backend.as_ref(), true, workspace_id, key_id, today, offline)
+                .await
+            {
+                Ok(decision) => Ok(decision),
+                Err(_) => state
+                    .budget_policy()
+                    .evaluate_for(
+                        state.savings_ledger(),
+                        true,
+                        workspace_id,
+                        key_id,
+                        today,
+                        offline,
+                    )
+                    .map_err(|error| error.to_string()),
+            }
+        } else {
+            state
+                .budget_policy()
+                .evaluate_for(
+                    state.savings_ledger(),
+                    true,
+                    workspace_id,
+                    key_id,
+                    today,
+                    offline,
+                )
+                .map_err(|error| error.to_string())
+        };
+        match budget_decision {
+            Ok(BudgetDecision::Allow) => {}
+            Ok(BudgetDecision::Degrade) => {
+                // `exhausted` unless the budget really lowers the route below.
+                // Offline delivery already converges on the cheapest local
+                // tier later, so the budget itself does not reroute there.
+                budget.state = Some("exhausted");
+                let allowed_models = state
+                    .access_policy()
+                    .and_then(|policy| access_grant.map(|grant| policy.allowed_models(grant)))
+                    .filter(|allowed| !allowed.is_empty());
+                let target = (!offline)
+                    .then(|| {
+                        degrade_target(
+                            decision.tiers.as_deref(),
+                            decision.models.as_deref(),
+                            &state.price_table().costs,
+                            allowed_models,
+                            &route.chosen,
+                        )
+                    })
+                    .flatten();
+                if let Some(target) = target {
+                    budget.state = Some("degraded");
+                    budget.rerouted_from = Some(std::mem::replace(&mut route.chosen, target));
+                    route.mode = RouteMode::BudgetDegraded;
+                    route.preset_models = None;
+                    route.preset_name = None;
+                    route.preset_route_active = false;
+                }
+            }
+            Ok(BudgetDecision::Block { window, limit }) => {
+                let mut headers = request_id_headers(request_id);
+                headers.insert(ROUTER_BUDGET_HEADER, HeaderValue::from_static("blocked"));
+                return Err(Box::new(error_response(
+                    StatusCode::PAYMENT_REQUIRED,
+                    "wayfinder_router_budget_exhausted",
+                    format!("{window} budget of {} reached", format_limit(limit)),
+                    headers,
+                )));
+            }
+            Err(error) => {
+                return Err(internal_error(
+                    "wayfinder_router_state_error",
+                    error,
+                    request_id,
+                ));
+            }
+        }
+    }
+    Ok(budget)
+}
+
+/// Clamp the route onto the key's model allowlist, walking the tier ladder.
+pub(crate) fn clamp_route_to_key(
+    state: &AppState,
+    access_grant: Option<AccessGrant>,
+    decision: &ComplexityScore,
+    route: &mut RouteSelection,
+) {
+    if let (Some(policy), Some(grant)) = (state.access_policy(), access_grant) {
+        let allowed = policy.allowed_models(grant);
+        if !allowed.is_empty() {
+            let mut ladder = decision
+                .tiers
+                .as_ref()
+                .map(|tiers| tiers.iter().collect::<Vec<_>>())
+                .unwrap_or_default();
+            ladder.sort_by(|left, right| left.min_score.total_cmp(&right.min_score));
+            let ladder = ladder
+                .into_iter()
+                .map(|tier| tier.model.as_str())
+                .collect::<Vec<_>>();
+            let clamped = clamp_to_allowed(&route.chosen, &ladder, allowed);
+            if clamped != route.chosen {
+                route.chosen = clamped;
+                route.mode = RouteMode::KeyScoped;
+            }
+        }
+    }
+}
+
+/// Inputs to the routing response headers.
+pub(crate) struct RoutingHeaderInput<'a> {
+    /// The final route, after budget, key clamp and canary.
+    pub(crate) route: &'a RouteSelection,
+    /// Complexity score of the request.
+    pub(crate) score: f64,
+    /// Request id echoed on every response.
+    pub(crate) request_id: &'a str,
+    /// Whether the request is served offline.
+    pub(crate) offline: bool,
+    /// Requested privacy posture.
+    pub(crate) privacy_posture: PrivacyPosture,
+    /// Resolved policy profile, if any.
+    pub(crate) policy_profile_id: Option<&'a str>,
+    /// Budget header value, if the budget applied.
+    pub(crate) budget_state: Option<&'static str>,
+    /// Whether a canary observation guard was assigned.
+    pub(crate) canary_assigned: bool,
+    /// The caller's virtual-key grant.
+    pub(crate) access_grant: Option<AccessGrant>,
+}
+
+/// Assemble the routing decision, privacy, budget, canary, preset, workspace
+/// and rate-limit headers every routed response carries.
+pub(crate) async fn build_routing_headers(
+    state: &AppState,
+    input: RoutingHeaderInput<'_>,
+) -> Result<HeaderMap, Box<Response>> {
+    let request_id = input.request_id;
+    let misconfigured =
+        |message: String| internal_error("wayfinder_router_misconfigured", message, request_id);
+    let mut routing_headers = decision_headers(
+        &input.route.chosen,
+        input.score,
+        input.route.mode,
+        request_id,
+        input.offline,
+        DecisionPolicyReceipt {
+            version: state.policy_version(),
+            snapshot_id: state.policy_snapshot_id(),
+            profile_id: input.policy_profile_id,
+        },
+    )
+    .map_err(misconfigured)?;
+    insert_header(
+        &mut routing_headers,
+        ROUTER_PRIVACY_POSTURE_HEADER,
+        privacy_posture_name(input.privacy_posture),
+    )
+    .map_err(misconfigured)?;
+    if let Some(budget_state) = input.budget_state {
+        routing_headers.insert(ROUTER_BUDGET_HEADER, HeaderValue::from_static(budget_state));
+    }
+    if input.canary_assigned {
+        insert_header(
+            &mut routing_headers,
+            CANARY_RESPONSE_HEADER,
+            &state.canary_config().rollout_id,
+        )
+        .map_err(misconfigured)?;
+    }
+    if let Some(route_name) = input.route.preset_name.as_deref() {
+        insert_header(
+            &mut routing_headers,
+            ROUTER_ROUTE_HEADER,
+            &format!("{ROUTE_PRESET_PREFIX}{route_name}"),
+        )
+        .map_err(misconfigured)?;
+    }
+    if let (Some(policy), Some(grant)) = (state.access_policy(), input.access_grant) {
+        if let Some(workspace) = policy.workspace_id(grant) {
+            let value = match HeaderValue::from_str(workspace) {
+                Ok(value) => value,
+                Err(_) => {
+                    return Err(misconfigured(
+                        "workspace id cannot be represented as a response header".to_owned(),
+                    ));
+                }
+            };
+            routing_headers.insert(ROUTER_WORKSPACE_HEADER, value);
+        }
+        match policy.tightest_snapshot_shared(grant).await {
+            Ok(Some(snapshot)) => {
+                let _ = state.metrics().set_state_degraded(state.state_degraded());
+                if let Err(message) = insert_rate_snapshot_headers(&mut routing_headers, snapshot) {
+                    return Err(internal_error(
+                        "wayfinder_router_state_error",
+                        message,
+                        request_id,
+                    ));
+                }
+            }
+            Ok(None) => {
+                let _ = state.metrics().set_state_degraded(state.state_degraded());
+            }
+            Err(error) => {
+                let _ = state.metrics().set_state_degraded(state.state_degraded());
+                return Err(internal_error(
+                    "wayfinder_router_state_error",
+                    error.to_string(),
+                    request_id,
+                ));
+            }
+        }
+    }
+    Ok(routing_headers)
+}
+
+/// A 500 error carrying only the request id header, the convention for
+/// failures before the routing headers exist.
+fn internal_error(kind: &'static str, message: String, request_id: &str) -> Box<Response> {
+    Box::new(error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        kind,
+        message,
+        request_id_headers(request_id),
+    ))
 }
