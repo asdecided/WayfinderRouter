@@ -4,6 +4,7 @@
 //! ABI module below. Public errors contain only stable classes and never retain
 //! request or response content.
 
+use std::borrow::Cow;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -218,7 +219,7 @@ impl<T: FoundationModelsTransport> FoundationModelsClient<T> {
             .transport
             .availability(&request, DEFAULT_CONTROL_TIMEOUT)?;
         let response: AvailabilityResponse<'_> = decode(&reply)?;
-        validate_response_envelope(response.protocol_version, response.request_id, request_id)?;
+        validate_response_envelope(response.protocol_version, &response.request_id, request_id)?;
         Ok(response.availability)
     }
 
@@ -240,15 +241,15 @@ impl<T: FoundationModelsTransport> FoundationModelsClient<T> {
         let response: GenerateResponseWire<'_> = decode(&reply)?;
         validate_response_envelope(
             response.protocol_version,
-            response.request_id,
+            &response.request_id,
             &request.request_id,
         )?;
         if response.content.len() > MAX_RESPONSE_BYTES {
             return Err(FoundationModelsXpcError::ResponseTooLarge);
         }
         Ok(GenerateResponse {
-            request_id: response.request_id.to_owned(),
-            content: response.content.to_owned(),
+            request_id: response.request_id.into_owned(),
+            content: response.content.into_owned(),
         })
     }
 
@@ -334,8 +335,10 @@ struct AvailabilityRequest<'a> {
 #[serde(rename_all = "camelCase")]
 struct AvailabilityResponse<'a> {
     protocol_version: u32,
-    #[serde(rename = "requestID")]
-    request_id: &'a str,
+    // `Cow` rather than `&str`: a JSON string containing an escape sequence
+    // cannot be borrowed from the input, and the broker's encoder escapes.
+    #[serde(rename = "requestID", borrow)]
+    request_id: Cow<'a, str>,
     availability: Availability,
 }
 
@@ -354,9 +357,12 @@ struct GenerateRequestWire<'a> {
 #[serde(rename_all = "camelCase")]
 struct GenerateResponseWire<'a> {
     protocol_version: u32,
-    #[serde(rename = "requestID")]
-    request_id: &'a str,
-    content: &'a str,
+    #[serde(rename = "requestID", borrow)]
+    request_id: Cow<'a, str>,
+    // Model output routinely contains newlines and quotes, which arrive
+    // escaped and therefore cannot be borrowed.
+    #[serde(borrow)]
+    content: Cow<'a, str>,
 }
 
 fn validate_request_id(request_id: &str) -> Result<(), FoundationModelsXpcError> {
@@ -684,6 +690,19 @@ mod tests {
         assert_eq!(
             client.generate(&request()).map(|response| response.content),
             Ok("answer".into())
+        );
+    }
+
+    #[test]
+    fn generate_decodes_escaped_content_from_the_broker() {
+        // Foundation's JSONEncoder escapes newlines, quotes, backslashes and
+        // forward slashes, so real model output never arrives escape-free.
+        let client = FoundationModelsClient::new(FakeTransport::with_reply(
+            r#"{"protocolVersion":1,"requestID":"opaque-1","content":"line one\nsaid \"hi\" a\/b \\ end"}"#,
+        ));
+        assert_eq!(
+            client.generate(&request()).map(|response| response.content),
+            Ok("line one\nsaid \"hi\" a/b \\ end".into())
         );
     }
 
