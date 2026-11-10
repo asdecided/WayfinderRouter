@@ -6,6 +6,7 @@ use wayfinder_routing_core::{ExecutionBoundary, RoutingConfig, Tier, python_roun
 
 use crate::ConfiguredModel;
 use crate::recent::{RecentEntry, UserOutcome};
+use crate::route_mode::RouteMode;
 
 /// Stable schema identifier for a local outcome policy proposal.
 pub const OUTCOME_POLICY_SCHEMA_VERSION: &str = "wf-local-outcome-policy-v1";
@@ -120,7 +121,7 @@ pub fn propose_local_threshold(
             continue;
         };
         report.labelled = report.labelled.saturating_add(1);
-        if entry.mode != "scored" {
+        if entry.mode != RouteMode::Scored.as_str() {
             report.non_scored = report.non_scored.saturating_add(1);
             continue;
         }

@@ -35,6 +35,8 @@ pub mod server;
 pub mod shadow;
 pub mod state;
 
+mod route_mode;
+
 pub use crate::decision_policy::RouteOn;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -124,6 +126,7 @@ use crate::recent::{
 };
 use crate::reliability::{ReliabilityAttempt, ReliabilityError, ReliabilityPolicy, sleep_retry};
 use crate::reload::LastGood;
+use crate::route_mode::RouteMode;
 use crate::shadow::{ShadowJob, ShadowSnapshot, ShadowStore};
 use crate::state::{
     SharedBudgetReservation, SharedCachePut, SharedCanaryObservation, SharedCanarySnapshot,
@@ -3124,14 +3127,14 @@ pub(crate) async fn chat_completions(
     let (mut chosen, mut mode, mut preset_models, mut preset_name) =
         if let Some(selection) = selection {
             match selection {
-                RequestSelection::Model(pin) => (pin, "pinned", None, None),
+                RequestSelection::Model(pin) => (pin, RouteMode::Pinned, None, None),
                 RequestSelection::Preset { name, models } => {
                     let chosen = models[0].clone();
-                    (chosen, "preset", Some(models), Some(name))
+                    (chosen, RouteMode::Preset, Some(models), Some(name))
                 }
             }
         } else if let Some(slash_pin) = slash_resolution.and_then(|resolution| resolution.pin) {
-            (slash_pin, "slash-pinned", None, None)
+            (slash_pin, RouteMode::SlashPinned, None, None)
         } else {
             let threshold_header = match request_header(&headers, THRESHOLD_HEADER) {
                 Ok(value) => value,
@@ -3154,11 +3157,11 @@ pub(crate) async fn chat_completions(
                         request_id_headers(&request_id),
                     );
                 };
-                (model.to_owned(), "threshold-override", tiers)
+                (model.to_owned(), RouteMode::ThresholdOverride, tiers)
             } else {
                 (
                     decision.recommendation.clone(),
-                    "scored",
+                    RouteMode::Scored,
                     routing.tiers.clone(),
                 )
             };
@@ -3183,7 +3186,7 @@ pub(crate) async fn chat_completions(
                         .unwrap_or(0);
                     if latched_rank > current_rank {
                         chosen = latched;
-                        mode = "sticky";
+                        mode = RouteMode::Sticky;
                     }
                 }
             }
@@ -3238,7 +3241,7 @@ pub(crate) async fn chat_completions(
             );
         };
         chosen = first;
-    } else if !state.dry_run() && matches!(mode, "pinned" | "slash-pinned") {
+    } else if !state.dry_run() && mode.is_pinned() {
         if let Some(model) = state.models().iter().find(|model| model.name() == chosen) {
             let assessment = assess_model(&routing_request, model);
             if !assessment.is_eligible() {
@@ -3328,7 +3331,7 @@ pub(crate) async fn chat_completions(
                 if let Some(target) = target {
                     budget_state = Some("degraded");
                     budget_rerouted_from = Some(std::mem::replace(&mut chosen, target));
-                    mode = "budget-degraded";
+                    mode = RouteMode::BudgetDegraded;
                     preset_models = None;
                     preset_name = None;
                     preset_route_active = false;
@@ -3370,14 +3373,14 @@ pub(crate) async fn chat_completions(
             let clamped = clamp_to_allowed(&chosen, &ladder, allowed);
             if clamped != chosen {
                 chosen = clamped;
-                mode = "key-scoped";
+                mode = RouteMode::KeyScoped;
             }
         }
     }
     if budget_rerouted_from.as_deref() == Some(chosen.as_str()) {
         budget_state = Some("exhausted");
     }
-    let canary_guard = if !state.dry_run() && !preset_route_active && mode == "scored" {
+    let canary_guard = if !state.dry_run() && !preset_route_active && mode == RouteMode::Scored {
         maybe_assign_canary(
             &state,
             CanaryRequest {
@@ -3403,7 +3406,7 @@ pub(crate) async fn chat_completions(
             .map(|context| context.candidate_route.clone())
     }) {
         chosen = candidate;
-        mode = "canary";
+        mode = RouteMode::Canary;
     }
     let mut routing_headers = match decision_headers(
         &chosen,
@@ -3519,7 +3522,7 @@ pub(crate) async fn chat_completions(
         request_id: request_id.clone(),
         model: chosen.clone(),
         score: python_round(decision.score, 2),
-        mode: mode.to_owned(),
+        mode: mode.as_str().to_owned(),
         policy_version: (state.policy_version() != UNMANAGED_POLICY_ID)
             .then(|| state.policy_version().to_owned()),
         snapshot_id: (state.policy_snapshot_id() != UNMANAGED_SNAPSHOT_ID)
@@ -3537,10 +3540,11 @@ pub(crate) async fn chat_completions(
         workspace: workspace_id.map(str::to_owned),
         cache: None,
     });
-    let _ =
-        state
-            .metrics()
-            .observe_decision(&chosen, mode, decision_started.elapsed().as_secs_f64());
+    let _ = state.metrics().observe_decision(
+        &chosen,
+        mode.as_str(),
+        decision_started.elapsed().as_secs_f64(),
+    );
 
     state.schedule_shadow(
         &request_id,
@@ -3567,7 +3571,7 @@ pub(crate) async fn chat_completions(
         );
     }
 
-    let request_is_pinned = matches!(mode, "pinned" | "slash-pinned");
+    let request_is_pinned = mode.is_pinned();
     let request_is_preset = preset_route_active;
     let delivery_name = if offline && !request_is_pinned && !request_is_preset {
         decision
@@ -3628,7 +3632,7 @@ pub(crate) async fn chat_completions(
         privacy_posture_name(privacy_posture)
     );
     let cache_route = preset_name.as_deref().map_or_else(
-        || format!("{mode}:{delivery_name}"),
+        || format!("{}:{delivery_name}", mode.as_str()),
         |name| format!("{ROUTE_PRESET_PREFIX}{name}"),
     );
     let cacheable = cache_enabled
@@ -6433,7 +6437,7 @@ struct DecisionPolicyReceipt<'a> {
 fn decision_headers(
     chosen: &str,
     score: f64,
-    mode: &str,
+    mode: RouteMode,
     request_id: &str,
     offline: bool,
     policy: DecisionPolicyReceipt<'_>,
@@ -6441,7 +6445,7 @@ fn decision_headers(
     let mut headers = HeaderMap::new();
     insert_header(&mut headers, ROUTER_MODEL_HEADER, chosen)?;
     insert_header(&mut headers, ROUTER_SCORE_HEADER, &format!("{score:.2}"))?;
-    insert_header(&mut headers, ROUTER_MODE_HEADER, mode)?;
+    insert_header(&mut headers, ROUTER_MODE_HEADER, mode.as_str())?;
     insert_header(&mut headers, ROUTER_REQUEST_ID_HEADER, request_id)?;
     if policy.version != UNMANAGED_POLICY_ID {
         insert_header(&mut headers, ROUTER_POLICY_VERSION_HEADER, policy.version)?;
@@ -6473,7 +6477,7 @@ fn insert_header(headers: &mut HeaderMap, name: &'static str, value: &str) -> Re
 
 struct DecisionMetadata {
     chosen: String,
-    mode: &'static str,
+    mode: RouteMode,
     offline: bool,
     request_id: String,
     headers: HeaderMap,
@@ -6519,7 +6523,7 @@ fn make_decision_response(
     routing: &RoutingConfig,
     decision: &ComplexityScore,
     chosen: &str,
-    mode: &'static str,
+    mode: RouteMode,
     offline: bool,
     request_id: &str,
     dry_run: bool,
@@ -6528,7 +6532,7 @@ fn make_decision_response(
     DecisionResponse {
         model: chosen.to_owned(),
         score: decision.score,
-        mode,
+        mode: mode.as_str(),
         offline,
         request_id: request_id.to_owned(),
         features: decision.features,
