@@ -124,6 +124,33 @@ fn validate_persistence_target(path: &Path, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+const SAVINGS_FILE_NAME: &str = "wayfinder-savings.json";
+
+/// Choose where the savings ledger lives.
+///
+/// An explicit `WAYFINDER_ROUTER_SAVINGS_FILE` wins. Otherwise the ledger sits
+/// beside the selected configuration file, like the audit log, so a service
+/// started by launchd or systemd does not depend on its working directory
+/// being writable. Earlier versions wrote to the working directory; a ledger
+/// already there keeps being used so recorded spend is not orphaned.
+fn resolve_savings_path(
+    explicit: Option<std::ffi::OsString>,
+    config_path: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> PathBuf {
+    if let Some(explicit) = explicit.filter(|value| !value.is_empty()) {
+        return PathBuf::from(explicit);
+    }
+    let legacy = PathBuf::from(SAVINGS_FILE_NAME);
+    if exists(&legacy) {
+        return legacy;
+    }
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(SAVINGS_FILE_NAME)
+}
+
 fn load_savings_ledger(path: &Path) -> Result<(SavingsLedger, LedgerLoad), String> {
     validate_persistence_target(path, "savings")?;
     let (ledger, loaded) = SavingsLedger::load_resilient(path, 400, true)
@@ -927,10 +954,11 @@ async fn build_serve_state<W: Write>(
         .map_err(|error| error.to_string())?;
     state = with_local_project_profiles(state, &gateway)?;
     if savings == SavingsSource::Load {
-        let savings_path = std::env::var_os(SAVINGS_FILE_ENV)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("wayfinder-savings.json"));
+        let savings_path = resolve_savings_path(
+            std::env::var_os(SAVINGS_FILE_ENV),
+            &selected_config_path(options),
+            Path::is_file,
+        );
         let (ledger, loaded) = load_savings_ledger(&savings_path)?;
         if let LedgerLoad::Recovered { quarantine } = loaded {
             let _ = writeln!(
@@ -1643,6 +1671,36 @@ pub fn run_setup_process(arguments: &[OsString], stdout: &mut dyn Write) -> i32 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn savings_ledger_defaults_beside_the_config_and_keeps_a_legacy_file() {
+        let config = Path::new("/etc/wayfinder/wayfinder-router.toml");
+        // Fresh install: beside the configuration, wherever the service runs.
+        assert_eq!(
+            resolve_savings_path(None, config, |_| false),
+            PathBuf::from("/etc/wayfinder/wayfinder-savings.json")
+        );
+        assert_eq!(
+            resolve_savings_path(Some(std::ffi::OsString::new()), config, |_| false),
+            PathBuf::from("/etc/wayfinder/wayfinder-savings.json")
+        );
+        // A ledger already in the working directory keeps being used.
+        assert_eq!(
+            resolve_savings_path(None, config, |path| path
+                == Path::new("wayfinder-savings.json")),
+            PathBuf::from("wayfinder-savings.json")
+        );
+        // The environment variable always wins.
+        assert_eq!(
+            resolve_savings_path(Some("/var/lib/wf/ledger.json".into()), config, |_| true),
+            PathBuf::from("/var/lib/wf/ledger.json")
+        );
+        // No configuration directory: unchanged, relative to the working directory.
+        assert_eq!(
+            resolve_savings_path(None, Path::new("wayfinder-router.toml"), |_| false),
+            PathBuf::from("wayfinder-savings.json")
+        );
+    }
 
     #[test]
     fn route_parser_accepts_python_option_order() -> Result<(), String> {

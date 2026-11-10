@@ -39,6 +39,22 @@ details, release history over commit history.
 - Explicit missing configuration and unusable discovered config paths now fail
   instead of falling back to defaults or a parent policy. Runtime config errors
   omit source text, and a regression verifies restrictions survive delivery fallback.
+- With the Redis state backend, a healthy provider target now serves concurrent
+  requests. Previously each target admitted one in-flight request across the
+  whole fleet, and a second concurrent request was skipped or failed with 502
+  when no fallback existed. Only a recovering (half-open) target is limited to
+  a single probe, as with the in-process breaker.
+- Canary rollouts no longer count requests the gateway answered or refused
+  itself as candidate failures: cache hits, budget, admission and rate-limit
+  refusals, and gateway state errors. These could trip `max_error_rate` and
+  roll back a healthy candidate.
+- `service install` now anchors a relative `--config` to the directory it was
+  run from, and re-running it with different settings replaces the running
+  service instead of leaving the old definition active.
+- The savings ledger now defaults to the configuration file's directory rather
+  than the working directory, which a launchd or systemd service does not
+  control. A ledger already in the working directory keeps being used, and
+  `WAYFINDER_ROUTER_SAVINGS_FILE` still overrides both.
 - A streaming request to a model with several pooled deployments no longer calls
   every deployment. Previously each remaining deployment was also sent the
   request after a stream was already open, and the last one to answer was served.

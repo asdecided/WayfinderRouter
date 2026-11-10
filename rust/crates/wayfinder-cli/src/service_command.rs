@@ -62,7 +62,7 @@ fn run_service_with(
     stderr: &mut dyn Write,
     operations: &mut dyn ServiceOperations,
 ) -> i32 {
-    let options = match parse_service_options(arguments) {
+    let mut options = match parse_service_options(arguments) {
         Ok(Some(options)) => options,
         Ok(None) => {
             write_output(stdout, SERVICE_HELP);
@@ -107,6 +107,33 @@ fn run_service_with(
             return EXIT_CONFIG;
         }
     };
+    // The unit runs from the service manager's working directory, not the
+    // caller's, so a relative --config must be anchored here. A leading `~` is
+    // left alone: `serve` expands it against the service user's home.
+    if let Some(config) = options.config.as_deref() {
+        if !config.starts_with('~') && Path::new(config).is_relative() {
+            let directory = match operations.current_dir() {
+                Ok(directory) => directory,
+                Err(message) => {
+                    write_error(stderr, &format!("wayfinder-router: {message}"));
+                    return EXIT_CONFIG;
+                }
+            };
+            match directory
+                .join(config.strip_prefix("./").unwrap_or(config))
+                .to_str()
+            {
+                Some(absolute) => options.config = Some(absolute.to_owned()),
+                None => {
+                    write_error(
+                        stderr,
+                        "wayfinder-router: configuration path is not valid UTF-8",
+                    );
+                    return EXIT_CONFIG;
+                }
+            }
+        }
+    }
     let program_args = resolve_serve_args(&executable, &options);
     let endpoint = format!("http://{}:{}/v1", options.host, options.port);
     let log_dir = home.join("Library").join("Logs");
@@ -207,6 +234,12 @@ fn install(
         );
         return EXIT_CONFIG;
     }
+    // A service manager keeps running the definition it loaded. When this
+    // install changes an existing unit, the running service must be replaced
+    // or the new host, port or configuration silently never takes effect.
+    let replaces_existing = operations
+        .read_file(unit_file)
+        .is_some_and(|existing| existing != unit_text.as_bytes());
     if let Err(error) = operations.write_file(unit_file, unit_text.as_bytes()) {
         write_error(
             stderr,
@@ -240,6 +273,11 @@ fn install(
             };
             let domain = format!("gui/{uid}");
             let target = format!("{domain}/{LAUNCHD_LABEL}");
+            if replaces_existing {
+                // launchd caches the job definition at bootstrap; unload the
+                // old one first. Failure only means it was not loaded.
+                let _ = operations.run_manager(manager, &["bootout".to_owned(), target.clone()]);
+            }
             let mut loaded = match operations.run_manager(
                 manager,
                 &["bootstrap".to_owned(), domain, display_path(unit_file)],
@@ -321,6 +359,37 @@ fn install(
                     ),
                 );
                 return EXIT_CONFIG;
+            }
+            if replaces_existing {
+                // `enable --now` leaves an already-active unit running its old
+                // definition.
+                let restarted = match operations.run_manager(
+                    manager,
+                    &[
+                        "--user".to_owned(),
+                        "restart".to_owned(),
+                        SYSTEMD_UNIT_NAME.to_owned(),
+                    ],
+                ) {
+                    Ok(output) => output,
+                    Err(message) => {
+                        write_error(stderr, &format!("wayfinder-router: {message}"));
+                        return EXIT_CONFIG;
+                    }
+                };
+                if !restarted.success {
+                    let detail = restarted.detail();
+                    let suffix = detail
+                        .as_deref()
+                        .map_or_else(String::new, |detail| format!(": {detail}"));
+                    write_error(
+                        stderr,
+                        &format!(
+                            "wayfinder-router: systemctl could not restart {SYSTEMD_UNIT_NAME}{suffix}"
+                        ),
+                    );
+                    return EXIT_CONFIG;
+                }
             }
             write_error(
                 stderr,
@@ -622,6 +691,8 @@ trait ServiceOperations {
     fn create_dir_all(&mut self, path: &Path) -> io::Result<()>;
     fn write_file(&mut self, path: &Path, contents: &[u8]) -> io::Result<()>;
     fn is_file(&self, path: &Path) -> bool;
+    fn read_file(&self, path: &Path) -> Option<Vec<u8>>;
+    fn current_dir(&self) -> Result<PathBuf, String>;
     fn remove_file(&mut self, path: &Path) -> io::Result<()>;
     fn run_manager(
         &mut self,
@@ -779,6 +850,19 @@ impl ServiceOperations for RealServiceOperations {
 
     fn is_file(&self, path: &Path) -> bool {
         path.is_file()
+    }
+
+    fn read_file(&self, path: &Path) -> Option<Vec<u8>> {
+        fs::read(path).ok()
+    }
+
+    fn current_dir(&self) -> Result<PathBuf, String> {
+        env::current_dir().map_err(|error| {
+            format!(
+                "cannot resolve the working directory: {}",
+                io_error_category(&error)
+            )
+        })
     }
 
     fn remove_file(&mut self, path: &Path) -> io::Result<()> {
@@ -1067,6 +1151,14 @@ mod tests {
             self.files.contains_key(path)
         }
 
+        fn read_file(&self, path: &Path) -> Option<Vec<u8>> {
+            self.files.get(path).cloned()
+        }
+
+        fn current_dir(&self) -> Result<PathBuf, String> {
+            Ok(PathBuf::from("/isolated/project"))
+        }
+
         fn remove_file(&mut self, path: &Path) -> io::Result<()> {
             self.files.remove(path);
             Ok(())
@@ -1176,6 +1268,75 @@ mod tests {
         assert!(operations.files.contains_key(&PathBuf::from(
             "/isolated/home/Library/LaunchAgents/com.wayfinder-router.gateway.plist"
         )));
+    }
+
+    #[test]
+    fn relative_config_is_anchored_to_the_installing_directory() {
+        let mut operations = FakeOperations::new(ServicePlatform::Linux);
+        let (code, stdout, stderr) = run_fake(
+            &["install", "--print", "--config", "./wf.toml"],
+            &mut operations,
+        );
+        assert_eq!(code, EXIT_OK, "{stderr}");
+        assert!(
+            stdout.contains("--config /isolated/project/wf.toml"),
+            "{stdout}"
+        );
+
+        let mut operations = FakeOperations::new(ServicePlatform::Linux);
+        let (code, stdout, stderr) = run_fake(
+            &["install", "--print", "--config", "~/wf.toml"],
+            &mut operations,
+        );
+        assert_eq!(code, EXIT_OK, "{stderr}");
+        assert!(stdout.contains("--config '~/wf.toml'"), "{stdout}");
+    }
+
+    #[test]
+    fn systemd_reinstall_restarts_only_when_the_unit_changed() {
+        let mut operations = FakeOperations::new(ServicePlatform::Linux);
+        let (code, _, stderr) = run_fake(&["install"], &mut operations);
+        assert_eq!(code, EXIT_OK, "{stderr}");
+        let verbs = |operations: &FakeOperations| {
+            operations
+                .commands
+                .iter()
+                .map(|(_, arguments)| arguments[1].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(verbs(&operations), ["daemon-reload", "enable"]);
+
+        // Identical reinstall: nothing to replace.
+        operations.commands.clear();
+        let (code, _, stderr) = run_fake(&["install"], &mut operations);
+        assert_eq!(code, EXIT_OK, "{stderr}");
+        assert_eq!(verbs(&operations), ["daemon-reload", "enable"]);
+
+        // A changed port must reach the running service.
+        operations.commands.clear();
+        let (code, _, stderr) = run_fake(&["install", "--port", "9000"], &mut operations);
+        assert_eq!(code, EXIT_OK, "{stderr}");
+        assert_eq!(verbs(&operations), ["daemon-reload", "enable", "restart"]);
+    }
+
+    #[test]
+    fn launchd_reinstall_unloads_the_old_definition_when_it_changed() {
+        let mut operations = FakeOperations::new(ServicePlatform::MacOs);
+        let (code, _, stderr) = run_fake(&["install"], &mut operations);
+        assert_eq!(code, EXIT_OK, "{stderr}");
+        let verbs = |operations: &FakeOperations| {
+            operations
+                .commands
+                .iter()
+                .map(|(_, arguments)| arguments[0].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(verbs(&operations), ["bootstrap", "print"]);
+
+        operations.commands.clear();
+        let (code, _, stderr) = run_fake(&["install", "--port", "9000"], &mut operations);
+        assert_eq!(code, EXIT_OK, "{stderr}");
+        assert_eq!(verbs(&operations), ["bootout", "bootstrap", "print"]);
     }
 
     #[test]

@@ -225,7 +225,7 @@ verification. See
 | `POST /v1/outcomes` | attach a bounded explicit `success`, `correction`, or `failure` to one retained terminal workspace receipt without accepting free-form or request content (WF-ADR-0085) |
 | `GET /v1/outcomes/policy?workspace=<id>` | review-only `wf-local-outcome-policy-v1` report that can propose a narrower local score range but never edit or activate policy (WF-ADR-0085) |
 | `GET /v1/evidence` / `GET /v1/evidence.txt` | quality/efficiency report over bounded shadow records; below the minimum decisive sample or with conflicting provenance it returns `keep-shadowing` rather than claiming significance (WF-ADR-0064) |
-| `WAYFINDER_ROUTER_SAVINGS_FILE` | where the savings ledger is persisted (default `wayfinder-savings.json` relative to the gateway's working directory, not the config directory; the container image and Helm chart set `/var/lib/wayfinder/wayfinder-savings.json`) |
+| `WAYFINDER_ROUTER_SAVINGS_FILE` | where the savings ledger is persisted (default `wayfinder-savings.json` beside the selected configuration file, like the audit log; a ledger already present in the gateway's working directory, where earlier versions wrote it, keeps being used; the container image and Helm chart set `/var/lib/wayfinder/wayfinder-savings.json`) |
 
 ### Optional OpenTelemetry
 
