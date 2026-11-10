@@ -340,7 +340,8 @@ pub trait StateBackend: Send + Sync {
         Box::pin(async { Err(StateBackendError::Unavailable) })
     }
 
-    /// Claim a provider health attempt, including the single half-open probe.
+    /// Begin a provider attempt. A closed circuit admits concurrent attempts;
+    /// an open one admits none; a half-open one admits a single fleet-wide probe.
     fn begin_provider_health<'a>(
         &'a self,
         _target: &'a str,
@@ -1025,8 +1026,13 @@ local time = redis.call('TIME')
 local now_ms = (tonumber(time[1]) * 1000) + math.floor(tonumber(time[2]) / 1000)
 local open_until = tonumber(redis.call('HGET', KEYS[1], 'open_until') or '0')
 local probe = redis.call('HGET', KEYS[1], 'probe')
-if open_until > now_ms and probe ~= ARGV[3] then return 0 end
-if probe ~= false and probe ~= ARGV[3] then return 0 end
+-- Closed circuit: concurrent attempts are allowed and none of them is a probe.
+if open_until == 0 then return 1 end
+if probe == ARGV[3] then return 1 end
+-- Open: still cooling down.
+if open_until > now_ms then return 0 end
+-- Half-open: exactly one fleet-wide probe at a time.
+if probe ~= false then return 0 end
 redis.call('HSET', KEYS[1], 'probe', ARGV[3])
 redis.call('PEXPIRE', KEYS[1], math.max(tonumber(ARGV[2]) * 2, 1000))
 return 1
@@ -1036,10 +1042,11 @@ const COMPLETE_HEALTH_SCRIPT: &str = r#"
 local time = redis.call('TIME')
 local now_ms = (tonumber(time[1]) * 1000) + math.floor(tonumber(time[2]) / 1000)
 local probe = redis.call('HGET', KEYS[1], 'probe')
-if probe ~= false and probe ~= ARGV[3] then return 0 end
+-- While a half-open probe is in flight it alone decides the circuit; an
+-- attempt admitted earlier that finishes now is accepted and ignored.
+if probe ~= false and probe ~= ARGV[3] then return 1 end
 if ARGV[4] == '1' then
-  redis.call('HSET', KEYS[1], 'failures', 0, 'open_until', 0)
-  redis.call('HDEL', KEYS[1], 'probe')
+  redis.call('DEL', KEYS[1])
   return 1
 end
 local failures = redis.call('HINCRBY', KEYS[1], 'failures', 1)
@@ -1047,6 +1054,7 @@ if failures >= tonumber(ARGV[1]) then
   redis.call('HSET', KEYS[1], 'open_until', now_ms + tonumber(ARGV[2]))
 end
 redis.call('HDEL', KEYS[1], 'probe')
+redis.call('PEXPIRE', KEYS[1], math.max(tonumber(ARGV[2]) * 2, 1000))
 return 1
 "#;
 
