@@ -6,17 +6,21 @@
 //! the handler's original order, so request validation, side effects and the
 //! first error a request reports are the same as before the split.
 
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use axum::response::Response;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use bytes::Bytes;
 use serde_json::{Map, Value};
+use wayfinder_config::gateway::ProviderKind;
+use wayfinder_providers::reliability::{failover_candidates, precheck_ok};
 use wayfinder_routing_core::{
-    ComplexityScore, PrivacyPosture, RoutingConfig, RoutingRequest, recommend_tier,
-    score_complexity,
+    ComplexityScore, ExecutionBoundary, PrivacyPosture, RoutingConfig, RoutingRequest,
+    recommend_tier, score_complexity,
 };
-use wayfinder_service::pricing::estimate_tokens;
+use wayfinder_service::pricing::{estimate_tokens, turn_cost};
 
 use crate::access::AccessGrant;
 use crate::budget::{BudgetDecision, degrade_target, format_limit};
+use crate::cache::{cache_key_with_version, is_cacheable};
 use crate::canary::CANARY_RESPONSE_HEADER;
 use crate::decision_policy::{
     ROUTE_ON_HEADER, RouteOn, STICKY_COOLDOWN_HEADER, STICKY_HEADER, THRESHOLD_HEADER,
@@ -24,15 +28,17 @@ use crate::decision_policy::{
     parse_route_on_header, parse_threshold_header, resolve_slash_directive_for_names,
     resolve_sticky, resolve_sticky_cooldown, threshold_tiers,
 };
+use crate::recent::RecentOutcome;
 use crate::route_mode::RouteMode;
 use crate::{
-    AppState, ConfiguredModel, DecisionPolicyReceipt, ROUTE_PRESET_PREFIX, ROUTER_BUDGET_HEADER,
-    ROUTER_PRIVACY_POSTURE_HEADER, ROUTER_ROUTE_HEADER, ROUTER_WORKSPACE_HEADER, RequestSelection,
-    assess_model, bad_override_response, clamp_to_allowed, decision_headers,
-    destination_ineligible_response, error_response, exclusion_reason_name, insert_header,
-    insert_rate_snapshot_headers, offline_override, parse_privacy_posture, privacy_posture_name,
-    privacy_response_headers, request_header, request_id_headers, request_requirements,
-    resolve_request_selection, utc_today,
+    AppState, ConfiguredModel, DecisionPolicyReceipt, FAILOVER_HEADER, ROUTE_PRESET_PREFIX,
+    ROUTER_BUDGET_HEADER, ROUTER_CACHE_HEADER, ROUTER_PRIVACY_POSTURE_HEADER, ROUTER_ROUTE_HEADER,
+    ROUTER_WORKSPACE_HEADER, RequestSelection, assess_model, bad_override_response,
+    clamp_to_allowed, decision_headers, destination_ineligible_response, error_response,
+    exclusion_reason_name, has_eligible_deployment_target, insert_header,
+    insert_rate_snapshot_headers, model_is_proven_local, offline_override, parse_privacy_posture,
+    privacy_posture_name, privacy_response_headers, request_header, request_id_headers,
+    request_requirements, resolve_request_selection, utc_today,
 };
 
 /// Per-request routing options resolved from headers, the tuning field and
@@ -675,4 +681,377 @@ fn internal_error(kind: &'static str, message: String, request_id: &str) -> Box<
         message,
         request_id_headers(request_id),
     ))
+}
+
+/// Resolve the logical route to the configured endpoint that serves it.
+/// Offline requests that are neither pinned nor preset converge on the
+/// cheapest tier, which must be a proven-local endpoint.
+pub(crate) fn resolve_delivery_target<'s>(
+    state: &'s AppState,
+    decision: &ComplexityScore,
+    route: &RouteSelection,
+    offline: bool,
+    routing_headers: &HeaderMap,
+) -> Result<(String, &'s ConfiguredModel), Box<Response>> {
+    let delivery_name = if offline && !route.mode.is_pinned() && !route.preset_route_active {
+        decision
+            .tiers
+            .as_ref()
+            .and_then(|tiers| {
+                tiers
+                    .iter()
+                    .min_by(|left, right| left.min_score.total_cmp(&right.min_score))
+            })
+            .map_or_else(|| route.chosen.clone(), |tier| tier.model.clone())
+    } else {
+        route.chosen.clone()
+    };
+    let Some(target) = state
+        .models()
+        .iter()
+        .find(|model| model.name() == delivery_name)
+    else {
+        return Err(Box::new(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "wayfinder_router_misconfigured",
+            format!("no gateway endpoint configured for model '{delivery_name}'"),
+            routing_headers.clone(),
+        )));
+    };
+    if offline && !model_is_proven_local(target) {
+        return Err(Box::new(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "wayfinder_router_offline_unavailable",
+            "offline delivery requires a literal loopback provider endpoint".to_owned(),
+            routing_headers.clone(),
+        )));
+    }
+    Ok((delivery_name, target))
+}
+
+/// The partition and route components of this request's response-cache key.
+pub(crate) struct CacheIdentity {
+    /// Key and privacy-posture partition.
+    pub(crate) partition: String,
+    /// Preset name, or mode and delivery route.
+    pub(crate) route: String,
+}
+
+/// Derive the cache partition and route for a request.
+pub(crate) fn cache_identity(
+    key_id: Option<&str>,
+    privacy_posture: PrivacyPosture,
+    route: &RouteSelection,
+    delivery_name: &str,
+) -> CacheIdentity {
+    // ChatGPT subscription replies are account-scoped while the normalized
+    // boundary intentionally exposes no stable account identifier suitable for
+    // a cache key. Never replay or retain them across sign-in state changes.
+    let partition = format!(
+        "{}:{}",
+        key_id.unwrap_or("local"),
+        privacy_posture_name(privacy_posture)
+    );
+    let route = route.preset_name.as_deref().map_or_else(
+        || format!("{}:{delivery_name}", route.mode.as_str()),
+        |name| format!("{ROUTE_PRESET_PREFIX}{name}"),
+    );
+    CacheIdentity { partition, route }
+}
+
+/// Inputs to the response-cache lookup.
+pub(crate) struct CacheLookup<'a> {
+    /// Cache partition and route.
+    pub(crate) identity: &'a CacheIdentity,
+    /// Endpoint the request would be delivered to.
+    pub(crate) target: &'a ConfiguredModel,
+    /// Logical name of `target`.
+    pub(crate) delivery_name: &'a str,
+    /// Request id for the recent-decision record.
+    pub(crate) request_id: &'a str,
+    /// The provider-bound request body.
+    pub(crate) request_body: &'a Value,
+    /// Whether debug decision metadata was requested, which bypasses the cache.
+    pub(crate) debug: bool,
+}
+
+/// Result of consulting the response cache.
+pub(crate) enum CacheOutcome {
+    /// A stored response to return as-is.
+    Hit(Box<Response>),
+    /// The request is cacheable but nothing was stored.
+    Miss,
+    /// The request is not cacheable.
+    Bypass,
+}
+
+/// Look the request up in the response cache, recording a hit or miss.
+pub(crate) async fn lookup_cache(
+    state: &AppState,
+    lookup: CacheLookup<'_>,
+    routing_headers: &HeaderMap,
+) -> Result<CacheOutcome, Box<Response>> {
+    let state_error = |message: String| {
+        Box::new(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "wayfinder_router_state_error",
+            message,
+            routing_headers.clone(),
+        ))
+    };
+    let cache_enabled = state
+        .cache_enabled()
+        .map_err(|error| state_error(error.to_string()))?;
+    let target = lookup.target;
+    let cacheable = cache_enabled
+        && target.provider() != ProviderKind::CodexAppServer
+        && !lookup.debug
+        && is_cacheable(lookup.request_body);
+    if !cacheable {
+        return Ok(CacheOutcome::Bypass);
+    }
+    let key = cache_key_with_version(
+        state.cache_generation(),
+        &lookup.identity.partition,
+        &lookup.identity.route,
+        target.provider_model(),
+        lookup.request_body,
+    )
+    .map_err(|error| state_error(error.to_string()))?;
+    let cached = state
+        .get_cached_response(&key)
+        .await
+        .map_err(|error| state_error(error.to_string()))?;
+    if let Some(cached) = cached {
+        let delivery_name = lookup.delivery_name;
+        let avoided = turn_cost(
+            delivery_name,
+            i64::try_from(cached.prompt_tokens).unwrap_or(i64::MAX),
+            i64::try_from(cached.completion_tokens).unwrap_or(i64::MAX),
+            &state.price_table().costs,
+            cached.estimated,
+            None,
+        )
+        .map_or(0.0, |cost| cost.realized);
+        let _ = state.metrics().observe_cache_hit(avoided);
+        let _ = state.recent().update_cache(lookup.request_id, "hit");
+        let _ = state.recent().update_delivery(
+            lookup.request_id,
+            delivery_name,
+            ExecutionBoundary::OnDevice,
+            RecentOutcome::CacheHit,
+            Some(cached.status),
+            None,
+        );
+
+        let status =
+            StatusCode::from_u16(cached.status).map_err(|error| state_error(error.to_string()))?;
+        let content_type = HeaderValue::from_str(&cached.content_type)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/json"));
+        let mut response_headers = routing_headers.clone();
+        insert_header(
+            &mut response_headers,
+            "x-wayfinder-router-served-by",
+            delivery_name,
+        )
+        .map_err(|message| {
+            internal_error("wayfinder_router_misconfigured", message, lookup.request_id)
+        })?;
+        response_headers.insert(ROUTER_CACHE_HEADER, HeaderValue::from_static("hit"));
+        response_headers.insert(header::CONTENT_TYPE, content_type);
+        return Ok(CacheOutcome::Hit(Box::new(
+            (
+                status,
+                response_headers,
+                Bytes::copy_from_slice(&cached.body),
+            )
+                .into_response(),
+        )));
+    }
+    let _ = state.metrics().observe_cache_miss();
+    Ok(CacheOutcome::Miss)
+}
+
+/// Ordered failover candidates after the delivery target: none for a pin,
+/// the remaining preset destinations for a preset, otherwise the endpoint's
+/// configured fallbacks followed by tier-ladder failover.
+pub(crate) fn delivery_candidates(
+    state: &AppState,
+    headers: &HeaderMap,
+    decision: &ComplexityScore,
+    route: &mut RouteSelection,
+    delivery_name: &str,
+    target: &ConfiguredModel,
+    offline: bool,
+) -> Vec<String> {
+    let request_is_pinned = route.mode.is_pinned();
+    let request_is_preset = route.preset_route_active;
+    let mut ladder = decision
+        .tiers
+        .as_ref()
+        .map(|tiers| tiers.iter().collect::<Vec<_>>())
+        .unwrap_or_default();
+    ladder.sort_by(|left, right| left.min_score.total_cmp(&right.min_score));
+    let ladder = ladder
+        .into_iter()
+        .map(|tier| tier.model.clone())
+        .collect::<Vec<_>>();
+    let failover_header = request_header(headers, FAILOVER_HEADER).ok().flatten();
+    let mut candidates = if request_is_pinned {
+        Vec::new()
+    } else if let Some(preset_models) = route.preset_models.take() {
+        preset_models
+            .into_iter()
+            .filter(|model| model != delivery_name)
+            .collect()
+    } else {
+        target.fallbacks().to_vec()
+    };
+    if !request_is_pinned && !request_is_preset && (!offline || ladder.is_empty()) {
+        candidates.extend(failover_candidates(
+            &route.chosen,
+            &ladder,
+            state
+                .reliability_policy()
+                .effective_failover(failover_header),
+        ));
+    }
+    candidates
+}
+
+/// Filter the delivery target and candidates through circuit state and
+/// per-request eligibility, rejecting the request when nothing remains.
+pub(crate) fn plan_delivery(
+    state: &AppState,
+    access_grant: Option<AccessGrant>,
+    options: &RequestOptions,
+    route: &RouteSelection,
+    delivery_name: &str,
+    candidates: &[String],
+    routing_headers: &HeaderMap,
+) -> Result<Vec<String>, Box<Response>> {
+    let offline = options.offline;
+    let prompt_estimate = options.prompt_estimate;
+    let routing_request = &options.routing_request;
+    let allowed_models = state
+        .access_policy()
+        .and_then(|policy| access_grant.map(|grant| policy.allowed_models(grant)))
+        .filter(|allowed| !allowed.is_empty());
+    let plan = match state
+        .reliability_policy()
+        .delivery_plan(delivery_name, candidates, |name| {
+            state
+                .models()
+                .iter()
+                .find(|model| model.name() == name)
+                .is_some_and(|model| {
+                    assess_model(routing_request, model).is_eligible()
+                        && (!offline || model_is_proven_local(model))
+                        && precheck_ok(prompt_estimate, model.context_window())
+                        && has_eligible_deployment_target(
+                            state,
+                            name,
+                            routing_request,
+                            offline,
+                            prompt_estimate,
+                        )
+                        && allowed_models
+                            .is_none_or(|allowed| allowed.iter().any(|allowed| allowed == name))
+                })
+        }) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Err(Box::new(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "wayfinder_router_state_error",
+                error.to_string(),
+                routing_headers.clone(),
+            )));
+        }
+    };
+    if plan.is_empty() {
+        let chosen = &route.chosen;
+        if let Some(model) = state.models().iter().find(|model| model.name() == *chosen) {
+            let assessment = assess_model(routing_request, model);
+            if !assessment.is_eligible() {
+                return Err(Box::new(destination_ineligible_response(
+                    chosen,
+                    &assessment,
+                    routing_headers.clone(),
+                    offline,
+                )));
+            }
+            if !has_eligible_deployment_target(
+                state,
+                chosen,
+                routing_request,
+                offline,
+                prompt_estimate,
+            ) {
+                return Err(Box::new(error_response(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "wayfinder_router_destination_ineligible",
+                    format!(
+                        "destination '{chosen}' has no eligible concrete deployment for this request"
+                    ),
+                    routing_headers.clone(),
+                )));
+            }
+        }
+        return Err(Box::new(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "wayfinder_router_circuit_open",
+            format!("no available upstream for '{chosen}' (cooling down or context too small)"),
+            routing_headers.clone(),
+        )));
+    }
+    Ok(plan)
+}
+
+#[cfg(test)]
+mod tests {
+    use wayfinder_routing_core::PrivacyPosture;
+
+    use super::{RouteSelection, cache_identity};
+    use crate::route_mode::RouteMode;
+
+    fn route(mode: RouteMode, preset_name: Option<&str>) -> RouteSelection {
+        RouteSelection {
+            chosen: "local".to_owned(),
+            mode,
+            preset_models: None,
+            preset_name: preset_name.map(str::to_owned),
+            preset_route_active: preset_name.is_some(),
+        }
+    }
+
+    #[test]
+    fn cache_identity_keys_by_key_posture_mode_and_delivery_route() {
+        let scored = cache_identity(
+            Some("team-key"),
+            PrivacyPosture::HostedAllowed,
+            &route(RouteMode::Scored, None),
+            "local",
+        );
+        assert_eq!(scored.partition, "team-key:hosted-allowed");
+        assert_eq!(scored.route, "scored:local");
+
+        let anonymous = cache_identity(
+            None,
+            PrivacyPosture::OnDeviceOnly,
+            &route(RouteMode::KeyScoped, None),
+            "small",
+        );
+        assert_eq!(anonymous.partition, "local:on-device-only");
+        assert_eq!(anonymous.route, "key-scoped:small");
+
+        let preset = cache_identity(
+            None,
+            PrivacyPosture::LocalDevices,
+            &route(RouteMode::Preset, Some("prefer-local")),
+            "local",
+        );
+        assert_eq!(preset.partition, "local:local-devices");
+        assert_eq!(preset.route, "@route/prefer-local");
+    }
 }

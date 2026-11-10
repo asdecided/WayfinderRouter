@@ -72,9 +72,7 @@ use wayfinder_providers::anthropic::{
     openai_to_anthropic_response,
 };
 use wayfinder_providers::openai_compat::{DEFAULT_MAX_RESPONSE_BYTES, ProviderError};
-use wayfinder_providers::reliability::{
-    failover_candidates, is_auth_failure, is_retryable, precheck_ok,
-};
+use wayfinder_providers::reliability::{is_auth_failure, is_retryable, precheck_ok};
 use wayfinder_providers::sse::{SseDecoder, SseEvent};
 use wayfinder_routing_core::profiles::{LexiconProfile, profiles};
 use wayfinder_routing_core::{
@@ -95,13 +93,14 @@ use crate::admission::{AdmissionError, AdmissionPermit, AdmissionPolicy};
 use crate::budget::BudgetPolicy;
 use crate::cache::{
     CACHE_KEY_SCHEMA_VERSION, CacheError, CacheSettings, CachedResponse, ResponseCache,
-    cache_key_with_version, decode_shared_response, encode_shared_response, is_cacheable,
-    is_storable,
+    cache_key_with_version, decode_shared_response, encode_shared_response, is_storable,
 };
 use crate::canary::{CANARY_COHORT_HEADER, CANARY_IDENTITY_HEADER};
 use crate::chat_pipeline::{
-    RequestAccess, RoutingHeaderInput, apply_budget, build_routing_headers, clamp_route_to_key,
-    enforce_destination_eligibility, resolve_request_options, score_request, select_route,
+    CacheLookup, CacheOutcome, RequestAccess, RoutingHeaderInput, apply_budget,
+    build_routing_headers, cache_identity, clamp_route_to_key, delivery_candidates,
+    enforce_destination_eligibility, lookup_cache, plan_delivery, resolve_delivery_target,
+    resolve_request_options, score_request, select_route,
 };
 use crate::control_plane::{
     BindingContext, PolicyReceipt, ResolvedPolicyProfile, UNMANAGED_POLICY_ID,
@@ -3191,273 +3190,59 @@ pub(crate) async fn chat_completions(
         );
     }
 
-    let request_is_pinned = route.mode.is_pinned();
-    let request_is_preset = route.preset_route_active;
-    let delivery_name = if offline && !request_is_pinned && !request_is_preset {
-        decision
-            .tiers
-            .as_ref()
-            .and_then(|tiers| {
-                tiers
-                    .iter()
-                    .min_by(|left, right| left.min_score.total_cmp(&right.min_score))
-            })
-            .map_or_else(|| route.chosen.clone(), |tier| tier.model.clone())
-    } else {
-        route.chosen.clone()
-    };
-    let Some(target) = state
-        .models()
-        .iter()
-        .find(|model| model.name() == delivery_name)
-    else {
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "wayfinder_router_misconfigured",
-            format!("no gateway endpoint configured for model '{delivery_name}'"),
-            routing_headers,
-        );
-    };
-    if offline && !model_is_proven_local(target) {
-        return error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "wayfinder_router_offline_unavailable",
-            "offline delivery requires a literal loopback provider endpoint".to_owned(),
-            routing_headers,
-        );
-    }
+    let (delivery_name, target) =
+        match resolve_delivery_target(&state, &decision, &route, offline, &routing_headers) {
+            Ok(resolved) => resolved,
+            Err(response) => return *response,
+        };
 
     let request_body = Value::Object(body);
     let debug = request_header(&headers, DEBUG_HEADER)
         .ok()
         .flatten()
         .is_some_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true" | "yes"));
-    let cache_enabled = match state.cache_enabled() {
-        Ok(enabled) => enabled,
-        Err(error) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "wayfinder_router_state_error",
-                error.to_string(),
-                routing_headers,
-            );
-        }
+    let cache = cache_identity(key_id, privacy_posture, &route, &delivery_name);
+    let cache_state = match lookup_cache(
+        &state,
+        CacheLookup {
+            identity: &cache,
+            target,
+            delivery_name: &delivery_name,
+            request_id: &request_id,
+            request_body: &request_body,
+            debug,
+        },
+        &routing_headers,
+    )
+    .await
+    {
+        Ok(CacheOutcome::Hit(response)) => return *response,
+        Ok(CacheOutcome::Miss) => Some("miss"),
+        Ok(CacheOutcome::Bypass) => None,
+        Err(response) => return *response,
     };
-    // ChatGPT subscription replies are account-scoped while the normalized
-    // boundary intentionally exposes no stable account identifier suitable for
-    // a cache key. Never replay or retain them across sign-in state changes.
-    let cache_partition = format!(
-        "{}:{}",
-        key_id.unwrap_or("local"),
-        privacy_posture_name(privacy_posture)
-    );
-    let cache_route = route.preset_name.as_deref().map_or_else(
-        || format!("{}:{delivery_name}", route.mode.as_str()),
-        |name| format!("{ROUTE_PRESET_PREFIX}{name}"),
-    );
-    let cacheable = cache_enabled
-        && target.provider() != ProviderKind::CodexAppServer
-        && !debug
-        && is_cacheable(&request_body);
-    let mut cache_state = None;
-    if cacheable {
-        let key = match cache_key_with_version(
-            state.cache_generation(),
-            &cache_partition,
-            &cache_route,
-            target.provider_model(),
-            &request_body,
-        ) {
-            Ok(key) => key,
-            Err(error) => {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "wayfinder_router_state_error",
-                    error.to_string(),
-                    routing_headers,
-                );
-            }
-        };
-        let cached = match state.get_cached_response(&key).await {
-            Ok(cached) => cached,
-            Err(error) => {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "wayfinder_router_state_error",
-                    error.to_string(),
-                    routing_headers,
-                );
-            }
-        };
-        if let Some(cached) = cached {
-            let avoided = turn_cost(
-                &delivery_name,
-                i64::try_from(cached.prompt_tokens).unwrap_or(i64::MAX),
-                i64::try_from(cached.completion_tokens).unwrap_or(i64::MAX),
-                &state.price_table().costs,
-                cached.estimated,
-                None,
-            )
-            .map_or(0.0, |cost| cost.realized);
-            let _ = state.metrics().observe_cache_hit(avoided);
-            let _ = state.recent().update_cache(&request_id, "hit");
-            let _ = state.recent().update_delivery(
-                &request_id,
-                &delivery_name,
-                ExecutionBoundary::OnDevice,
-                RecentOutcome::CacheHit,
-                Some(cached.status),
-                None,
-            );
 
-            let status = match StatusCode::from_u16(cached.status) {
-                Ok(status) => status,
-                Err(error) => {
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "wayfinder_router_state_error",
-                        error.to_string(),
-                        routing_headers,
-                    );
-                }
-            };
-            let content_type = HeaderValue::from_str(&cached.content_type)
-                .unwrap_or_else(|_| HeaderValue::from_static("application/json"));
-            let mut response_headers = routing_headers;
-            if let Err(message) = insert_header(
-                &mut response_headers,
-                "x-wayfinder-router-served-by",
-                &delivery_name,
-            ) {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "wayfinder_router_misconfigured",
-                    message,
-                    request_id_headers(&request_id),
-                );
-            }
-            response_headers.insert(ROUTER_CACHE_HEADER, HeaderValue::from_static("hit"));
-            response_headers.insert(header::CONTENT_TYPE, content_type);
-            return (
-                status,
-                response_headers,
-                Bytes::copy_from_slice(&cached.body),
-            )
-                .into_response();
-        }
-        let _ = state.metrics().observe_cache_miss();
-        cache_state = Some("miss");
-    }
-
-    let mut ladder = decision
-        .tiers
-        .as_ref()
-        .map(|tiers| tiers.iter().collect::<Vec<_>>())
-        .unwrap_or_default();
-    ladder.sort_by(|left, right| left.min_score.total_cmp(&right.min_score));
-    let ladder = ladder
-        .into_iter()
-        .map(|tier| tier.model.clone())
-        .collect::<Vec<_>>();
-    let failover_header = request_header(&headers, FAILOVER_HEADER).ok().flatten();
-    let mut candidates = if request_is_pinned {
-        Vec::new()
-    } else if let Some(preset_models) = route.preset_models.take() {
-        preset_models
-            .into_iter()
-            .filter(|model| model != &delivery_name)
-            .collect()
-    } else {
-        target.fallbacks().to_vec()
-    };
-    if !request_is_pinned && !request_is_preset && (!offline || ladder.is_empty()) {
-        candidates.extend(failover_candidates(
-            &route.chosen,
-            &ladder,
-            state
-                .reliability_policy()
-                .effective_failover(failover_header),
-        ));
-    }
-    let allowed_models = state
-        .access_policy()
-        .and_then(|policy| access_grant.map(|grant| policy.allowed_models(grant)))
-        .filter(|allowed| !allowed.is_empty());
-    let plan = match state
-        .reliability_policy()
-        .delivery_plan(&delivery_name, &candidates, |name| {
-            state
-                .models()
-                .iter()
-                .find(|model| model.name() == name)
-                .is_some_and(|model| {
-                    assess_model(&options.routing_request, model).is_eligible()
-                        && (!offline || model_is_proven_local(model))
-                        && precheck_ok(prompt_estimate, model.context_window())
-                        && has_eligible_deployment_target(
-                            &state,
-                            name,
-                            &options.routing_request,
-                            offline,
-                            prompt_estimate,
-                        )
-                        && allowed_models
-                            .is_none_or(|allowed| allowed.iter().any(|allowed| allowed == name))
-                })
-        }) {
+    let candidates = delivery_candidates(
+        &state,
+        &headers,
+        &decision,
+        &mut route,
+        &delivery_name,
+        target,
+        offline,
+    );
+    let plan = match plan_delivery(
+        &state,
+        access_grant,
+        &options,
+        &route,
+        &delivery_name,
+        &candidates,
+        &routing_headers,
+    ) {
         Ok(plan) => plan,
-        Err(error) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "wayfinder_router_state_error",
-                error.to_string(),
-                routing_headers,
-            );
-        }
+        Err(response) => return *response,
     };
-    if plan.is_empty() {
-        if let Some(model) = state
-            .models()
-            .iter()
-            .find(|model| model.name() == route.chosen)
-        {
-            let assessment = assess_model(&options.routing_request, model);
-            if !assessment.is_eligible() {
-                return destination_ineligible_response(
-                    &route.chosen,
-                    &assessment,
-                    routing_headers,
-                    offline,
-                );
-            }
-            if !has_eligible_deployment_target(
-                &state,
-                &route.chosen,
-                &options.routing_request,
-                offline,
-                prompt_estimate,
-            ) {
-                return error_response(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "wayfinder_router_destination_ineligible",
-                    format!(
-                        "destination '{}' has no eligible concrete deployment for this request",
-                        route.chosen
-                    ),
-                    routing_headers,
-                );
-            }
-        }
-        return error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "wayfinder_router_circuit_open",
-            format!(
-                "no available upstream for '{}' (cooling down or context too small)",
-                route.chosen
-            ),
-            routing_headers,
-        );
-    }
 
     let shared_budget = match reserve_shared_budget(
         &state,
@@ -3672,8 +3457,8 @@ pub(crate) async fn chat_completions(
                 if served_target.provider() != ProviderKind::CodexAppServer {
                     if let Ok(key) = cache_key_with_version(
                         state.cache_generation(),
-                        &cache_partition,
-                        &cache_route,
+                        &cache.partition,
+                        &cache.route,
                         served_target.provider_model(),
                         &request_body,
                     ) {
