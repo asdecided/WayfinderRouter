@@ -1,4 +1,4 @@
-# Example managed deployment. Copy config/wayfinder-router.toml, add at least
+# Example managed deployment. Create config/wayfinder-router.toml with at least
 # one virtual key and model, then run `docker compose up gateway`.
 #
 # Point your app's OpenAI-compatible client at http://localhost:8088/v1.

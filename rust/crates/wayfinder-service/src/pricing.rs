@@ -1,9 +1,8 @@
 //! Deterministic token, cost, and savings arithmetic.
 //!
-//! This module contains no clock, filesystem, network, or provider calls.  It
-//! turns already-observed usage into auditable cost data.  Persisted ledger
-//! state is a separate boundary so these calculations remain independently
-//! differential-testable against Python.
+//! The cost arithmetic makes no clock, network, or provider calls: it turns
+//! already-observed usage into auditable cost data. The savings ledger in this
+//! module is the one stateful part; it persists that data to a local file.
 
 use std::collections::BTreeMap;
 use std::fmt;

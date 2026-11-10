@@ -109,7 +109,7 @@ cargo build \
 Then run:
 
 ```sh
-rust/target/debug/wayfinder-router route "Summarise this request"
+printf 'Summarise this request' | rust/target/debug/wayfinder-router route -
 rust/target/debug/wayfinder-router serve --host 127.0.0.1 --port 8088
 ```
 
@@ -177,8 +177,8 @@ node clients/shared/test/parity.mjs
 
 ```text
 rust/                    native router, gateway, providers, and service crates
-apple/                   planned shared Apple packages after bridge validation
-ios/                     planned native iPhone and iPad product
+apple/                   shared Apple routing bridge package and build scripts
+ios/                     native iPhone and iPad app (roadmap paused)
 macos/WayfinderMac/      native Swift macOS app and release packaging
 clients/shared/          JavaScript scorer mirror and golden parity corpus
 decisions/               architecture decisions

@@ -247,8 +247,8 @@ that goes hard then quiet drifts back to the cheap model. The latch can't help t
 case (a first message that's short but hard), where the deterministic answer is the opt-in **lexical
 signals** — raise the lexical feature weights so difficulty *vocabulary* (`prove`, `theorem`, `∑`)
 scores, with the caveats in [lexical-routing.md](lexical-routing.md) — or an explicit pin (the `model`
-field `auto` / `prefer-local` / `prefer-hosted`, or `X-Wayfinder-Threshold`; see the README,
-["Steer a single request"](../README.md#steer-a-single-request)). The demo's **Advanced** settings let
+field `auto` / `prefer-local` / `prefer-hosted`, or `X-Wayfinder-Threshold`; see
+[integrations.md](integrations.md)). The demo's **Advanced** settings let
 you turn the lexical signals on, tune feature weights, edit the trigger words live, and export the
 result as config ([WF-ADR-0023](../decisions/WF-ADR-0023-in-demo-scoring-overrides.md)).
 

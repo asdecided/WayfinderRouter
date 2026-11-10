@@ -43,7 +43,7 @@ jobs:
           swift --version
       - name: Install the pinned Rust toolchain and Apple targets
         run: |
-          rustup toolchain install 1.85.0 --profile minimal --component rustfmt,clippy
+          rustup toolchain install 1.85.0 --profile minimal
           rustup target add \
             aarch64-apple-darwin \
             aarch64-apple-ios \
