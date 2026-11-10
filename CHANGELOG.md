@@ -17,6 +17,10 @@ details, release history over commit history.
 - Publishing a Router release in GitHub now automatically builds, checks and
   attaches both native Linux archives and SHA-256 files. No manual workflow run
   or tag push is required; existing downloads are never overwritten (WF-ADR-0069).
+- CI now runs `cargo deny` (WF-ADR-0045) on every push and pull request, and
+  Dependabot proposes weekly Rust, npm and GitHub Actions updates. The lockfile
+  moves to `rustls` 0.23.46, `rustls-webpki` 0.103.16 and `tokio` 1.53.3 to
+  clear RUSTSEC-2026-0285, -0346, -0348, -0349, -0382 and -0386.
 
 ### Fixed
 

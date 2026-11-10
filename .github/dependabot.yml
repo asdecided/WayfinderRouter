@@ -1,0 +1,39 @@
+version: 2
+
+updates:
+  # Rust workspace. Many crates are exact-pinned with `=` in rust/Cargo.toml;
+  # Dependabot surfaces newer releases so each pin is reviewed deliberately.
+  # rust/deny.toml (cargo deny, CI job `supply-chain`) gates every update.
+  - package-ecosystem: "cargo"
+    directory: "/rust"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      github-actions-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Root npm workspace (clients/shared, clients/desktop).
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
