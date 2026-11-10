@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use wayfinder_routing_core::ExecutionBoundary;
 
+use crate::route_mode::RouteMode;
+
 /// Python compatibility bound for `/router/recent`.
 pub const MAX_RECENT_ENTRIES: usize = 200;
 
@@ -364,7 +366,7 @@ impl RecentRoutes {
         for entry in &*entries {
             let count = by_model.entry(entry.model.clone()).or_insert(0_u64);
             *count = count.saturating_add(1);
-            if entry.mode == "scored" {
+            if entry.mode == RouteMode::Scored.as_str() {
                 scored_total = scored_total.saturating_add(1);
                 let count = scored_by_model.entry(entry.model.clone()).or_insert(0_u64);
                 *count = count.saturating_add(1);
