@@ -57,6 +57,20 @@ pub enum LedgerError {
     Json(#[from] serde_json::Error),
 }
 
+/// Attribution dimension whose realized spend [`SavingsLedger::spent`] sums.
+///
+/// Virtual keys and workspaces use independent identifier namespaces, so a key
+/// and a workspace sharing an id never read each other's spend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpendScope<'a> {
+    /// All recorded spend, attributed or not.
+    Global,
+    /// Spend attributed to one virtual key id.
+    Key(&'a str),
+    /// Spend attributed to one workspace id.
+    Workspace(&'a str),
+}
+
 /// A price mapping plus whether its unit is real currency or relative.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PriceTable {
@@ -774,18 +788,21 @@ impl SavingsLedger {
         })
     }
 
-    /// Return realized spend for `day`, `month`, or all-time windows.
+    /// Return realized spend in `scope` for `day`, `month`, or all-time windows.
     pub fn spent(
         &self,
         window: &str,
-        virtual_key: Option<&str>,
+        scope: SpendScope<'_>,
         today: UtcDate,
     ) -> Result<f64, LedgerError> {
         let days = self.days.lock().map_err(|_| LedgerError::LockPoisoned)?;
-        let realized = |bucket: &DayBucket| {
-            virtual_key.map_or(bucket.realized, |key| {
-                bucket.by_key.get(key).map_or(0.0, |stats| stats.realized)
-            })
+        let realized = |bucket: &DayBucket| match scope {
+            SpendScope::Global => bucket.realized,
+            SpendScope::Key(key) => bucket.by_key.get(key).map_or(0.0, |stats| stats.realized),
+            SpendScope::Workspace(workspace) => bucket
+                .by_workspace
+                .get(workspace)
+                .map_or(0.0, |stats| stats.realized),
         };
         let amount = match window {
             "day" => days.get(&today.to_string()).map_or(0.0, realized),
@@ -1373,10 +1390,10 @@ mod tests {
         ledger.record(&cloud, UtcDate::new(2026, 5, 31)?, Some("team-a"))?;
         ledger.record(&local, UtcDate::new(2026, 6, 23)?, None)?;
         let today = UtcDate::new(2026, 6, 23)?;
-        assert_eq!(ledger.spent("day", None, today)?, 0.01);
-        assert_eq!(ledger.spent("month", None, today)?, 0.02);
-        assert_eq!(ledger.spent("all", None, today)?, 0.03);
-        assert_eq!(ledger.spent("all", Some("team-a"), today)?, 0.02);
+        assert_eq!(ledger.spent("day", SpendScope::Global, today)?, 0.01);
+        assert_eq!(ledger.spent("month", SpendScope::Global, today)?, 0.02);
+        assert_eq!(ledger.spent("all", SpendScope::Global, today)?, 0.03);
+        assert_eq!(ledger.spent("all", SpendScope::Key("team-a"), today)?, 0.02);
         assert_eq!(
             ledger.totals()?,
             SavingsTotals {
@@ -1384,6 +1401,42 @@ mod tests {
                 baseline: 0.05,
                 saved: 0.02,
             }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ledger_spend_scopes_keys_and_workspaces_independently()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let ledger = SavingsLedger::new(400, true);
+        let costs = [("cloud".to_owned(), 0.01)].into_iter().collect();
+        let cloud = turn_cost("cloud", 1_000, 0, &costs, false, None)?;
+        let today = UtcDate::new(2026, 6, 23)?;
+        ledger.record_attributed(&cloud, today, Some("alice-key"), Some("team-ws"))?;
+        ledger.record_attributed(&cloud, today, Some("team-ws"), Some("other-ws"))?;
+        ledger.record_attributed(&cloud, today, None, None)?;
+
+        assert_eq!(ledger.spent("day", SpendScope::Global, today)?, 0.03);
+        assert_eq!(
+            ledger.spent("day", SpendScope::Key("alice-key"), today)?,
+            0.01
+        );
+        assert_eq!(
+            ledger.spent("day", SpendScope::Key("team-ws"), today)?,
+            0.01
+        );
+        assert_eq!(ledger.spent("day", SpendScope::Key("missing"), today)?, 0.0);
+        assert_eq!(
+            ledger.spent("month", SpendScope::Workspace("team-ws"), today)?,
+            0.01
+        );
+        assert_eq!(
+            ledger.spent("all", SpendScope::Workspace("other-ws"), today)?,
+            0.01
+        );
+        assert_eq!(
+            ledger.spent("day", SpendScope::Workspace("alice-key"), today)?,
+            0.0
         );
         Ok(())
     }

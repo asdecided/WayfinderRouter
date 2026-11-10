@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use wayfinder_config::gateway::{Budget, GatewayConfig};
-use wayfinder_service::pricing::{LedgerError, SavingsLedger, UtcDate};
+use wayfinder_service::pricing::{LedgerError, SavingsLedger, SpendScope, UtcDate};
 
 use crate::state::{SharedBudgetScope, StateBackend, StateBackendError};
 
@@ -125,7 +125,7 @@ impl BudgetPolicy {
 
         let mut degraded = false;
         if let Some(budget) = &self.global {
-            match evaluate_one(ledger, budget, None, today, offline)? {
+            match evaluate_one(ledger, budget, SpendScope::Global, today, offline)? {
                 BudgetDecision::Allow => {}
                 BudgetDecision::Degrade => degraded = true,
                 blocked @ BudgetDecision::Block { .. } => return Ok(blocked),
@@ -134,7 +134,13 @@ impl BudgetPolicy {
         if let Some((workspace_id, budget)) =
             workspace_id.and_then(|id| self.by_workspace.get(id).map(|budget| (id, budget)))
         {
-            match evaluate_one(ledger, budget, Some(workspace_id), today, offline)? {
+            match evaluate_one(
+                ledger,
+                budget,
+                SpendScope::Workspace(workspace_id),
+                today,
+                offline,
+            )? {
                 BudgetDecision::Allow => {}
                 BudgetDecision::Degrade => degraded = true,
                 blocked @ BudgetDecision::Block { .. } => return Ok(blocked),
@@ -143,7 +149,7 @@ impl BudgetPolicy {
         if let Some((key_id, budget)) =
             key_id.and_then(|key_id| self.by_key.get(key_id).map(|budget| (key_id, budget)))
         {
-            match evaluate_one(ledger, budget, Some(key_id), today, offline)? {
+            match evaluate_one(ledger, budget, SpendScope::Key(key_id), today, offline)? {
                 BudgetDecision::Allow => {}
                 BudgetDecision::Degrade => degraded = true,
                 blocked @ BudgetDecision::Block { .. } => return Ok(blocked),
@@ -259,11 +265,11 @@ fn evaluate_spent(spent: f64, budget: &Budget, offline: bool) -> BudgetDecision 
 fn evaluate_one(
     ledger: &SavingsLedger,
     budget: &Budget,
-    key_id: Option<&str>,
+    scope: SpendScope<'_>,
     today: UtcDate,
     offline: bool,
 ) -> Result<BudgetDecision, LedgerError> {
-    if ledger.spent(&budget.window, key_id, today)? < budget.limit {
+    if ledger.spent(&budget.window, scope, today)? < budget.limit {
         return Ok(BudgetDecision::Allow);
     }
     if budget.on_breach == "block" && !offline {
@@ -283,7 +289,7 @@ pub fn format_limit(limit: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use wayfinder_config::gateway::VirtualKey;
+    use wayfinder_config::gateway::{VirtualKey, Workspace};
     use wayfinder_service::pricing::TurnCost;
 
     use super::*;
@@ -370,6 +376,128 @@ mod tests {
             BudgetDecision::Allow
         );
         assert_eq!(format_limit(2.0), "2.0");
+        Ok(())
+    }
+
+    fn workspace_ledger(
+        key: Option<&str>,
+        workspace: Option<&str>,
+    ) -> Result<(SavingsLedger, UtcDate), LedgerError> {
+        let today = UtcDate::new(2026, 7, 11)?;
+        let ledger = SavingsLedger::new(400, true);
+        let cost = TurnCost {
+            route: "cloud".to_owned(),
+            realized: 100.0,
+            baseline: 100.0,
+            savings: 0.0,
+            prompt_tokens: 1_000,
+            completion_tokens: 0,
+            estimated: false,
+        };
+        ledger.record_attributed(&cost, today, key, workspace)?;
+        Ok((ledger, today))
+    }
+
+    fn workspace_policy(workspace_id: &str, on_breach: &str) -> BudgetPolicy {
+        let mut config = GatewayConfig::default();
+        config.workspaces.insert(
+            workspace_id.to_owned(),
+            Workspace {
+                budget: Some(budget(1.0, on_breach)),
+                ..Workspace::default()
+            },
+        );
+        BudgetPolicy::from_gateway_config(&config)
+    }
+
+    #[test]
+    fn workspace_budget_blocks_on_workspace_spend() -> Result<(), LedgerError> {
+        let (ledger, today) = workspace_ledger(Some("alice-key"), Some("team-ws"))?;
+        let policy = workspace_policy("team-ws", "block");
+        assert_eq!(
+            policy.evaluate_for(
+                &ledger,
+                true,
+                Some("team-ws"),
+                Some("alice-key"),
+                today,
+                false
+            )?,
+            BudgetDecision::Block {
+                window: "day".to_owned(),
+                limit: 1.0
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn other_workspace_spend_does_not_trip_a_workspace_budget() -> Result<(), LedgerError> {
+        let (ledger, today) = workspace_ledger(Some("bob-key"), Some("other-ws"))?;
+        let policy = workspace_policy("team-ws", "block");
+        assert_eq!(
+            policy.evaluate_for(
+                &ledger,
+                true,
+                Some("team-ws"),
+                Some("alice-key"),
+                today,
+                false
+            )?,
+            BudgetDecision::Allow
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn key_and_workspace_with_the_same_id_do_not_share_spend() -> Result<(), LedgerError> {
+        // Spend lands on a key named like the budgeted workspace, but in an
+        // unrelated workspace, so the workspace cap must not see it.
+        let (ledger, today) = workspace_ledger(Some("team-ws"), Some("other-ws"))?;
+        let policy = workspace_policy("team-ws", "block");
+        assert_eq!(
+            policy.evaluate_for(&ledger, true, Some("team-ws"), None, today, false)?,
+            BudgetDecision::Allow
+        );
+
+        // Conversely, workspace spend must not trip a key budget that merely
+        // shares the workspace's id.
+        let (ledger, today) = workspace_ledger(None, Some("team-a"))?;
+        let mut config = GatewayConfig::default();
+        config.keys.insert(
+            "team-a".to_owned(),
+            VirtualKey {
+                hash: "0".repeat(64),
+                tags: Vec::new(),
+                workspace: None,
+                budget: Some(budget(1.0, "block")),
+                rate_limit: None,
+                models: Vec::new(),
+            },
+        );
+        let policy = BudgetPolicy::from_gateway_config(&config);
+        assert_eq!(
+            policy.evaluate_for(&ledger, true, None, Some("team-a"), today, false)?,
+            BudgetDecision::Allow
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn offline_softens_a_workspace_block_to_degrade() -> Result<(), LedgerError> {
+        let (ledger, today) = workspace_ledger(Some("alice-key"), Some("team-ws"))?;
+        let policy = workspace_policy("team-ws", "block");
+        assert_eq!(
+            policy.evaluate_for(
+                &ledger,
+                true,
+                Some("team-ws"),
+                Some("alice-key"),
+                today,
+                true
+            )?,
+            BudgetDecision::Degrade
+        );
         Ok(())
     }
 }

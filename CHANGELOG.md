@@ -23,6 +23,9 @@ details, release history over commit history.
 - Explicit missing configuration and unusable discovered config paths now fail
   instead of falling back to defaults or a parent policy. Runtime config errors
   omit source text, and a regression verifies restrictions survive delivery fallback.
+- Workspace spend caps are now enforced without a Redis state backend and when
+  Redis is unavailable. Previously a workspace's spend read as zero there, so a
+  `block` or `degrade` budget never triggered.
 
 ## Router 1.1.0 — 2026-09-06
 
