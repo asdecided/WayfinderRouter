@@ -453,6 +453,222 @@ async fn streaming_pool_stops_at_the_first_established_deployment() -> TestResul
     Ok(())
 }
 
+type TestStateFuture<'a, T> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<T, crate::state::StateBackendError>> + Send + 'a>,
+>;
+
+/// The in-process backend under the name the canary path requires, so canary
+/// accounting can be exercised without a Redis server.
+#[derive(Clone, Debug, Default)]
+struct CanaryTestBackend(crate::state::MemoryStateBackend);
+
+impl crate::state::StateBackend for CanaryTestBackend {
+    fn backend_name(&self) -> &'static str {
+        "redis"
+    }
+
+    fn admit<'a>(
+        &'a self,
+        key: &'a str,
+        config: crate::state::StateLimitConfig,
+        now_seconds: f64,
+    ) -> TestStateFuture<'a, crate::rate_limit::RateResult> {
+        self.0.admit(key, config, now_seconds)
+    }
+
+    fn reserve<'a>(
+        &'a self,
+        key: &'a str,
+        config: crate::state::StateLimitConfig,
+        tokens: u64,
+        now_seconds: f64,
+    ) -> TestStateFuture<'a, crate::rate_limit::ReservationResult> {
+        self.0.reserve(key, config, tokens, now_seconds)
+    }
+
+    fn reserve_tokens<'a>(
+        &'a self,
+        key: &'a str,
+        config: crate::state::StateLimitConfig,
+        tokens: u64,
+        now_seconds: f64,
+    ) -> TestStateFuture<'a, crate::rate_limit::ReservationResult> {
+        self.0.reserve_tokens(key, config, tokens, now_seconds)
+    }
+
+    fn reconcile<'a>(
+        &'a self,
+        key: &'a str,
+        config: crate::state::StateLimitConfig,
+        reservation: crate::rate_limit::RateReservation,
+        actual_tokens: u64,
+        now_seconds: f64,
+    ) -> TestStateFuture<'a, bool> {
+        self.0
+            .reconcile(key, config, reservation, actual_tokens, now_seconds)
+    }
+
+    fn rollback<'a>(
+        &'a self,
+        key: &'a str,
+        config: crate::state::StateLimitConfig,
+        reservation: crate::rate_limit::RateReservation,
+        now_seconds: f64,
+    ) -> TestStateFuture<'a, bool> {
+        self.0.rollback(key, config, reservation, now_seconds)
+    }
+
+    fn add_tokens<'a>(
+        &'a self,
+        key: &'a str,
+        config: crate::state::StateLimitConfig,
+        tokens: u64,
+        now_seconds: f64,
+    ) -> TestStateFuture<'a, ()> {
+        self.0.add_tokens(key, config, tokens, now_seconds)
+    }
+
+    fn record_canary<'a>(
+        &'a self,
+        observation: crate::state::SharedCanaryObservation,
+        window_seconds: f64,
+        now_seconds: f64,
+    ) -> TestStateFuture<'a, bool> {
+        self.0
+            .record_canary(observation, window_seconds, now_seconds)
+    }
+
+    fn canary_snapshot<'a>(
+        &'a self,
+        rollout_id: &'a str,
+        window_seconds: f64,
+        now_seconds: f64,
+    ) -> TestStateFuture<'a, crate::state::SharedCanarySnapshot> {
+        self.0
+            .canary_snapshot(rollout_id, window_seconds, now_seconds)
+    }
+
+    fn snapshot<'a>(
+        &'a self,
+        key: &'a str,
+        config: crate::state::StateLimitConfig,
+        now_seconds: f64,
+    ) -> TestStateFuture<'a, Option<crate::rate_limit::RateSnapshot>> {
+        self.0.snapshot(key, config, now_seconds)
+    }
+
+    fn degraded(&self) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+async fn canary_cache_hit_is_not_recorded_as_a_canary_failure() -> TestResult {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let backend = Arc::new(CanaryTestBackend::default());
+    let mut state = AppState::new(
+        RoutingConfig::binary(0.5),
+        vec![
+            ConfiguredModel::new(
+                "local",
+                "http://127.0.0.1:11434/v1",
+                "upstream-local",
+                None,
+                true,
+            )
+            .with_cost_per_1k(Some(0.0)),
+            ConfiguredModel::new(
+                "cloud",
+                "https://cloud.example/v1",
+                "upstream-cloud",
+                None,
+                true,
+            )
+            .with_cost_per_1k(Some(0.01)),
+        ],
+        false,
+        "test",
+    )
+    .with_delivery(Arc::new(CountingUsageDelivery {
+        calls: Arc::clone(&calls),
+    }))
+    .with_cache_and_clock(
+        CacheSettings {
+            enabled: true,
+            ttl_seconds: 300.0,
+            max_entries: 16,
+            max_bytes: 1024 * 1024,
+        },
+        || 1_000.0,
+    )?
+    .with_route_presets(
+        [(
+            "candidate".to_owned(),
+            RoutePreset {
+                models: vec!["cloud".to_owned()],
+            },
+        )]
+        .into_iter()
+        .collect(),
+    );
+    state.shared_state_backend = Some(backend.clone());
+    state.canary_config = Arc::new(wayfinder_config::gateway::CanaryConfig {
+        enabled: true,
+        rollout_id: "rollout-1".to_owned(),
+        candidate_route: "candidate".to_owned(),
+        fraction: 1.0,
+        ..wayfinder_config::gateway::CanaryConfig::default()
+    });
+    let window = state.canary_config().window;
+    let body = json!({
+        "model": "auto",
+        "messages": [{"role": "user", "content": "same deterministic prompt"}]
+    });
+
+    let first = post_json(&state, "/v1/chat/completions", &body, &[]).await?;
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(
+        first.headers().get("x-wayfinder-router-mode"),
+        Some(&axum::http::HeaderValue::from_static("canary"))
+    );
+    let _ = to_bytes(first.into_body(), usize::MAX).await?;
+
+    let second = post_json(&state, "/v1/chat/completions", &body, &[]).await?;
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(
+        second.headers().get(ROUTER_CACHE_HEADER),
+        Some(&axum::http::HeaderValue::from_static("hit"))
+    );
+    let _ = to_bytes(second.into_body(), usize::MAX).await?;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the second request is a cache hit"
+    );
+
+    // Let any outcome recorded from a dropped guard run before reading.
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    let snapshot = crate::state::StateBackend::canary_snapshot(
+        backend.as_ref(),
+        "rollout-1",
+        window,
+        crate::wall_clock_seconds(),
+    )
+    .await
+    .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+    assert_eq!(
+        snapshot.requests, 1,
+        "only the delivered request is observed"
+    );
+    assert_eq!(
+        snapshot.errors, 0,
+        "a cache hit says nothing about the candidate"
+    );
+    Ok(())
+}
+
 const EXACT_USAGE_BODY: &[u8] =
     br#"{"object":"chat.completion","usage":{"prompt_tokens":1000,"completion_tokens":25},"choices":[{"message":{"content":"ok"}}]}"#;
 
