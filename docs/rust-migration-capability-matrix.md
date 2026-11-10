@@ -61,7 +61,7 @@ packaged, tested, or supported by the repository (WF-ADR-0046).
 | Native Swift package | Pass, 66 tests | `CLANG_MODULE_CACHE_PATH=/private/tmp/wayfinder-swift-module-cache swift test --disable-sandbox` |
 | Full Python test suite | 651 pass, 1 pre-existing contract failure | `uv run python -m pytest -q`; `test_tiers_are_parsed_and_sorted` expects sorting while the preserved dirty `config.py` now rejects descending input |
 | Rust toolchain | Available | `rustc`/`cargo` 1.96.0; `rustfmt` and `clippy` available |
-| Rust security/license tools | Partial | `cargo-audit 0.22.2` is installed and reports no advisory in the 214-dependency lockfile with `--no-fetch`; `cargo-deny` remains unavailable, so its policy file is not yet validated |
+| Rust security/license tools | Pass | `cargo-audit 0.22.2` is installed and reports no advisory in the 214-dependency lockfile with `--no-fetch`; `cargo-deny 0.20.2` validates `rust/deny.toml` (advisories, bans, licenses and sources pass) and runs in the CI `supply-chain` job |
 | macOS Rust targets | Partial | `aarch64-apple-darwin` only; `x86_64-apple-darwin` is not installed |
 | Signed/notarized universal app/helper | No current gate | No production app target, nested-helper signing, notarization, Intel test, or rollback harness exists |
 
@@ -95,8 +95,8 @@ The first compatibility slice is additive and development-only:
   current-config smoke cases.
 - Workspace rustfmt and warning-denied Clippy pass offline. Focused compatibility, CLI, service,
   and provider suites pass; the full socket-backed suite requires loopback permission in restricted
-  environments. `cargo audit --no-fetch` is clean. `cargo deny` and x86_64/universal builds remain
-  unavailable for the reasons in the baseline table. The full Python result and its tier-order
+  environments. `cargo audit --no-fetch` is clean. `cargo deny check` passes and runs in CI;
+  x86_64/universal builds remain unavailable for the reasons in the baseline table. The full Python result and its tier-order
   conflict are recorded above.
 
 The rewrite is not complete. Virtual-key authentication, allowlist clamping, global/per-key RPM,

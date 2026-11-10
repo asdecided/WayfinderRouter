@@ -15,8 +15,21 @@ ignore = []
 [bans]
 multiple-versions = "deny"
 wildcards = "deny"
+# Internal `path = "../..."` dependencies carry no crates.io version. Every
+# workspace crate is `publish = false` (Router ships as release binaries and
+# images, never to crates.io), so cargo-deny treats them as private crates and
+# this exempts only their path dependencies from the wildcard ban.
+allow-wildcard-paths = true
 deny = []
-skip = []
+# Each skip is pinned to the exact older version so a new duplicate, or a
+# version change in one of these, fails the check and is reviewed again.
+skip = [
+    { crate = "getrandom@0.2.17", reason = "ring 0.17 (direct dependency of wayfinder-gateway) still requires getrandom 0.2" },
+    { crate = "getrandom@0.3.4", reason = "rand_core 0.9 via rand 0.9, pulled in by the exact-pinned opentelemetry_sdk =0.32.1" },
+    { crate = "syn@2.0.118", reason = "most proc-macro crates (serde_derive, askama_derive, displaydoc, futures-macro, prost-derive, ...) are still on syn 2; async-trait and clap_derive have moved to syn 3" },
+    { crate = "toml@0.5.11", reason = "uniffi_bindgen and uniffi_macros 0.29.5 (exact-pinned uniffi =0.29.5 for wayfinder-apple-ffi) require toml 0.5" },
+    { crate = "winnow@0.7.15", reason = "askama_parser 0.13 via askama, pulled in by uniffi_bindgen 0.29.5 (exact-pinned uniffi =0.29.5)" },
+]
 skip-tree = []
 
 [licenses]
@@ -30,7 +43,20 @@ allow = [
     "Unicode-3.0",
     "Zlib",
 ]
-exceptions = []
+# MPL-2.0 is not allowed globally. UniFFI is the build/FFI dependency that
+# generates the Swift bindings for the Apple embedding (wayfinder-apple-ffi);
+# MPL-2.0 is file-level copyleft, so the exception is scoped to these exact
+# crates and version and must be re-reviewed when uniffi is bumped.
+exceptions = [
+    { crate = "uniffi@0.29.5", allow = ["MPL-2.0"] },
+    { crate = "uniffi_bindgen@0.29.5", allow = ["MPL-2.0"] },
+    { crate = "uniffi_core@0.29.5", allow = ["MPL-2.0"] },
+    { crate = "uniffi_internal_macros@0.29.5", allow = ["MPL-2.0"] },
+    { crate = "uniffi_macros@0.29.5", allow = ["MPL-2.0"] },
+    { crate = "uniffi_meta@0.29.5", allow = ["MPL-2.0"] },
+    { crate = "uniffi_pipeline@0.29.5", allow = ["MPL-2.0"] },
+    { crate = "uniffi_udl@0.29.5", allow = ["MPL-2.0"] },
+]
 
 [sources]
 unknown-registry = "deny"
