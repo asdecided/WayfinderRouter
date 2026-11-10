@@ -14,7 +14,6 @@ itself stays deterministic and offline — none of these touch the scored path.
 | setting | effect |
 | --- | --- |
 | `WAYFINDER_ROUTER_TIMEOUT` / `serve --timeout` | upstream timeout in seconds (default 60) |
-| `WAYFINDER_ROUTER_FEEDBACK_TOKEN` | when set, `/v1/feedback` requires `Authorization: Bearer <token>` |
 | `serve --dry-run` | return routing decisions without calling any upstream |
 | `serve --surface local\|data-plane` | `local` is the default loopback Desktop/operator surface; `data-plane` is the fail-closed network surface and requires virtual keys plus a configured model |
 

@@ -16,6 +16,11 @@ WF-ADR-0046. This workspace contains:
   and provider orchestration;
 - `wayfinder-service` — service units, pricing/ledger logic, and secret seams;
 - `wayfinder-cli` — the `wayfinder-router` executable;
+- `wayfinder-codex-app-server` — bounded client for a managed Codex app-server
+  child process (ChatGPT account routing);
+- `wayfinder-decision-experiment` — the opt-in decision-engine comparison
+  experiment; nothing in the production path depends on it;
+- `wayfinder-compat-tests` — fixture-contract and HTTP parity tests;
 - macOS XPC clients for credentials and Apple Foundation Models;
 - checked fixtures retained as immutable migration evidence.
 

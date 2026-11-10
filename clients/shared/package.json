@@ -2,13 +2,10 @@
   "name": "@wayfinder/shared",
   "version": "0.0.0",
   "private": true,
-  "description": "Shared, framework-agnostic gateway client + parity-gated decision core for Wayfinder's thin clients (WF-ADR-0042).",
+  "description": "Parity-gated JavaScript mirror of the Wayfinder scorer and its golden corpus (WF-ADR-0042).",
   "type": "module",
   "exports": {
-    "./gateway": "./src/gateway.js",
-    "./scorer": "./src/scorer.js",
-    "./theme": "./src/theme.js",
-    "./decision": "./src/decision.js"
+    "./scorer": "./src/scorer.js"
   },
   "scripts": {
     "parity": "node test/parity.mjs"

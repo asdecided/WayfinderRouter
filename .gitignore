@@ -1,16 +1,10 @@
-__pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
 build/
 dist/
-.venv/
 # Local RouterBench pulls and generated harness inputs (reproducible from the adapter)
 data/
 benchmarks/routerbench*.jsonl
 # Node clients (npm workspaces hoist to the root node_modules)
 node_modules/
-*.tsbuildinfo
 .DS_Store
 
 # SwiftPM/macOS local outputs and embedded local checkouts

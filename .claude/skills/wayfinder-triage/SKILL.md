@@ -45,17 +45,16 @@ issue (type + the ask). Lead with anything red or blocked.
 
 - **Branch, never push to `main`.** Open a PR from a feature branch.
 - **Run the full CI gate locally before pushing** (mirrors `.github/workflows/ci.yml`):
-  - `ruff check .`
-  - `mypy wayfinder_router`  (install extras first so mypy sees optional deps:
-    `pip install -e ".[dev,gateway,ui]"`)
-  - `pytest -q`
-  - confirm `rac` is **not** importable — the standalone invariant (WF-ADR-0001).
+  - `cargo fmt --manifest-path rust/Cargo.toml --all -- --check`
+  - `cargo test --manifest-path rust/Cargo.toml --workspace --all-features --locked`
+  - `cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings`
+  - `node clients/shared/test/parity.mjs`
 - **Deterministic core invariant (WF-ADR-0001):** scoring/routing makes no model
   call, needs no key, and touches no network. Model calls live only in the
   invocation / gateway layer (WF-ADR-0004). Never move logic that breaks this.
 - **CHANGELOG (Keep a Changelog):** every user-visible change gets a bullet under
-  `## Unreleased` in `CHANGELOG.md`, in user-impact voice, citing the relevant
-  `WF-ADR-####` / `WF-DESIGN-####`. Create the `## Unreleased` section if absent.
+  `## Router — Unreleased` in `CHANGELOG.md`, in user-impact voice, citing the relevant
+  `WF-ADR-####` / `WF-DESIGN-####`. Create that section if absent.
 - **Commits:** conventional style (`feat(...)`, `fix(...)`, `docs(...)`).
 - **Merging:** squash with a clean, hand-written commit title + message. For stacked
   PRs, after the base merges, rebase the child onto the squashed base so its diff

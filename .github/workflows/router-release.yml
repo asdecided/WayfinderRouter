@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/router-release.yml"
+      - "README.md"
       - "docs/releases/router-v*.md"
       - "packaging/linux/**"
       - "rust/**"
