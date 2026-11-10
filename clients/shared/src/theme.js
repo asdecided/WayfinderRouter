@@ -1,6 +1,6 @@
 // Canonical design tokens (WF-ADR-0042), mirrored from wayfinder_router/demo.html `:root`
-// (the source of truth per WF-ADR-0020). The desktop popover renders these over macOS vibrancy
-// on a ~92%-opacity card layer; route colour is local-green / cloud-amber, tabular-nums so the
+// (the source of truth per WF-ADR-0020). The legacy desktop popover (since removed; see git
+// history) rendered these over macOS vibrancy on a ~92%-opacity card layer; route colour is local-green / cloud-amber, tabular-nums so the
 // score never jitters. Keep these in sync with demo.html — a later `tools/extract-tokens` may
 // generate this file; for now it is a hand-mirrored copy.
 

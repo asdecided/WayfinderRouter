@@ -180,7 +180,7 @@ rust/                    native router, gateway, providers, and service crates
 apple/                   planned shared Apple packages after bridge validation
 ios/                     planned native iPhone and iPad product
 macos/WayfinderMac/      native Swift macOS app and release packaging
-clients/                 retained thin-client contract code and fixtures
+clients/shared/          JavaScript scorer mirror and golden parity corpus
 decisions/               architecture decisions
 designs/                 product and interaction contracts
 roadmaps/                delivery plans and closeout records

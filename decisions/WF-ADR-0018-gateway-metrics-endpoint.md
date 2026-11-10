@@ -11,6 +11,9 @@ tags: [gateway, observability, metrics, prometheus, operations]
 
 Accepted
 
+> Savings-persistence amendment (2026-11-10): the Rust gateway also exports the counter
+> `wayfinder_router_savings_persist_failures_total` (savings-ledger writes that failed and will be retried).
+
 ## Category
 
 Technical

@@ -10,10 +10,6 @@ data/
 benchmarks/routerbench*.jsonl
 # Node clients (npm workspaces hoist to the root node_modules)
 node_modules/
-# Tauri desktop app: Rust build output, generated bindings, and the frozen sidecar binary
-clients/desktop/src-tauri/target/
-clients/desktop/src-tauri/gen/
-clients/desktop/src-tauri/binaries/
 *.tsbuildinfo
 .DS_Store
 

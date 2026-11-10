@@ -11,6 +11,6 @@
     "./decision": "./src/decision.js"
   },
   "scripts": {
-    "parity": "python3 ../../tools/golden.py > test/golden.json && node test/parity.mjs"
+    "parity": "node test/parity.mjs"
   }
 }

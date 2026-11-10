@@ -5,7 +5,7 @@
 Please report security issues **privately** — don't open a public issue or pull request.
 
 Use GitHub's private vulnerability reporting:
-**[Report a vulnerability](https://github.com/itsthelore/wayfinder-router/security/advisories/new)**
+**[Report a vulnerability](https://github.com/asdecided/WayfinderRouter/security/advisories/new)**
 (the repo's *Security → Advisories → Report a vulnerability*). We'll acknowledge within a few days and
 keep you posted as we work on a fix.
 

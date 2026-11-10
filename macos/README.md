@@ -14,7 +14,8 @@ macOS gateway-first boundary. See WF-ADR-0047, WF-ADR-0048, and WF-ROADMAP-0016.
   routing and OpenAI-compatible delivery.
 - The macOS app never computes an authoritative route, calls a provider directly, or owns provider
   secrets. It consumes the bundled gateway contract.
-- `clients/desktop` is the retained legacy Tauri client, not the current native product.
+- The legacy desktop client was removed from the tree on 2026-11-10 (it remains in git history);
+  this native app is the only desktop product.
 - WF-ADR-0042 and WF-ROADMAP-0012 define the accepted native shell and Chat contract.
 
 ## Native Layout
@@ -97,7 +98,7 @@ Recommended path:
 2. Use `GatewayWayfinderClient` as the real source-of-truth integration for menu-bar status, routing mix, and savings data.
 3. Keep `LocalWayfinderClient` as a prototype/degraded preview only; it is not an authoritative
    route implementation.
-4. Avoid storing provider keys in the app. Follow the existing gateway and Keychain pattern from the Tauri client.
+4. Avoid storing provider keys in the app. Follow the gateway and Keychain pattern recorded in WF-ADR-0042.
 
 The first UI patch ran with `MockWayfinderClient` so the menu-bar, chat, and settings surfaces could be shaped without bootstrapping the gateway. The native menu now starts with `AppDelegate(client: GatewayWayfinderClient())` in `Sources/WayfinderMacApp/WayfinderMacMain.swift`.
 

@@ -18,7 +18,7 @@ details, release history over commit history.
   attaches both native Linux archives and SHA-256 files. No manual workflow run
   or tag push is required; existing downloads are never overwritten (WF-ADR-0069).
 - CI now runs `cargo deny` (WF-ADR-0045) on every push and pull request, and
-  Dependabot proposes weekly Rust, npm and GitHub Actions updates. The lockfile
+  Dependabot proposes weekly Rust and GitHub Actions updates. The lockfile
   moves to `rustls` 0.23.46, `rustls-webpki` 0.103.16 and `tokio` 1.53.3 to
   clear RUSTSEC-2026-0285, -0346, -0348, -0349, -0382 and -0386.
 - The savings ledger is no longer written synchronously after every completed
@@ -29,6 +29,10 @@ details, release history over commit history.
   of recorded spend from the file; budgets are still enforced from in-memory
   totals within a running process. Failed writes are now logged, counted in
   `wayfinder_router_savings_persist_failures_total` and retried.
+- The legacy Tauri desktop client source (`clients/desktop`) is removed from the
+  tree; the native macOS app under `macos/` is the desktop product and the old
+  client remains in git history. Security-report, issue-template and crate
+  repository links now point at `asdecided/WayfinderRouter`.
 
 ### Fixed
 

@@ -3,8 +3,8 @@
 //
 //     node clients/shared/test/parity.mjs
 //
-// Exits non-zero on ANY divergence (score, routing, or a single feature). The desktop app's
-// embedded scorer is trusted as a degraded-mode decision source ONLY while this gate is green.
+// Exits non-zero on ANY divergence (score, routing, or a single feature). A client embedding this
+// scorer may trust it as a degraded-mode decision source ONLY while this gate is green.
 import {readFileSync} from 'node:fs';
 import {scoreComplexity, FEATURE_ORDER} from '../src/scorer.js';
 
