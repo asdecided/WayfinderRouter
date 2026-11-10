@@ -35,6 +35,7 @@ pub mod server;
 pub mod shadow;
 pub mod state;
 
+mod chat_pipeline;
 mod route_mode;
 
 pub use crate::decision_policy::RouteOn;
@@ -80,8 +81,7 @@ use wayfinder_routing_core::{
     CandidateAssessment, ComplexityScore, DestinationCapabilities, DestinationSnapshot,
     ExclusionReason, ExecutionBoundary, FeatureContribution, Features, InferenceSurface,
     ModalityCapabilities, PrivacyPosture, ProviderReadiness, RoutingConfig, RoutingRequest,
-    RoutingRequirements, Tier, assess_destination, explain_score, python_round, recommend_tier,
-    score_complexity,
+    RoutingRequirements, Tier, assess_destination, explain_score, python_round,
 };
 use wayfinder_service::pricing::{
     LedgerError, PriceTable, SavingsLedger, SavingsReport, UtcDate, estimate_tokens, price_table,
@@ -99,6 +99,9 @@ use crate::cache::{
     is_storable,
 };
 use crate::canary::{CANARY_COHORT_HEADER, CANARY_IDENTITY_HEADER, CANARY_RESPONSE_HEADER};
+use crate::chat_pipeline::{
+    enforce_destination_eligibility, resolve_request_options, score_request, select_route,
+};
 use crate::control_plane::{
     BindingContext, PolicyReceipt, ResolvedPolicyProfile, UNMANAGED_POLICY_ID,
     UNMANAGED_SNAPSHOT_ID, ValidatedPolicyVersion,
@@ -106,8 +109,7 @@ use crate::control_plane::{
 use crate::decision_policy::{
     AUTO_MODEL, PREFER_HIGH, PREFER_HIGH_ALIAS, PREFER_LOW, ROUTE_ON_HEADER,
     STICKY_COOLDOWN_HEADER, STICKY_HEADER, THRESHOLD_HEADER, TUNING_FIELD, apply_scoring_overrides,
-    conversation_high_water, extract_prompt, parse_route_on_header, parse_threshold_header,
-    resolve_slash_directive_for_names, resolve_sticky, resolve_sticky_cooldown, threshold_tiers,
+    extract_prompt,
 };
 use crate::delivery::{
     BufferedDelivery, BufferedDeliveryResponse, DeliveryError, StreamingDelivery,
@@ -3039,220 +3041,34 @@ pub(crate) async fn chat_completions(
     });
     let policy_profile_id = resolved_profile.map(|profile| profile.profile_id);
     let base_routing = resolved_profile.map_or_else(|| state.routing(), |profile| profile.routing);
-    let tuning = body.remove(TUNING_FIELD);
-    let routing = match apply_scoring_overrides(base_routing, tuning.as_ref()) {
-        Ok(routing) => routing,
-        Err(error) => return bad_override_response(&request_id, error.to_string()),
-    };
-
-    let route_on_header = match request_header(&headers, ROUTE_ON_HEADER) {
-        Ok(value) => value,
-        Err(message) => return bad_override_response(&request_id, message),
-    };
-    let route_on = match parse_route_on_header(route_on_header) {
-        Ok(value) => value.unwrap_or(state.route_on()),
-        Err(error) => return bad_override_response(&request_id, error.to_string()),
-    };
-    let sticky_header = match request_header(&headers, STICKY_HEADER) {
-        Ok(value) => value,
-        Err(message) => return bad_override_response(&request_id, message),
-    };
-    let sticky = match resolve_sticky(sticky_header, state.sticky()) {
-        Ok(value) => value,
-        Err(error) => return bad_override_response(&request_id, error.to_string()),
-    };
-    let sticky_cooldown_header = match request_header(&headers, STICKY_COOLDOWN_HEADER) {
-        Ok(value) => value,
-        Err(message) => return bad_override_response(&request_id, message),
-    };
-    let sticky_cooldown =
-        match resolve_sticky_cooldown(sticky_cooldown_header, state.sticky_cooldown()) {
-            Ok(value) => value,
-            Err(error) => return bad_override_response(&request_id, error.to_string()),
+    let options =
+        match resolve_request_options(&state, &headers, &mut body, base_routing, &request_id) {
+            Ok(options) => options,
+            Err(response) => return *response,
         };
-
-    let mut messages = body.get("messages").cloned().unwrap_or(Value::Null);
-    let slash_resolution = state.slash_directives().then(|| {
-        resolve_slash_directive_for_names(
-            &messages,
-            &routing,
-            state.models().iter().map(ConfiguredModel::name),
-        )
-    });
-    let slash_resolution = slash_resolution.flatten();
-    if let Some(resolution) = &slash_resolution {
-        messages = resolution.messages.clone();
-        body.insert("messages".to_owned(), messages.clone());
-    }
-    let prompt = extract_prompt(&messages, route_on);
-    let offline = state.offline() || offline_override(&headers);
-    let privacy_posture = match parse_privacy_posture(&headers, offline) {
-        Ok(value) => value,
-        Err(message) => return bad_override_response(&request_id, message),
-    };
-    let prompt_estimate = estimate_tokens(&extract_prompt(&messages, RouteOn::All));
-    let requirements = request_requirements(&body, &messages, prompt_estimate);
-    let routing_request = RoutingRequest {
-        schema_version: wayfinder_routing_core::RUNTIME_CONTRACT_VERSION,
-        request_id: request_id.clone(),
-        prompt: prompt.clone(),
-        privacy_posture,
-        requirements,
-    };
+    let offline = options.offline;
+    let privacy_posture = options.privacy_posture;
+    let prompt_estimate = options.prompt_estimate;
     let decision_started = Instant::now();
-    let decision_span = tracing::info_span!("wayfinder.decision");
-    let decision = match decision_span.in_scope(|| score_complexity(&prompt, &routing)) {
+    let decision = match score_request(&options.prompt, &options.routing, &request_id) {
         Ok(decision) => decision,
-        Err(error) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "wayfinder_router_misconfigured",
-                error.to_string(),
-                request_id_headers(&request_id),
-            );
-        }
+        Err(response) => return *response,
     };
-
-    let selection = match resolve_request_selection(body.get("model"), &state) {
-        Ok(selection) => selection,
-        Err(message) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "wayfinder_router_unknown_route",
-                message,
-                request_id_headers(&request_id),
-            );
-        }
+    let mut route = match select_route(
+        &state,
+        &headers,
+        body.get("model"),
+        &options,
+        &decision,
+        &request_id,
+    ) {
+        Ok(route) => route,
+        Err(response) => return *response,
     };
-    let (mut chosen, mut mode, mut preset_models, mut preset_name) =
-        if let Some(selection) = selection {
-            match selection {
-                RequestSelection::Model(pin) => (pin, RouteMode::Pinned, None, None),
-                RequestSelection::Preset { name, models } => {
-                    let chosen = models[0].clone();
-                    (chosen, RouteMode::Preset, Some(models), Some(name))
-                }
-            }
-        } else if let Some(slash_pin) = slash_resolution.and_then(|resolution| resolution.pin) {
-            (slash_pin, RouteMode::SlashPinned, None, None)
-        } else {
-            let threshold_header = match request_header(&headers, THRESHOLD_HEADER) {
-                Ok(value) => value,
-                Err(message) => return bad_override_response(&request_id, message),
-            };
-            let threshold = match parse_threshold_header(threshold_header) {
-                Ok(value) => value,
-                Err(error) => return bad_override_response(&request_id, error.to_string()),
-            };
-            let (mut chosen, mut mode, effective_tiers) = if let Some(threshold) = threshold {
-                let tiers = match threshold_tiers(&routing, threshold) {
-                    Ok(tiers) => tiers,
-                    Err(error) => return bad_override_response(&request_id, error.to_string()),
-                };
-                let Some(model) = recommend_tier(decision.score, &tiers) else {
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "wayfinder_router_misconfigured",
-                        "routing configuration contains no selectable tier".to_owned(),
-                        request_id_headers(&request_id),
-                    );
-                };
-                (model.to_owned(), RouteMode::ThresholdOverride, tiers)
-            } else {
-                (
-                    decision.recommendation.clone(),
-                    RouteMode::Scored,
-                    routing.tiers.clone(),
-                )
-            };
-            if sticky && routing.classifier.is_none() && effective_tiers.len() >= 2 {
-                let latched = match conversation_high_water(
-                    &messages,
-                    &routing,
-                    &effective_tiers,
-                    sticky_cooldown,
-                ) {
-                    Ok(value) => value,
-                    Err(error) => return bad_override_response(&request_id, error.to_string()),
-                };
-                if let Some(latched) = latched {
-                    let current_rank = effective_tiers
-                        .iter()
-                        .position(|tier| tier.model == chosen)
-                        .unwrap_or(0);
-                    let latched_rank = effective_tiers
-                        .iter()
-                        .position(|tier| tier.model == latched)
-                        .unwrap_or(0);
-                    if latched_rank > current_rank {
-                        chosen = latched;
-                        mode = RouteMode::Sticky;
-                    }
-                }
-            }
-            (chosen, mode, None, None)
-        };
-    let mut preset_route_active = preset_name.is_some();
-
-    if let Some(preset_models) = preset_models.as_mut() {
-        let allowed_models = state
-            .access_policy()
-            .and_then(|policy| access_grant.map(|grant| policy.allowed_models(grant)))
-            .filter(|allowed| !allowed.is_empty());
-        let mut reasons = Vec::new();
-        preset_models.retain(|name| {
-            if allowed_models.is_some_and(|allowed| !allowed.iter().any(|model| model == name)) {
-                reasons.push(format!("{name}: not-allowed-by-key"));
-                return false;
-            }
-            if state.dry_run() {
-                return true;
-            }
-            let Some(model) = state.models().iter().find(|model| model.name() == name) else {
-                reasons.push(format!("{name}: unknown-model"));
-                return false;
-            };
-            let assessment = assess_model(&routing_request, model);
-            if assessment.is_eligible() {
-                true
-            } else {
-                reasons.push(format!(
-                    "{name}: {}",
-                    assessment
-                        .exclusions
-                        .iter()
-                        .map(|reason| exclusion_reason_name(*reason))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                ));
-                false
-            }
-        });
-        let Some(first) = preset_models.first().cloned() else {
-            return error_response(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "wayfinder_router_destination_ineligible",
-                format!(
-                    "routing preset '{}' has no eligible destination for this request: {}",
-                    preset_name.as_deref().unwrap_or("unknown"),
-                    reasons.join("; ")
-                ),
-                privacy_response_headers(&request_id, privacy_posture),
-            );
-        };
-        chosen = first;
-    } else if !state.dry_run() && mode.is_pinned() {
-        if let Some(model) = state.models().iter().find(|model| model.name() == chosen) {
-            let assessment = assess_model(&routing_request, model);
-            if !assessment.is_eligible() {
-                return destination_ineligible_response(
-                    &chosen,
-                    &assessment,
-                    privacy_response_headers(&request_id, privacy_posture),
-                    offline,
-                );
-            }
-        }
+    if let Err(response) =
+        enforce_destination_eligibility(&state, access_grant, &options, &request_id, &mut route)
+    {
+        return *response;
     }
 
     let mut budget_state = None;
@@ -3324,17 +3140,17 @@ pub(crate) async fn chat_completions(
                             decision.models.as_deref(),
                             &state.price_table().costs,
                             allowed_models,
-                            &chosen,
+                            &route.chosen,
                         )
                     })
                     .flatten();
                 if let Some(target) = target {
                     budget_state = Some("degraded");
-                    budget_rerouted_from = Some(std::mem::replace(&mut chosen, target));
-                    mode = RouteMode::BudgetDegraded;
-                    preset_models = None;
-                    preset_name = None;
-                    preset_route_active = false;
+                    budget_rerouted_from = Some(std::mem::replace(&mut route.chosen, target));
+                    route.mode = RouteMode::BudgetDegraded;
+                    route.preset_models = None;
+                    route.preset_name = None;
+                    route.preset_route_active = false;
                 }
             }
             Ok(BudgetDecision::Block { window, limit }) => {
@@ -3370,48 +3186,49 @@ pub(crate) async fn chat_completions(
                 .into_iter()
                 .map(|tier| tier.model.as_str())
                 .collect::<Vec<_>>();
-            let clamped = clamp_to_allowed(&chosen, &ladder, allowed);
-            if clamped != chosen {
-                chosen = clamped;
-                mode = RouteMode::KeyScoped;
+            let clamped = clamp_to_allowed(&route.chosen, &ladder, allowed);
+            if clamped != route.chosen {
+                route.chosen = clamped;
+                route.mode = RouteMode::KeyScoped;
             }
         }
     }
-    if budget_rerouted_from.as_deref() == Some(chosen.as_str()) {
+    if budget_rerouted_from.as_deref() == Some(route.chosen.as_str()) {
         budget_state = Some("exhausted");
     }
-    let canary_guard = if !state.dry_run() && !preset_route_active && mode == RouteMode::Scored {
-        maybe_assign_canary(
-            &state,
-            CanaryRequest {
-                request_id: &request_id,
-                baseline_route: &chosen,
-                routing_request: &routing_request,
-                offline,
-                prompt_estimate,
-                workspace_id,
-                key_id,
-                access_grant,
-                headers: &headers,
-            },
-        )
-        .await
-    } else {
-        None
-    };
+    let canary_guard =
+        if !state.dry_run() && !route.preset_route_active && route.mode == RouteMode::Scored {
+            maybe_assign_canary(
+                &state,
+                CanaryRequest {
+                    request_id: &request_id,
+                    baseline_route: &route.chosen,
+                    routing_request: &options.routing_request,
+                    offline,
+                    prompt_estimate,
+                    workspace_id,
+                    key_id,
+                    access_grant,
+                    headers: &headers,
+                },
+            )
+            .await
+        } else {
+            None
+        };
     if let Some(candidate) = canary_guard.as_ref().and_then(|guard| {
         guard
             .context
             .as_ref()
             .map(|context| context.candidate_route.clone())
     }) {
-        chosen = candidate;
-        mode = RouteMode::Canary;
+        route.chosen = candidate;
+        route.mode = RouteMode::Canary;
     }
     let mut routing_headers = match decision_headers(
-        &chosen,
+        &route.chosen,
         decision.score,
-        mode,
+        route.mode,
         &request_id,
         offline,
         DecisionPolicyReceipt {
@@ -3459,7 +3276,7 @@ pub(crate) async fn chat_completions(
             );
         }
     }
-    if let Some(route_name) = preset_name.as_deref() {
+    if let Some(route_name) = route.preset_name.as_deref() {
         if let Err(message) = insert_header(
             &mut routing_headers,
             ROUTER_ROUTE_HEADER,
@@ -3520,9 +3337,9 @@ pub(crate) async fn chat_completions(
         .map_or(0.0, |duration| duration.as_secs_f64());
     let _ = state.recent().record(RecentEntry {
         request_id: request_id.clone(),
-        model: chosen.clone(),
+        model: route.chosen.clone(),
         score: python_round(decision.score, 2),
-        mode: mode.as_str().to_owned(),
+        mode: route.mode.as_str().to_owned(),
         policy_version: (state.policy_version() != UNMANAGED_POLICY_ID)
             .then(|| state.policy_version().to_owned()),
         snapshot_id: (state.policy_snapshot_id() != UNMANAGED_SNAPSHOT_ID)
@@ -3541,16 +3358,16 @@ pub(crate) async fn chat_completions(
         cache: None,
     });
     let _ = state.metrics().observe_decision(
-        &chosen,
-        mode.as_str(),
+        &route.chosen,
+        route.mode.as_str(),
         decision_started.elapsed().as_secs_f64(),
     );
 
     state.schedule_shadow(
         &request_id,
-        &prompt,
-        &routing_request,
-        &chosen,
+        &options.prompt,
+        &options.routing_request,
+        &route.chosen,
         decision.score,
         &Value::Object(body.clone()),
         crate::shadow::provider_consent(&headers),
@@ -3559,11 +3376,11 @@ pub(crate) async fn chat_completions(
     if state.dry_run() || state.models().is_empty() {
         return decision_only_response(
             &state,
-            &routing,
+            &options.routing,
             decision,
             DecisionMetadata {
-                chosen,
-                mode,
+                chosen: route.chosen,
+                mode: route.mode,
                 offline,
                 request_id,
                 headers: routing_headers,
@@ -3571,8 +3388,8 @@ pub(crate) async fn chat_completions(
         );
     }
 
-    let request_is_pinned = mode.is_pinned();
-    let request_is_preset = preset_route_active;
+    let request_is_pinned = route.mode.is_pinned();
+    let request_is_preset = route.preset_route_active;
     let delivery_name = if offline && !request_is_pinned && !request_is_preset {
         decision
             .tiers
@@ -3582,9 +3399,9 @@ pub(crate) async fn chat_completions(
                     .iter()
                     .min_by(|left, right| left.min_score.total_cmp(&right.min_score))
             })
-            .map_or_else(|| chosen.clone(), |tier| tier.model.clone())
+            .map_or_else(|| route.chosen.clone(), |tier| tier.model.clone())
     } else {
-        chosen.clone()
+        route.chosen.clone()
     };
     let Some(target) = state
         .models()
@@ -3631,8 +3448,8 @@ pub(crate) async fn chat_completions(
         key_id.unwrap_or("local"),
         privacy_posture_name(privacy_posture)
     );
-    let cache_route = preset_name.as_deref().map_or_else(
-        || format!("{}:{delivery_name}", mode.as_str()),
+    let cache_route = route.preset_name.as_deref().map_or_else(
+        || format!("{}:{delivery_name}", route.mode.as_str()),
         |name| format!("{ROUTE_PRESET_PREFIX}{name}"),
     );
     let cacheable = cache_enabled
@@ -3742,7 +3559,7 @@ pub(crate) async fn chat_completions(
     let failover_header = request_header(&headers, FAILOVER_HEADER).ok().flatten();
     let mut candidates = if request_is_pinned {
         Vec::new()
-    } else if let Some(preset_models) = preset_models.take() {
+    } else if let Some(preset_models) = route.preset_models.take() {
         preset_models
             .into_iter()
             .filter(|model| model != &delivery_name)
@@ -3752,7 +3569,7 @@ pub(crate) async fn chat_completions(
     };
     if !request_is_pinned && !request_is_preset && (!offline || ladder.is_empty()) {
         candidates.extend(failover_candidates(
-            &chosen,
+            &route.chosen,
             &ladder,
             state
                 .reliability_policy()
@@ -3771,13 +3588,13 @@ pub(crate) async fn chat_completions(
                 .iter()
                 .find(|model| model.name() == name)
                 .is_some_and(|model| {
-                    assess_model(&routing_request, model).is_eligible()
+                    assess_model(&options.routing_request, model).is_eligible()
                         && (!offline || model_is_proven_local(model))
                         && precheck_ok(prompt_estimate, model.context_window())
                         && has_eligible_deployment_target(
                             &state,
                             name,
-                            &routing_request,
+                            &options.routing_request,
                             offline,
                             prompt_estimate,
                         )
@@ -3796,11 +3613,15 @@ pub(crate) async fn chat_completions(
         }
     };
     if plan.is_empty() {
-        if let Some(model) = state.models().iter().find(|model| model.name() == chosen) {
-            let assessment = assess_model(&routing_request, model);
+        if let Some(model) = state
+            .models()
+            .iter()
+            .find(|model| model.name() == route.chosen)
+        {
+            let assessment = assess_model(&options.routing_request, model);
             if !assessment.is_eligible() {
                 return destination_ineligible_response(
-                    &chosen,
+                    &route.chosen,
                     &assessment,
                     routing_headers,
                     offline,
@@ -3808,8 +3629,8 @@ pub(crate) async fn chat_completions(
             }
             if !has_eligible_deployment_target(
                 &state,
-                &chosen,
-                &routing_request,
+                &route.chosen,
+                &options.routing_request,
                 offline,
                 prompt_estimate,
             ) {
@@ -3817,7 +3638,8 @@ pub(crate) async fn chat_completions(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "wayfinder_router_destination_ineligible",
                     format!(
-                        "destination '{chosen}' has no eligible concrete deployment for this request"
+                        "destination '{}' has no eligible concrete deployment for this request",
+                        route.chosen
                     ),
                     routing_headers,
                 );
@@ -3826,7 +3648,10 @@ pub(crate) async fn chat_completions(
         return error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "wayfinder_router_circuit_open",
-            format!("no available upstream for '{chosen}' (cooling down or context too small)"),
+            format!(
+                "no available upstream for '{}' (cooling down or context too small)",
+                route.chosen
+            ),
             routing_headers,
         );
     }
@@ -3896,10 +3721,10 @@ pub(crate) async fn chat_completions(
             let envelope = DecisionEnvelope {
                 wayfinder: make_decision_response(
                     &state,
-                    &routing,
+                    &options.routing,
                     &decision,
-                    &chosen,
-                    mode,
+                    &route.chosen,
+                    route.mode,
                     offline,
                     &request_id,
                     false,
@@ -3915,13 +3740,13 @@ pub(crate) async fn chat_completions(
             state,
             headers: routing_headers,
             plan,
-            chosen,
+            chosen: route.chosen,
             offline,
-            routing_request,
+            routing_request: options.routing_request,
             prompt_estimate,
             request_body,
             request_id,
-            messages,
+            messages: options.messages,
             access_grant,
             initial_event,
             admission_permit,
@@ -3950,7 +3775,7 @@ pub(crate) async fn chat_completions(
         &state,
         delivery,
         &plan,
-        &routing_request,
+        &options.routing_request,
         offline,
         prompt_estimate,
         &request_body,
@@ -4014,7 +3839,7 @@ pub(crate) async fn chat_completions(
         BufferedAccounting {
             route: &served_by,
             request_id: &request_id,
-            messages: &messages,
+            messages: &options.messages,
             access_grant,
             status,
             content_type: &response_content_type,
@@ -4072,10 +3897,10 @@ pub(crate) async fn chat_completions(
             body,
             make_decision_response(
                 &state,
-                &routing,
+                &options.routing,
                 &decision,
-                &chosen,
-                mode,
+                &route.chosen,
+                route.mode,
                 offline,
                 &request_id,
                 false,
@@ -4125,7 +3950,7 @@ pub(crate) async fn chat_completions(
     if let Some(cache_state) = cache_state {
         response_headers.insert(ROUTER_CACHE_HEADER, HeaderValue::from_static(cache_state));
     }
-    if served_by != chosen && !offline {
+    if served_by != route.chosen && !offline {
         response_headers.insert(ROUTER_FAILOVER_HEADER, HeaderValue::from_static("true"));
     }
     response_headers.insert(header::CONTENT_TYPE, content_type);
