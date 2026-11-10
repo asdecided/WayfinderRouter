@@ -13,7 +13,7 @@ Use this skill to audit or revise the WAYFINDER native macOS experience so it fe
 
 1. Confirm the target surface:
    - Native Swift app: `macos/WayfinderMac`.
-   - Legacy web/Tauri client: `clients/desktop`, only when the task explicitly references it.
+   - The legacy web/Tauri client was removed from the tree (it remains in git history); do not target it.
    - Product docs/design contracts: `macos/README.md`, `decisions/WF-ADR-0042-desktop-menu-bar-client.md`, `designs/WF-DESIGN-0012-desktop-popover-design.md`, and `designs/WF-DESIGN-0014-flat-list-popover.md`.
 2. Read `references/codex-ux-reference.md` before making UX judgments.
 3. Inspect the current Swift implementation before prescribing changes. Start with:
@@ -53,7 +53,6 @@ Relevant public source anchors:
 For native Swift work, do not lead with the Browser plugin. Use it when:
 
 - The task includes a local web preview, rendered documentation, or prototype route.
-- A legacy `clients/desktop` Vite/Tauri page needs inspection.
 - The user explicitly asks to use `@Browser` or the in-app browser.
 
 When using Browser, keep the task scoped to a concrete URL, viewport, state, and visible issue. For native macOS UI, ask for or capture screenshots instead.

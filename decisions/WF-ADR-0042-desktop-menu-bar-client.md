@@ -37,6 +37,9 @@ Accepted
 > Mobile amendment (WF-ADR-0047/0048): this ADR remains the macOS constitution. Native iPhone and
 > iPad are independently useful, embed the shared pure routing core, own their credentials and
 > threads, and do not run or require this desktop gateway. That is not a second routing algorithm.
+>
+> Source-removal amendment (2026-11-10): the Tauri client source (`clients/desktop`) was removed from
+> the tree and remains in git history; it is superseded by the native macOS app under `macos/`.
 
 ## Category
 

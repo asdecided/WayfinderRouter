@@ -10,7 +10,7 @@ description: >-
 
 # Wayfinder triage
 
-A repeatable health-and-action pass over the `itsthelore/wayfinder-router` repo.
+A repeatable health-and-action pass over the `asdecided/WayfinderRouter` repo.
 Works the same from the CLI, web, or mobile because it relies only on the GitHub
 MCP tools (`mcp__github__*`) — there is no `gh` CLI in web/mobile sessions.
 

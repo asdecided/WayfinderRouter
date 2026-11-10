@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Documentation
-    url: https://github.com/itsthelore/wayfinder-router#readme
+    url: https://github.com/asdecided/WayfinderRouter#readme
     about: Setup, gateway config, and integration recipes live in the README and docs/.
   - name: Report a security issue
-    url: https://github.com/itsthelore/wayfinder-router/security/advisories/new
+    url: https://github.com/asdecided/WayfinderRouter/security/advisories/new
     about: Please report vulnerabilities privately, not as a public issue.

@@ -1,12 +1,12 @@
-// Framework-agnostic decision-render helpers (WF-ADR-0042), shared by the desktop popover and
-// the terminal client. These format/select over a decision object as produced by
+// Framework-agnostic decision-render helpers (WF-ADR-0042), originally shared by the legacy
+// desktop popover (since removed from the tree; see git history). These format/select over a decision object as produced by
 // `gateway.decisionFromDebug` / `decisionFromHeaders` — `{ model, score, mode, isLocal,
 // contributions: [{ name, value, share }], targets, decisionOnly, dryRun }`. They NEVER score
 // (WF-ADR-0001); they only shape what the gateway already decided.
 //
-// The decision-render contract is pinned by the recorded golden gateway fixtures
-// (tools/record-fixtures.mjs → clients/desktop/src/test/fixtures), not by any Python module —
-// these helpers are kept deliberately small and literal so those fixtures fully cover them.
+// The decision-render contract was pinned by recorded golden gateway fixtures that lived with
+// the legacy desktop client (removed with it; see git history), not by any Python module —
+// these helpers are kept deliberately small and literal.
 
 export const LOCAL_GLYPH = '●';
 export const CLOUD_GLYPH = '◆';

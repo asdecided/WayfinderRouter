@@ -22,7 +22,7 @@ edition = "2024"
 rust-version = "1.85"
 authors = ["Tom Ballard <tom@armytage.co>"]
 license = "Apache-2.0"
-repository = "https://github.com/itsthelore/wayfinder-router"
+repository = "https://github.com/asdecided/WayfinderRouter"
 
 [workspace.dependencies]
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio", "tracing"] }

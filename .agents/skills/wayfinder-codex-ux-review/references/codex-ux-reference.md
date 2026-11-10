@@ -32,7 +32,7 @@ Use this as a stable lens for WAYFINDER reviews. Refresh from official OpenAI do
 
 ## Browser Plugin Role
 
-Use the in-app browser for local web previews, rendered docs, public pages, or the legacy Tauri web UI. For the Swift app, prefer app screenshots, SwiftUI previews if present, Computer Use when available, and direct source inspection.
+Use the in-app browser for local web previews, rendered docs, or public pages. For the Swift app, prefer app screenshots, SwiftUI previews if present, Computer Use when available, and direct source inspection.
 
 ## Official Source Anchors
 

@@ -1,8 +1,0 @@
-{
-  "status": "ok",
-  "models": [
-    "cloud",
-    "local"
-  ],
-  "offline": true
-}
