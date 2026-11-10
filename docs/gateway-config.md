@@ -269,6 +269,19 @@ unchanged). See [WF-ADR-0058](../decisions/WF-ADR-0058-opentelemetry-observabili
 | --- | --- |
 | `[gateway.budget] limit` / `window = day\|month\|all` / `on_breach = degrade\|block` | spend cap: once `limit` realized cost is reached, degrade to the cheapest tier (default, never raises cost) or block with HTTP 402. With Redis state, realized spend is read from the idempotent fleet ledger and a conservative request reservation is held until success, cancellation, or a six-hour lease expiry; concurrent hard-cap requests therefore cannot all pass the same remaining balance. Memory mode keeps the existing local ledger. Surfaced via `x-wayfinder-router-budget`; needs real `cost_per_1k` prices (WF-ADR-0032, WF-ADR-0060) |
 
+The degrade target is the lowest tier in tier mode. In classifier mode it is the
+cheapest classifier model that has a `cost_per_1k` (and, for a key with a `models`
+allowlist, is allowed); models without a price are never chosen, and equal-cost
+models resolve to the first in `routing.classifier.models` order. A model of equal
+cost to the current route is not a downgrade. `x-wayfinder-router-budget` takes one
+of three values:
+
+| value | meaning |
+| --- | --- |
+| `degraded` | a `degrade` budget is exhausted and the route was moved to a cheaper model (`x-wayfinder-router-mode: budget-degraded`) |
+| `exhausted` | a `degrade` budget is exhausted but the route is unchanged: it is already the cheapest route, no cheaper priced candidate exists, a key allowlist clamped it back, or the request is offline (offline delivery already uses the cheapest local tier) |
+| `blocked` | a `block` budget is exhausted; the request is refused with HTTP 402 |
+
 ## Cache
 
 | setting | effect |

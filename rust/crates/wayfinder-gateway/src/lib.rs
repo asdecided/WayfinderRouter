@@ -90,7 +90,7 @@ use crate::access::{
     AccessGrant, AccessPolicy, AccessPolicyError, TokenReservation, TokenReservationDecision,
 };
 use crate::admission::{AdmissionError, AdmissionPermit, AdmissionPolicy};
-use crate::budget::{BudgetDecision, BudgetPolicy, format_limit};
+use crate::budget::{BudgetDecision, BudgetPolicy, degrade_target, format_limit};
 use crate::cache::{
     CACHE_KEY_SCHEMA_VERSION, CacheError, CacheSettings, CachedResponse, ResponseCache,
     cache_key_with_version, decode_shared_response, encode_shared_response, is_cacheable,
@@ -3253,6 +3253,9 @@ pub(crate) async fn chat_completions(
     }
 
     let mut budget_state = None;
+    // The pre-degrade route, kept only when the budget actually rerouted, so
+    // a later key clamp that restores it cannot leave a false `degraded`.
+    let mut budget_rerouted_from = None;
     if state.budget_policy().active() && state.price_table().priced {
         let today = match utc_today() {
             Ok(today) => today,
@@ -3303,26 +3306,32 @@ pub(crate) async fn chat_completions(
         match budget_decision {
             Ok(BudgetDecision::Allow) => {}
             Ok(BudgetDecision::Degrade) => {
-                budget_state = Some("degraded");
-                if !offline {
-                    let cheapest = decision
-                        .tiers
-                        .as_ref()
-                        .and_then(|tiers| {
-                            tiers
-                                .iter()
-                                .min_by(|left, right| left.min_score.total_cmp(&right.min_score))
-                        })
-                        .map(|tier| tier.model.clone());
-                    if let Some(cheapest) = cheapest {
-                        if cheapest != chosen {
-                            chosen = cheapest;
-                            mode = "budget-degraded";
-                            preset_models = None;
-                            preset_name = None;
-                            preset_route_active = false;
-                        }
-                    }
+                // `exhausted` unless the budget really lowers the route below.
+                // Offline delivery already converges on the cheapest local
+                // tier later, so the budget itself does not reroute there.
+                budget_state = Some("exhausted");
+                let allowed_models = state
+                    .access_policy()
+                    .and_then(|policy| access_grant.map(|grant| policy.allowed_models(grant)))
+                    .filter(|allowed| !allowed.is_empty());
+                let target = (!offline)
+                    .then(|| {
+                        degrade_target(
+                            decision.tiers.as_deref(),
+                            decision.models.as_deref(),
+                            &state.price_table().costs,
+                            allowed_models,
+                            &chosen,
+                        )
+                    })
+                    .flatten();
+                if let Some(target) = target {
+                    budget_state = Some("degraded");
+                    budget_rerouted_from = Some(std::mem::replace(&mut chosen, target));
+                    mode = "budget-degraded";
+                    preset_models = None;
+                    preset_name = None;
+                    preset_route_active = false;
                 }
             }
             Ok(BudgetDecision::Block { window, limit }) => {
@@ -3364,6 +3373,9 @@ pub(crate) async fn chat_completions(
                 mode = "key-scoped";
             }
         }
+    }
+    if budget_rerouted_from.as_deref() == Some(chosen.as_str()) {
+        budget_state = Some("exhausted");
     }
     let canary_guard = if !state.dry_run() && !preset_route_active && mode == "scored" {
         maybe_assign_canary(
@@ -7365,9 +7377,79 @@ mod tests {
     }
 
     fn seed_budget_spend(state: &AppState, key_id: Option<&str>) -> TestResult {
-        let cost = turn_cost("cloud", 1_000, 0, &state.price_table().costs, false, None)?;
+        seed_budget_spend_on(state, "cloud", key_id)
+    }
+
+    fn seed_budget_spend_on(state: &AppState, route: &str, key_id: Option<&str>) -> TestResult {
+        let cost = turn_cost(route, 1_000, 0, &state.price_table().costs, false, None)?;
         state.savings_ledger().record(&cost, utc_today()?, key_id)?;
         Ok(())
+    }
+
+    /// Classifier-mode live state over `large` (dearest), `spare` (unpriced),
+    /// `small`, and `tied` (both cheapest). `intercepts` steer the
+    /// zero-weight classifier's recommendation in `[large, spare, small, tied]`
+    /// order.
+    fn classifier_budget_live_state(
+        config: &GatewayConfig,
+        intercepts: Vec<f64>,
+        calls: Arc<AtomicUsize>,
+    ) -> Result<AppState, Box<dyn Error>> {
+        let classifier = ClassifierModel::new(
+            vec![
+                "large".to_owned(),
+                "spare".to_owned(),
+                "small".to_owned(),
+                "tied".to_owned(),
+            ],
+            BTreeMap::new(),
+            intercepts,
+        )?;
+        let model = |name: &str, cost: Option<f64>| {
+            ConfiguredModel::new(
+                name,
+                format!("https://{name}.example/v1"),
+                format!("upstream-{name}"),
+                None,
+                true,
+            )
+            .with_cost_per_1k(cost)
+        };
+        Ok(AppState::new(
+            RoutingConfig {
+                classifier: Some(classifier),
+                ..RoutingConfig::default()
+            },
+            vec![
+                model("large", Some(0.01)),
+                model("spare", None),
+                model("small", Some(0.002)),
+                model("tied", Some(0.002)),
+            ],
+            false,
+            "test",
+        )
+        .with_gateway_budget(config)
+        .with_gateway_access(config)?
+        .with_delivery(Arc::new(CountingUsageDelivery { calls })))
+    }
+
+    fn degrade_budget_config() -> GatewayConfig {
+        GatewayConfig {
+            budget: Some(GatewayBudget {
+                limit: 0.001,
+                window: "day".to_owned(),
+                on_breach: "degrade".to_owned(),
+            }),
+            ..GatewayConfig::default()
+        }
+    }
+
+    fn header_text<'a>(response: &'a Response, name: &str) -> Option<&'a str> {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
     }
 
     fn reliability_live_state(
@@ -10458,12 +10540,14 @@ mod tests {
         seed_budget_spend(&offline, None)?;
         let degraded = post_json(&offline, "/v1/chat/completions", &payload, &[]).await?;
         assert_eq!(degraded.status(), StatusCode::OK);
+        // The budget softens to a degrade offline but does not reroute: offline
+        // delivery already serves the cheapest local tier, so it is `exhausted`.
         assert_eq!(
             degraded
                 .headers()
                 .get("x-wayfinder-router-budget")
                 .and_then(|value| value.to_str().ok()),
-            Some("degraded")
+            Some("exhausted")
         );
         assert_eq!(
             degraded
@@ -10494,6 +10578,168 @@ mod tests {
             Some("local")
         );
         assert_eq!(offline_calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exhausted_budget_on_the_cheapest_tier_reports_exhausted() -> TestResult {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = budget_live_state(&degrade_budget_config(), false, Arc::clone(&calls))?;
+        seed_budget_spend(&state, None)?;
+        let response = post_json(
+            &state,
+            "/v1/chat/completions",
+            &json!({
+                "model": "auto",
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+            &[],
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            header_text(&response, "x-wayfinder-router-budget"),
+            Some("exhausted")
+        );
+        assert_eq!(
+            header_text(&response, "x-wayfinder-router-model"),
+            Some("local")
+        );
+        assert_eq!(
+            header_text(&response, "x-wayfinder-router-mode"),
+            Some("scored")
+        );
+        assert_eq!(
+            header_text(&response, "x-wayfinder-router-served-by"),
+            Some("local")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn budget_degrade_undone_by_key_allowlist_reports_exhausted() -> TestResult {
+        let mut config = degrade_budget_config();
+        let mut key = access_key("wf-secret");
+        key.models = vec!["cloud".to_owned()];
+        config.keys.insert("team-a".to_owned(), key);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = budget_live_state(&config, false, Arc::clone(&calls))?;
+        seed_budget_spend(&state, None)?;
+        let response = post_json(
+            &state,
+            "/v1/chat/completions",
+            &json!({
+                "model": "cloud",
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+            &[("authorization", "Bearer wf-secret")],
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        // The cheapest tier is not allowed for this key, so the clamp puts the
+        // request back on `cloud`: the budget changed nothing.
+        assert_eq!(
+            header_text(&response, "x-wayfinder-router-budget"),
+            Some("exhausted")
+        );
+        assert_eq!(
+            header_text(&response, "x-wayfinder-router-model"),
+            Some("cloud")
+        );
+        assert_eq!(
+            header_text(&response, "x-wayfinder-router-mode"),
+            Some("key-scoped")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn classifier_budget_degrade_reroutes_to_cheapest_priced_model() -> TestResult {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = classifier_budget_live_state(
+            &degrade_budget_config(),
+            vec![1.0, 0.0, 0.0, 0.0],
+            Arc::clone(&calls),
+        )?;
+        seed_budget_spend_on(&state, "large", None)?;
+        let response = post_json(
+            &state,
+            "/v1/chat/completions",
+            &json!({
+                "model": "auto",
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+            &[],
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            header_text(&response, "x-wayfinder-router-budget"),
+            Some("degraded")
+        );
+        // `spare` is unpriced and never a candidate; `small` and `tied` share
+        // the lowest cost and `small` comes first in classifier order.
+        assert_eq!(
+            header_text(&response, "x-wayfinder-router-model"),
+            Some("small")
+        );
+        assert_eq!(
+            header_text(&response, "x-wayfinder-router-mode"),
+            Some("budget-degraded")
+        );
+        assert_eq!(
+            header_text(&response, "x-wayfinder-router-served-by"),
+            Some("small")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let recent = json_body(get(&state, "/router/recent").await?).await?;
+        assert_eq!(recent["recent"][0]["model"], "small");
+        assert_eq!(recent["recent"][0]["mode"], "budget-degraded");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn classifier_budget_on_the_cheapest_model_reports_exhausted() -> TestResult {
+        for (intercepts, expected) in [
+            // Already on the first cheapest model.
+            (vec![0.0, 0.0, 1.0, 0.0], "small"),
+            // An equal-cost model is not a downgrade.
+            (vec![0.0, 0.0, 0.0, 1.0], "tied"),
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let state = classifier_budget_live_state(
+                &degrade_budget_config(),
+                intercepts,
+                Arc::clone(&calls),
+            )?;
+            seed_budget_spend_on(&state, "large", None)?;
+            let response = post_json(
+                &state,
+                "/v1/chat/completions",
+                &json!({
+                    "model": "auto",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }),
+                &[],
+            )
+            .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                header_text(&response, "x-wayfinder-router-budget"),
+                Some("exhausted")
+            );
+            assert_eq!(
+                header_text(&response, "x-wayfinder-router-model"),
+                Some(expected)
+            );
+            assert_eq!(
+                header_text(&response, "x-wayfinder-router-mode"),
+                Some("scored")
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
         Ok(())
     }
 

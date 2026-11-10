@@ -6,7 +6,9 @@
 
 use std::collections::BTreeMap;
 
+use indexmap::IndexMap;
 use wayfinder_config::gateway::{Budget, GatewayConfig};
+use wayfinder_routing_core::Tier;
 use wayfinder_service::pricing::{LedgerError, SavingsLedger, SpendScope, UtcDate};
 
 use crate::state::{SharedBudgetScope, StateBackend, StateBackendError};
@@ -16,7 +18,8 @@ use crate::state::{SharedBudgetScope, StateBackend, StateBackendError};
 pub enum BudgetDecision {
     /// No configured cap is exhausted, or the active price table is unpriced.
     Allow,
-    /// At least one cap is exhausted and delivery should use the cheapest tier.
+    /// At least one cap is exhausted and delivery should use the cheapest
+    /// route (see [`degrade_target`]).
     Degrade,
     /// A hard cap is exhausted and online delivery must stop.
     Block {
@@ -281,6 +284,53 @@ fn evaluate_one(
     Ok(BudgetDecision::Degrade)
 }
 
+/// Choose the route a budget degrade switches to, or `None` when the budget
+/// cannot lower the route.
+///
+/// In tier mode (`tiers` is `Some`) the target is the lowest-`min_score` tier.
+/// In classifier mode (`tiers` is `None`, `models` is `Some`) the target is the
+/// cheapest classifier model present in `costs`; models without a configured
+/// price are never candidates, and when `allowed` is `Some` only models in that
+/// key allowlist are candidates. Equal-cost candidates resolve to the first in
+/// configured classifier order. A classifier target is returned only when it
+/// differs from `chosen` and `chosen` is unpriced or strictly dearer.
+#[must_use]
+pub fn degrade_target(
+    tiers: Option<&[Tier]>,
+    models: Option<&[String]>,
+    costs: &IndexMap<String, f64>,
+    allowed: Option<&[String]>,
+    chosen: &str,
+) -> Option<String> {
+    if let Some(tiers) = tiers {
+        return tiers
+            .iter()
+            .min_by(|left, right| left.min_score.total_cmp(&right.min_score))
+            .map(|tier| tier.model.clone())
+            .filter(|target| target != chosen);
+    }
+    let mut cheapest: Option<(&String, f64)> = None;
+    for model in models? {
+        if allowed.is_some_and(|allowed| !allowed.contains(model)) {
+            continue;
+        }
+        let Some(cost) = costs.get(model).copied() else {
+            continue;
+        };
+        if cheapest.is_none_or(|(_, best)| cost < best) {
+            cheapest = Some((model, cost));
+        }
+    }
+    let (target, target_cost) = cheapest?;
+    if target == chosen {
+        return None;
+    }
+    match costs.get(chosen) {
+        Some(chosen_cost) if target_cost >= *chosen_cost => None,
+        _ => Some(target.clone()),
+    }
+}
+
 /// Format a validated finite budget limit like Python's JSON-compatible float text.
 #[must_use]
 pub fn format_limit(limit: f64) -> String {
@@ -481,6 +531,110 @@ mod tests {
             BudgetDecision::Allow
         );
         Ok(())
+    }
+
+    fn names(models: &[&str]) -> Vec<String> {
+        models.iter().map(|model| (*model).to_owned()).collect()
+    }
+
+    fn costs(entries: &[(&str, f64)]) -> IndexMap<String, f64> {
+        entries
+            .iter()
+            .map(|(model, cost)| ((*model).to_owned(), *cost))
+            .collect()
+    }
+
+    #[test]
+    fn tier_mode_degrades_to_the_lowest_tier_only_when_it_changes_the_route() {
+        let tiers = vec![
+            Tier::new(0.6, "cloud"),
+            Tier::new(0.0, "local"),
+            Tier::new(0.3, "mid"),
+        ];
+        // Tier mode ignores prices: the ladder alone defines the target.
+        let table = costs(&[("local", 9.0), ("cloud", 1.0)]);
+        assert_eq!(
+            degrade_target(Some(&tiers), None, &table, None, "cloud"),
+            Some("local".to_owned())
+        );
+        assert_eq!(
+            degrade_target(Some(&tiers), None, &table, None, "local"),
+            None
+        );
+    }
+
+    #[test]
+    fn classifier_mode_picks_the_cheapest_priced_model() {
+        let models = names(&["large", "small", "medium"]);
+        let table = costs(&[("large", 3.0), ("small", 0.5), ("medium", 1.0)]);
+        assert_eq!(
+            degrade_target(None, Some(&models), &table, None, "large"),
+            Some("small".to_owned())
+        );
+        assert_eq!(
+            degrade_target(None, Some(&models), &table, None, "small"),
+            None
+        );
+    }
+
+    #[test]
+    fn classifier_mode_ignores_unpriced_models() {
+        let models = names(&["free-looking", "large", "medium"]);
+        let table = costs(&[("large", 3.0), ("medium", 1.0)]);
+        assert_eq!(
+            degrade_target(None, Some(&models), &table, None, "large"),
+            Some("medium".to_owned())
+        );
+    }
+
+    #[test]
+    fn classifier_mode_breaks_cost_ties_by_configured_order() {
+        let models = names(&["large", "zeta", "alpha"]);
+        let table = costs(&[("alpha", 0.5), ("large", 3.0), ("zeta", 0.5)]);
+        assert_eq!(
+            degrade_target(None, Some(&models), &table, None, "large"),
+            Some("zeta".to_owned())
+        );
+    }
+
+    #[test]
+    fn classifier_mode_does_not_switch_to_an_equal_cost_model() {
+        let models = names(&["first", "second"]);
+        let table = costs(&[("first", 1.0), ("second", 1.0)]);
+        assert_eq!(
+            degrade_target(None, Some(&models), &table, None, "second"),
+            None
+        );
+    }
+
+    #[test]
+    fn classifier_mode_switches_away_from_an_unpriced_choice() {
+        let models = names(&["mystery", "priced"]);
+        let table = costs(&[("priced", 2.0)]);
+        assert_eq!(
+            degrade_target(None, Some(&models), &table, None, "mystery"),
+            Some("priced".to_owned())
+        );
+    }
+
+    #[test]
+    fn classifier_mode_only_considers_key_allowed_models() {
+        let models = names(&["large", "small", "medium"]);
+        let table = costs(&[("large", 3.0), ("small", 0.5), ("medium", 1.0)]);
+        let allowed = names(&["large", "medium"]);
+        assert_eq!(
+            degrade_target(None, Some(&models), &table, Some(&allowed), "large"),
+            Some("medium".to_owned())
+        );
+    }
+
+    #[test]
+    fn no_candidates_means_no_degrade() {
+        let table = costs(&[("large", 3.0)]);
+        assert_eq!(degrade_target(None, None, &table, None, "large"), None);
+        let models = names(&["a", "b"]);
+        assert_eq!(degrade_target(None, Some(&models), &table, None, "a"), None);
+        assert_eq!(degrade_target(Some(&[]), None, &table, None, "large"), None);
     }
 
     #[test]
