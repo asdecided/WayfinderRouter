@@ -169,6 +169,24 @@ impl CanaryObservationGuard {
         };
         record_canary_outcome(context, succeeded, route, usage).await;
     }
+
+    /// Discard the observation without recording an outcome.
+    ///
+    /// For requests the gateway answered or refused itself before the canary
+    /// route was ever called (a cache hit, a budget, admission or rate-limit
+    /// refusal, or a gateway state error). They say nothing about the
+    /// candidate, so they must not count towards its error rate. Dropping the
+    /// guard without calling this still records a failure, which is what a
+    /// delivery that never finished should do.
+    fn cancel(&mut self) {
+        self.context = None;
+    }
+}
+
+fn cancel_canary(guard: &mut Option<CanaryObservationGuard>) {
+    if let Some(guard) = guard.as_mut() {
+        guard.cancel();
+    }
 }
 
 impl Drop for CanaryObservationGuard {
@@ -3089,7 +3107,7 @@ pub(crate) async fn chat_completions(
     if budget.rerouted_from.as_deref() == Some(route.chosen.as_str()) {
         budget.state = Some("exhausted");
     }
-    let canary_guard =
+    let mut canary_guard =
         if !state.dry_run() && !route.preset_route_active && route.mode == RouteMode::Scored {
             maybe_assign_canary(
                 &state,
@@ -3220,10 +3238,16 @@ pub(crate) async fn chat_completions(
     )
     .await
     {
-        Ok(CacheOutcome::Hit(response)) => return *response,
+        Ok(CacheOutcome::Hit(response)) => {
+            cancel_canary(&mut canary_guard);
+            return *response;
+        }
         Ok(CacheOutcome::Miss) => Some("miss"),
         Ok(CacheOutcome::Bypass) => None,
-        Err(response) => return *response,
+        Err(response) => {
+            cancel_canary(&mut canary_guard);
+            return *response;
+        }
     };
 
     let candidates = delivery_candidates(
@@ -3261,6 +3285,7 @@ pub(crate) async fn chat_completions(
     {
         SharedBudgetReservationOutcome::Reserved(lease) => Some(lease),
         SharedBudgetReservationOutcome::Denied => {
+            cancel_canary(&mut canary_guard);
             let mut headers = request_id_headers(&request_id);
             headers.insert(ROUTER_BUDGET_HEADER, HeaderValue::from_static("blocked"));
             return error_response(
@@ -3275,7 +3300,10 @@ pub(crate) async fn chat_completions(
 
     let admission_permit = match acquire_delivery(&state, &request_id).await {
         Ok(permit) => permit,
-        Err(error) => return admission_error_response(&state, error, routing_headers),
+        Err(error) => {
+            cancel_canary(&mut canary_guard);
+            return admission_error_response(&state, error, routing_headers);
+        }
     };
 
     let token_reservation =
@@ -3286,6 +3314,7 @@ pub(crate) async fn chat_completions(
                     let reserved_tokens = match conservative_token_reservation(&request_body) {
                         Ok(tokens) => tokens,
                         Err(message) => {
+                            cancel_canary(&mut canary_guard);
                             return error_response(
                                 StatusCode::UNPROCESSABLE_ENTITY,
                                 "wayfinder_router_token_bound_required",
@@ -3297,12 +3326,19 @@ pub(crate) async fn chat_completions(
                     match policy.reserve_tokens(grant, reserved_tokens).await {
                         Ok(TokenReservationDecision::Reserved(reservation)) => Some(reservation),
                         Ok(TokenReservationDecision::Rejected(result)) => {
+                            cancel_canary(&mut canary_guard);
                             return rate_limited_response(&state, result, &request_id);
                         }
-                        Err(error) => return access_state_error(&request_id, &error),
+                        Err(error) => {
+                            cancel_canary(&mut canary_guard);
+                            return access_state_error(&request_id, &error);
+                        }
                     }
                 }
-                Err(error) => return access_state_error(&request_id, &error),
+                Err(error) => {
+                    cancel_canary(&mut canary_guard);
+                    return access_state_error(&request_id, &error);
+                }
             }
         } else {
             None
