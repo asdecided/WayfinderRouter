@@ -17,6 +17,8 @@ details, release history over commit history.
 - Publishing a Router release in GitHub now automatically builds, checks and
   attaches both native Linux archives and SHA-256 files. No manual workflow run
   or tag push is required; existing downloads are never overwritten (WF-ADR-0069).
+- The reloadable gateway builds its router once per configuration snapshot
+  instead of once per request.
 - CI now runs `cargo deny` (WF-ADR-0045) on every push and pull request, and
   Dependabot proposes weekly Rust and GitHub Actions updates. The lockfile
   moves to `rustls` 0.23.46, `rustls-webpki` 0.103.16 and `tokio` 1.53.3 to
@@ -55,6 +57,16 @@ details, release history over commit history.
   than the working directory, which a launchd or systemd service does not
   control. A ledger already in the working directory keeps being used, and
   `WAYFINDER_ROUTER_SAVINGS_FILE` still overrides both.
+- Streaming responses are no longer cut off when their total duration passes the
+  upstream timeout (60 seconds by default). The timeout now bounds a whole
+  non-streaming request and, for a stream, the wait for each chunk.
+- A native Anthropic destination no longer fails a response on an event, content
+  block or delta type the gateway does not translate; these are skipped.
+- A corrupt savings ledger with no last-good snapshot now fails on every start.
+  Previously the first start failed and moved the file aside, so the next start
+  silently began from an empty ledger and budget spend reset to zero.
+- With the Redis state backend, the set of recorded request ids used to reject
+  duplicate cost observations no longer grows without bound.
 - Non-streaming requests now treat a fatal provider fault the same way streaming
   does: it counts against the circuit breaker, while account, quota and request
   faults do not. Previously no fatal fault on a non-streaming request counted.
