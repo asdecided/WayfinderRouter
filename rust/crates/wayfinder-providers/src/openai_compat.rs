@@ -297,6 +297,7 @@ impl fmt::Debug for BufferedProviderResponse {
 pub struct OpenAiProviderClient {
     client: Client,
     max_response_bytes: usize,
+    request_timeout: Duration,
 }
 
 impl OpenAiProviderClient {
@@ -312,7 +313,10 @@ impl OpenAiProviderClient {
             .redirect(Policy::none())
             .no_proxy()
             .connect_timeout(config.connect_timeout)
-            .timeout(config.request_timeout)
+            // The configured timeout bounds each read, not the whole response:
+            // a stream may legitimately run longer than it, but may not stall
+            // for longer. Buffered requests add a total bound per request.
+            .read_timeout(config.request_timeout)
             .tcp_nodelay(true)
             .user_agent(format!(
                 "wayfinder-router/{}",
@@ -323,6 +327,7 @@ impl OpenAiProviderClient {
         Ok(Self {
             client,
             max_response_bytes: config.max_response_bytes,
+            request_timeout: config.request_timeout,
         })
     }
 
@@ -356,6 +361,7 @@ impl OpenAiProviderClient {
             .client
             .post(endpoint.chat_completions_url().clone())
             .header(ACCEPT, "application/json")
+            .timeout(self.request_timeout)
             .json(body);
         if let Some(headers) = headers {
             for name in ["traceparent", "tracestate"] {
@@ -548,6 +554,102 @@ mod tests {
         task.join()
             .map_err(|_| std::io::Error::other("test provider thread panicked"))?
             .map_err(Into::into)
+    }
+
+    /// Serve one chunked SSE response, pausing `interval` before each chunk.
+    fn spawn_paced_stream(chunks: usize, interval: Duration) -> Result<String, std::io::Error> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let address = listener.local_addr()?;
+        thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4_096];
+            while find_header_end(&request).is_none_or(|end| {
+                request.len() < end.saturating_add(request_content_length(&request[..end]))
+            }) {
+                let read = stream.read(&mut chunk)?;
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+            )?;
+            for index in 0..chunks {
+                thread::sleep(interval);
+                let data = format!("data: {index}\n\n");
+                stream.write_all(format!("{:x}\r\n{data}\r\n", data.len()).as_bytes())?;
+                stream.flush()?;
+            }
+            stream.write_all(b"0\r\n\r\n")
+        });
+        Ok(format!("http://{address}/v1"))
+    }
+
+    fn stream_test_client(
+        request_timeout: Duration,
+    ) -> Result<OpenAiProviderClient, ProviderError> {
+        OpenAiProviderClient::new(ProviderClientConfig {
+            request_timeout,
+            connect_timeout: Duration::from_secs(1),
+            max_response_bytes: 1024,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_stream_may_outlast_the_request_timeout_while_it_keeps_producing() -> TestResult {
+        // Six chunks 150 ms apart take about 900 ms in total, well past the
+        // 400 ms timeout, but no single gap exceeds it.
+        let base = spawn_paced_stream(6, Duration::from_millis(150))?;
+        let client = stream_test_client(Duration::from_millis(400))?;
+        let mut response = client
+            .send_stream(
+                &OpenAiEndpoint::parse(&base)?,
+                &json!({"stream": true}),
+                None,
+            )
+            .await?;
+        let mut received = Vec::new();
+        while let Some(chunk) = response.stream.next().await {
+            received.extend_from_slice(&chunk?);
+        }
+        let text = String::from_utf8(received)?;
+        assert!(
+            text.contains("data: 0") && text.contains("data: 5"),
+            "{text}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_stalled_stream_still_times_out() -> TestResult {
+        // One gap of 900 ms exceeds the 300 ms per-read timeout.
+        let base = spawn_paced_stream(2, Duration::from_millis(900))?;
+        let client = stream_test_client(Duration::from_millis(300))?;
+        let outcome = client
+            .send_stream(
+                &OpenAiEndpoint::parse(&base)?,
+                &json!({"stream": true}),
+                None,
+            )
+            .await;
+        let failed = match outcome {
+            Err(error) => error == ProviderError::Transport,
+            Ok(mut response) => {
+                let mut failed = false;
+                while let Some(chunk) = response.stream.next().await {
+                    if chunk.is_err() {
+                        failed = true;
+                        break;
+                    }
+                }
+                failed
+            }
+        };
+        assert!(failed, "a stream that stalls past the timeout must fail");
+        Ok(())
     }
 
     #[test]

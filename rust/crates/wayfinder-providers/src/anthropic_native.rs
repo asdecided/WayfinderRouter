@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::pin::Pin;
+use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use futures_util::{Stream, StreamExt};
@@ -441,7 +442,8 @@ pub fn anthropic_to_openai_response(body: &Value) -> Result<Value, AnthropicNati
                     },
                 }));
             }
-            _ => return Err(AnthropicNativeError::InvalidResponse),
+            // A block type this adapter does not translate is skipped.
+            _ => {}
         }
     }
     let usage = body.get("usage").and_then(Value::as_object);
@@ -506,6 +508,9 @@ fn openai_sse_frame(value: &Value) -> Result<Bytes, AnthropicNativeError> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ActiveBlock {
+    /// A block type this adapter does not translate (for example `thinking`).
+    /// Its deltas and stop are consumed without emitting anything.
+    Ignored,
     Text,
     Tool {
         tool_index: usize,
@@ -647,7 +652,11 @@ impl AnthropicToOpenAiStream {
                                 }],
                             }))?);
                         }
-                        _ => return Err(AnthropicNativeError::InvalidResponse),
+                        // Anthropic adds block types over time; skip one this
+                        // adapter cannot represent rather than fail the stream.
+                        _ => {
+                            self.active.insert(index, ActiveBlock::Ignored);
+                        }
                     }
                 }
                 "content_block_delta" => {
@@ -687,7 +696,10 @@ impl AnthropicToOpenAiStream {
                                 "function": {"arguments": partial},
                             }]})
                         }
-                        _ => return Err(AnthropicNativeError::InvalidResponse),
+                        // A delta for a skipped block, or a delta type added
+                        // later to a known block, carries nothing to translate.
+                        (Some(_), _) => continue,
+                        (None, _) => return Err(AnthropicNativeError::InvalidResponse),
                     };
                     output.push(self.delta_frame(translated_delta)?);
                 }
@@ -759,7 +771,9 @@ impl AnthropicToOpenAiStream {
                     output.push(Bytes::from_static(b"data: [DONE]\n\n"));
                     self.terminal = true;
                 }
-                _ => return Err(AnthropicNativeError::InvalidResponse),
+                // Unknown event types are ignored, as the Messages streaming
+                // contract asks clients to do.
+                _ => {}
             }
         }
         Ok(output)
@@ -843,6 +857,7 @@ impl StreamingAnthropicResponse {
 pub struct AnthropicProviderClient {
     client: Client,
     max_response_bytes: usize,
+    request_timeout: Duration,
 }
 
 impl AnthropicProviderClient {
@@ -858,7 +873,10 @@ impl AnthropicProviderClient {
             .redirect(Policy::none())
             .no_proxy()
             .connect_timeout(config.connect_timeout)
-            .timeout(config.request_timeout)
+            // The configured timeout bounds each read, not the whole response:
+            // a stream may legitimately run longer than it, but may not stall
+            // for longer. Buffered requests add a total bound per request.
+            .read_timeout(config.request_timeout)
             .tcp_nodelay(true)
             .user_agent(format!(
                 "wayfinder-router/{}",
@@ -869,6 +887,7 @@ impl AnthropicProviderClient {
         Ok(Self {
             client,
             max_response_bytes: config.max_response_bytes,
+            request_timeout: config.request_timeout,
         })
     }
 
@@ -907,6 +926,7 @@ impl AnthropicProviderClient {
     ) -> Result<BufferedAnthropicResponse, ProviderError> {
         let response = self
             .request(endpoint, body, credential, "application/json", headers)?
+            .timeout(self.request_timeout)
             .send()
             .await
             .map_err(|_| ProviderError::Transport)?;
@@ -1112,6 +1132,43 @@ mod tests {
         assert!(joined.contains(r#""finish_reason":"tool_calls""#));
         assert!(joined.contains(r#""total_tokens":12"#));
         assert!(joined.ends_with("data: [DONE]\n\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn stream_skips_unknown_events_blocks_and_deltas() -> Result<(), AnthropicNativeError> {
+        let input = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude\",\"usage\":{\"input_tokens\":5}}}\n\n",
+            "event: future_event\ndata: {\"type\":\"future_event\",\"detail\":1}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"private\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"future_delta\",\"value\":1}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        );
+        let mut translator = AnthropicToOpenAiStream::default();
+        let mut output = translator.push(input.as_bytes())?;
+        output.extend(translator.finish()?);
+        let joined = output
+            .iter()
+            .map(|chunk| String::from_utf8_lossy(chunk))
+            .collect::<String>();
+        assert!(joined.contains(r#""content":"hi""#));
+        assert!(
+            !joined.contains("private"),
+            "skipped block content must not leak"
+        );
+        assert!(joined.contains(r#""finish_reason":"stop""#));
+        assert!(joined.ends_with("data: [DONE]\n\n"));
+
+        // A delta for a block that was never started is still malformed.
+        let mut translator = AnthropicToOpenAiStream::default();
+        let orphan = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":9,\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}\n\n";
+        assert!(translator.push(orphan.as_bytes()).is_err());
         Ok(())
     }
 
