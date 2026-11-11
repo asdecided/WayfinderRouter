@@ -35,6 +35,11 @@ details, release history over commit history.
   of recorded spend from the file; budgets are still enforced from in-memory
   totals within a running process. Failed writes are now logged, counted in
   `wayfinder_router_savings_persist_failures_total` and retried.
+- Removed documents and files that nothing referenced and that described
+  retired features: `EXPLAINER.md`, `docs/hosting.md`,
+  `docs/rust-performance-baseline.md`, `docs/rust-rewrite-remaining-work.md`,
+  three unused images, an unreferenced benchmark JSON and the root npm
+  workspace (the JavaScript parity check runs with `node` directly).
 - The legacy Tauri desktop client source (`clients/desktop`) is removed from the
   tree; the native macOS app under `macos/` is the desktop product and the old
   client remains in git history. Security-report, issue-template and crate
@@ -114,6 +119,21 @@ details, release history over commit history.
   (WF-ADR-0088). Omarchy can use the existing Rust binary for the complete
   provider setup lifecycle, without a Python helper. Custom policies are
   preserved and interrupted changes retain recovery state.
+
+## Router 1.0.0
+
+See the [release notes](docs/releases/router-v1.0.0.md). This was the first
+Router SemVer release. Its entries, and those of the two releases below, were
+written under the Desktop v0.1.0 heading that follows and have not been split
+out.
+
+## Router 2026.8.1
+
+See the [release notes](docs/releases/router-v2026.8.1.md).
+
+## Router 2026.8.0
+
+See the [release notes](docs/releases/router-v2026.8.0.md).
 
 ## Desktop v0.1.0 — Unreleased
 

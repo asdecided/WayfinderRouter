@@ -1,10 +1,3 @@
-build/
-dist/
-# Local RouterBench pulls and generated harness inputs (reproducible from the adapter)
-data/
-benchmarks/routerbench*.jsonl
-# Node clients (npm workspaces hoist to the root node_modules)
-node_modules/
 .DS_Store
 
 # SwiftPM/macOS local outputs and embedded local checkouts
