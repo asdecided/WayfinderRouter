@@ -296,7 +296,7 @@ pub trait StateBackend: Send + Sync {
     /// Implementations must make the operation idempotent by `request_id`.
     /// The default backend deliberately returns unavailable so existing local
     /// ledger behaviour remains the fallback contract.
-    fn record_cost<'a>(&'a self, _observation: SharedCostObservation) -> StateFuture<'a, bool> {
+    fn record_cost(&self, _observation: SharedCostObservation) -> StateFuture<'_, bool> {
         Box::pin(async { Err(StateBackendError::Unavailable) })
     }
 
@@ -311,21 +311,18 @@ pub trait StateBackend: Send + Sync {
     }
 
     /// Atomically reserve conservative spend across all hard budget scopes.
-    fn reserve_budget<'a>(
-        &'a self,
-        _reservation: SharedBudgetReservation,
-    ) -> StateFuture<'a, bool> {
+    fn reserve_budget(&self, _reservation: SharedBudgetReservation) -> StateFuture<'_, bool> {
         Box::pin(async { Err(StateBackendError::Unavailable) })
     }
 
     /// Release a reservation after a failed or cancelled delivery.
-    fn release_budget<'a>(&'a self, _reservation: SharedBudgetReservation) -> StateFuture<'a, ()> {
+    fn release_budget(&self, _reservation: SharedBudgetReservation) -> StateFuture<'_, ()> {
         Box::pin(async { Err(StateBackendError::Unavailable) })
     }
 
     /// Settle a completed request by releasing its reserved amount. The
     /// realized amount is recorded separately by `record_cost`.
-    fn settle_budget<'a>(&'a self, reservation: SharedBudgetReservation) -> StateFuture<'a, ()> {
+    fn settle_budget(&self, reservation: SharedBudgetReservation) -> StateFuture<'_, ()> {
         self.release_budget(reservation)
     }
 
@@ -392,7 +389,7 @@ pub trait StateBackend: Send + Sync {
 
     /// Insert one exact-response cache value, enforcing shared entry and body
     /// bounds atomically when the backend supports it.
-    fn shared_cache_put<'a>(&'a self, _put: SharedCachePut) -> StateFuture<'a, bool> {
+    fn shared_cache_put(&self, _put: SharedCachePut) -> StateFuture<'_, bool> {
         Box::pin(async { Err(StateBackendError::Unavailable) })
     }
 
@@ -402,12 +399,12 @@ pub trait StateBackend: Send + Sync {
     }
 
     /// Record one idempotent canary outcome in the active fleet window.
-    fn record_canary<'a>(
-        &'a self,
+    fn record_canary(
+        &self,
         _observation: SharedCanaryObservation,
         _window_seconds: f64,
         _now_seconds: f64,
-    ) -> StateFuture<'a, bool> {
+    ) -> StateFuture<'_, bool> {
         Box::pin(async { Err(StateBackendError::Unavailable) })
     }
 
@@ -612,12 +609,12 @@ impl StateBackend for MemoryStateBackend {
         })
     }
 
-    fn record_canary<'a>(
-        &'a self,
+    fn record_canary(
+        &self,
         observation: SharedCanaryObservation,
         window_seconds: f64,
         now_seconds: f64,
-    ) -> StateFuture<'a, bool> {
+    ) -> StateFuture<'_, bool> {
         Box::pin(async move {
             validate_canary_inputs(&observation, window_seconds)?;
             let window = canary_window(window_seconds, now_seconds)?;
@@ -1604,7 +1601,7 @@ impl StateBackend for RedisStateBackend {
         })
     }
 
-    fn record_cost<'a>(&'a self, observation: SharedCostObservation) -> StateFuture<'a, bool> {
+    fn record_cost(&self, observation: SharedCostObservation) -> StateFuture<'_, bool> {
         Box::pin(async move {
             let date = validate_ledger_date(&observation.date)?;
             if observation.request_id.is_empty() || observation.request_id.len() > 128 {
@@ -1669,12 +1666,12 @@ impl StateBackend for RedisStateBackend {
         })
     }
 
-    fn record_canary<'a>(
-        &'a self,
+    fn record_canary(
+        &self,
         observation: SharedCanaryObservation,
         window_seconds: f64,
         _now_seconds: f64,
-    ) -> StateFuture<'a, bool> {
+    ) -> StateFuture<'_, bool> {
         Box::pin(async move {
             validate_canary_inputs(&observation, window_seconds)?;
             let window_ms = (window_seconds * 1_000.0).ceil().max(1.0) as u64;
@@ -1816,7 +1813,7 @@ impl StateBackend for RedisStateBackend {
         })
     }
 
-    fn reserve_budget<'a>(&'a self, reservation: SharedBudgetReservation) -> StateFuture<'a, bool> {
+    fn reserve_budget(&self, reservation: SharedBudgetReservation) -> StateFuture<'_, bool> {
         Box::pin(async move {
             if reservation.request_id.is_empty()
                 || reservation.request_id.len() > 128
@@ -1858,7 +1855,7 @@ impl StateBackend for RedisStateBackend {
         })
     }
 
-    fn release_budget<'a>(&'a self, reservation: SharedBudgetReservation) -> StateFuture<'a, ()> {
+    fn release_budget(&self, reservation: SharedBudgetReservation) -> StateFuture<'_, ()> {
         Box::pin(async move {
             let keys = shared_budget_keys(&self.keys, &reservation.date, &reservation.scopes)?;
             let script = Script::new(RELEASE_BUDGET_SCRIPT);
@@ -1879,7 +1876,7 @@ impl StateBackend for RedisStateBackend {
         })
     }
 
-    fn settle_budget<'a>(&'a self, reservation: SharedBudgetReservation) -> StateFuture<'a, ()> {
+    fn settle_budget(&self, reservation: SharedBudgetReservation) -> StateFuture<'_, ()> {
         self.release_budget(reservation)
     }
 
@@ -2022,7 +2019,7 @@ impl StateBackend for RedisStateBackend {
         })
     }
 
-    fn shared_cache_put<'a>(&'a self, put: SharedCachePut) -> StateFuture<'a, bool> {
+    fn shared_cache_put(&self, put: SharedCachePut) -> StateFuture<'_, bool> {
         Box::pin(async move {
             validate_shared_cache_inputs(&put.generation, &put.key)?;
             let body_bytes =

@@ -33,7 +33,7 @@ pub struct EngineIdentity {
 /// it cannot promise cancellation/billing reversal at a remote provider.
 pub trait DecisionEngine {
     fn identity(&self) -> EngineIdentity;
-    fn decide<'a>(&'a self, request: DisclosedRequest) -> EngineFuture<'a>;
+    fn decide(&self, request: DisclosedRequest) -> EngineFuture<'_>;
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -191,7 +191,7 @@ impl DecisionEngine for DeterministicEngine {
             test_double: false,
         }
     }
-    fn decide<'a>(&'a self, request: DisclosedRequest) -> EngineFuture<'a> {
+    fn decide(&self, request: DisclosedRequest) -> EngineFuture<'_> {
         Box::pin(async move {
             let prompt = request
                 .context
@@ -227,7 +227,7 @@ impl DecisionEngine for ContractDouble {
             test_double: true,
         }
     }
-    fn decide<'a>(&'a self, _request: DisclosedRequest) -> EngineFuture<'a> {
+    fn decide(&self, _request: DisclosedRequest) -> EngineFuture<'_> {
         Box::pin(async move {
             tokio::time::sleep(self.delay).await;
             self.response.clone()

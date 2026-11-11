@@ -528,12 +528,12 @@ impl crate::state::StateBackend for CanaryTestBackend {
         self.0.add_tokens(key, config, tokens, now_seconds)
     }
 
-    fn record_canary<'a>(
-        &'a self,
+    fn record_canary(
+        &self,
         observation: crate::state::SharedCanaryObservation,
         window_seconds: f64,
         now_seconds: f64,
-    ) -> TestStateFuture<'a, bool> {
+    ) -> TestStateFuture<'_, bool> {
         self.0
             .record_canary(observation, window_seconds, now_seconds)
     }

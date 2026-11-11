@@ -17,6 +17,10 @@ details, release history over commit history.
 - Publishing a Router release in GitHub now automatically builds, checks and
   attaches both native Linux archives and SHA-256 files. No manual workflow run
   or tag push is required; existing downloads are never overwritten (WF-ADR-0069).
+- Pull-request CI now runs formatting and Clippy on the pinned 1.85.0 toolchain
+  that the Desktop release preflight uses. The code on the default branch
+  failed that preflight's Clippy step, so the next Desktop release would have
+  stopped there; those lints are fixed.
 - The reloadable gateway builds its router once per configuration snapshot
   instead of once per request.
 - CI now runs `cargo deny` (WF-ADR-0045) on every push and pull request, and
@@ -41,6 +45,9 @@ details, release history over commit history.
 - Explicit missing configuration and unusable discovered config paths now fail
   instead of falling back to defaults or a parent policy. Runtime config errors
   omit source text, and a regression verifies restrictions survive delivery fallback.
+- Helm: the bundled Redis now listens on `redis.port`. The value already set the
+  Service, network policies and connection URL, but not the server or its
+  probes, so any port other than 6379 left the gateway unable to connect.
 - With the Redis state backend, a healthy provider target now serves concurrent
   requests. Previously each target admitted one in-flight request across the
   whole fleet, and a second concurrent request was skipped or failed with 502

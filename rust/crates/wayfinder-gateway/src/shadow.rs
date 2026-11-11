@@ -501,11 +501,13 @@ pub(crate) fn config_fingerprint(
 }
 
 fn short_fingerprint(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    use std::fmt::Write as _;
+    let mut fingerprint = String::with_capacity(16);
+    for byte in bytes.iter().take(8) {
+        // Writing to a `String` cannot fail.
+        let _ = write!(fingerprint, "{byte:02x}");
+    }
+    fingerprint
 }
 
 /// Whether the explicit provider-comparison consent header is affirmative.

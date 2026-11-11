@@ -45,9 +45,9 @@ issue (type + the ask). Lead with anything red or blocked.
 
 - **Branch, never push to `main`.** Open a PR from a feature branch.
 - **Run the full CI gate locally before pushing** (mirrors `.github/workflows/ci.yml`):
-  - `cargo fmt --manifest-path rust/Cargo.toml --all -- --check`
+  - `cargo +1.85.0 fmt --manifest-path rust/Cargo.toml --all -- --check`
   - `cargo test --manifest-path rust/Cargo.toml --workspace --all-features --locked`
-  - `cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings`
+  - `cargo +1.85.0 clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings`
   - `node clients/shared/test/parity.mjs`
 - **Deterministic core invariant (WF-ADR-0001):** scoring/routing makes no model
   call, needs no key, and touches no network. Model calls live only in the
