@@ -39,7 +39,7 @@ use crate::{
     admission::{AdmissionError, AdmissionPolicy},
     audit::AuditLog,
     auth,
-    cache::{CacheSettings, CachedResponse, cache_key},
+    cache::{CacheSettings, CachedResponse, cache_key_with_version},
     control_plane::{
         AdministrativeIdentity, BindingKind, PolicyBinding, PolicyDocument, PolicyLifecycle,
         PolicyProfile,
@@ -474,16 +474,6 @@ impl crate::state::StateBackend for CanaryTestBackend {
         now_seconds: f64,
     ) -> TestStateFuture<'a, crate::rate_limit::RateResult> {
         self.0.admit(key, config, now_seconds)
-    }
-
-    fn reserve<'a>(
-        &'a self,
-        key: &'a str,
-        config: crate::state::StateLimitConfig,
-        tokens: u64,
-        now_seconds: f64,
-    ) -> TestStateFuture<'a, crate::rate_limit::ReservationResult> {
-        self.0.reserve(key, config, tokens, now_seconds)
     }
 
     fn reserve_tokens<'a>(
@@ -4029,7 +4019,13 @@ async fn codex_account_routes_never_replay_or_store_exact_response_cache_entries
         )?;
 
         state.response_cache().put_at(
-            cache_key("local", "chatgpt", "shared-provider-model", &payload)?,
+            cache_key_with_version(
+                state.cache_generation(),
+                "local",
+                "chatgpt",
+                "shared-provider-model",
+                &payload,
+            )?,
             CachedResponse {
                 status: StatusCode::OK.as_u16(),
                 content_type: "application/json".to_owned(),
@@ -6255,5 +6251,61 @@ async fn reloadable_router_switches_complete_snapshots_and_retains_last_good() -
         .body(Body::empty())?;
     let retained_health = json_body(router.oneshot(request).await?).await?;
     assert_eq!(retained_health, health);
+    Ok(())
+}
+
+fn selected_model(field: Value, state: &AppState) -> Result<Option<String>, String> {
+    Ok(
+        match super::resolve_request_selection(Some(&field), state)? {
+            Some(super::RequestSelection::Model(name)) => Some(name),
+            Some(super::RequestSelection::Preset { name, .. }) => Some(format!("route:{name}")),
+            None => None,
+        },
+    )
+}
+
+fn pin_models() -> Vec<ConfiguredModel> {
+    vec![
+        ConfiguredModel::new("local", "http://local/v1", "small", None, true),
+        ConfiguredModel::new("cloud", "https://cloud.invalid/v1", "large", None, true),
+    ]
+}
+
+#[test]
+fn explicit_and_prefer_pins_match_tier_mode() -> TestResult {
+    let state = AppState::new(RoutingConfig::binary(0.5), pin_models(), false, "test");
+    assert_eq!(selected_model(json!("auto"), &state)?, None);
+    assert_eq!(
+        selected_model(json!("prefer-local"), &state)?,
+        Some("local".to_owned())
+    );
+    assert_eq!(
+        selected_model(json!("prefer-hosted"), &state)?,
+        Some("cloud".to_owned())
+    );
+    assert_eq!(
+        selected_model(json!("prefer-cloud"), &state)?,
+        Some("cloud".to_owned())
+    );
+    assert_eq!(
+        selected_model(json!(" local "), &state)?,
+        Some("local".to_owned())
+    );
+    assert_eq!(selected_model(json!("upstream-id"), &state)?, None);
+    Ok(())
+}
+
+#[test]
+fn classifier_prefer_directive_falls_through() -> TestResult {
+    let routing = RoutingConfig {
+        classifier: Some(ClassifierModel::new(
+            vec!["local".to_owned(), "cloud".to_owned()],
+            Default::default(),
+            vec![0.0, 0.0],
+        )?),
+        ..RoutingConfig::default()
+    };
+    let state = AppState::new(routing, pin_models(), false, "test");
+    assert_eq!(selected_model(json!("prefer-local"), &state)?, None);
     Ok(())
 }

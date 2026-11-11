@@ -102,7 +102,8 @@ where
     }
 
     /// Number of distinct changed versions that failed to parse.
-    pub fn failure_count(&self) -> Result<u64, ReloadError> {
+    #[cfg(test)]
+    pub(crate) fn failure_count(&self) -> Result<u64, ReloadError> {
         self.state
             .lock()
             .map(|state| state.failures)

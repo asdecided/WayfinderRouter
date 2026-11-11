@@ -7,7 +7,6 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 use thiserror::Error;
-use wayfinder_config::gateway::GatewayConfig;
 use wayfinder_routing_core::{
     CoreError, Lexicon, RoutingConfig, Tier, recommend_tier, score_complexity,
 };
@@ -154,38 +153,6 @@ pub fn extract_prompt(messages: &Value, route_on: RouteOn) -> String {
         .filter_map(|message| message_text(message))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Resolve an explicit configured endpoint or tier directive from `model`.
-#[must_use]
-pub fn resolve_pin(
-    model_field: &Value,
-    routing: &RoutingConfig,
-    gateway: &GatewayConfig,
-) -> Option<String> {
-    let name = model_field.as_str()?.trim();
-    if name.is_empty() || name == AUTO_MODEL {
-        return None;
-    }
-    if routing.classifier.is_none() && !routing.tiers.is_empty() {
-        if name == PREFER_LOW {
-            return routing.tiers.first().map(|tier| tier.model.clone());
-        }
-        if name == PREFER_HIGH || name == PREFER_HIGH_ALIAS {
-            return routing.tiers.last().map(|tier| tier.model.clone());
-        }
-    }
-    gateway.models.contains_key(name).then(|| name.to_owned())
-}
-
-/// Recognize and remove a leading directive from the latest textual user message.
-#[must_use]
-pub fn resolve_slash_directive(
-    messages: &Value,
-    routing: &RoutingConfig,
-    gateway: &GatewayConfig,
-) -> Option<SlashResolution> {
-    resolve_slash_directive_for_names(messages, routing, gateway.models.keys().map(String::as_str))
 }
 
 /// Resolve a slash directive against an arbitrary configured-name view.
@@ -499,7 +466,9 @@ fn tier_rank(model: &str, tiers: &[Tier]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use wayfinder_config::gateway::{GatewayModel, ProviderKind, gateway_config_from_toml};
+    use wayfinder_config::gateway::{
+        GatewayConfig, GatewayModel, ProviderKind, gateway_config_from_toml,
+    };
 
     use super::*;
 
@@ -549,73 +518,32 @@ model = "large"
     }
 
     #[test]
-    fn explicit_and_prefer_pins_match_tier_mode() -> Result<(), Box<dyn std::error::Error>> {
-        let routing = RoutingConfig::binary(0.5);
-        let gateway = gateway()?;
-        assert_eq!(resolve_pin(&json!("auto"), &routing, &gateway), None);
-        assert_eq!(
-            resolve_pin(&json!("prefer-local"), &routing, &gateway),
-            Some("local".to_owned())
-        );
-        assert_eq!(
-            resolve_pin(&json!("prefer-hosted"), &routing, &gateway),
-            Some("cloud".to_owned())
-        );
-        assert_eq!(
-            resolve_pin(&json!("prefer-cloud"), &routing, &gateway),
-            Some("cloud".to_owned())
-        );
-        assert_eq!(
-            resolve_pin(&json!(" local "), &routing, &gateway),
-            Some("local".to_owned())
-        );
-        assert_eq!(resolve_pin(&json!("upstream-id"), &routing, &gateway), None);
-        Ok(())
-    }
-
-    #[test]
-    fn classifier_prefer_directive_falls_through() -> Result<(), Box<dyn std::error::Error>> {
-        let routing = RoutingConfig {
-            classifier: Some(wayfinder_routing_core::ClassifierModel::new(
-                vec!["local".to_owned(), "cloud".to_owned()],
-                Default::default(),
-                vec![0.0, 0.0],
-            )?),
-            ..RoutingConfig::default()
-        };
-        assert_eq!(
-            resolve_pin(&json!("prefer-local"), &routing, &gateway()?),
-            None
-        );
-        Ok(())
-    }
-
-    #[test]
     fn slash_directive_is_recognized_stripped_and_unknown_is_untouched()
     -> Result<(), Box<dyn std::error::Error>> {
         let routing = RoutingConfig::binary(0.5);
         let gateway = gateway()?;
+        let names = || gateway.models.keys().map(String::as_str);
         let messages = json!([
             {"role": "user", "content": "old"},
             {"role": "assistant", "content": "answer"},
             {"role": "user", "content": "  /cloud   do this"}
         ]);
-        let resolved = resolve_slash_directive(&messages, &routing, &gateway)
+        let resolved = resolve_slash_directive_for_names(&messages, &routing, names())
             .ok_or("expected slash resolution")?;
         assert_eq!(resolved.pin.as_deref(), Some("cloud"));
         assert_eq!(resolved.messages[2]["content"], "do this");
         assert!(
-            resolve_slash_directive(
+            resolve_slash_directive_for_names(
                 &json!([{"role":"user","content":"/help me"}]),
                 &routing,
-                &gateway
+                names()
             )
             .is_none()
         );
-        let auto = resolve_slash_directive(
+        let auto = resolve_slash_directive_for_names(
             &json!([{"role":"user","content":"/auto hi"}]),
             &routing,
-            &gateway,
+            names(),
         )
         .ok_or("expected auto slash resolution")?;
         assert_eq!(auto.pin, None);

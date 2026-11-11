@@ -336,7 +336,8 @@ impl OpenAiProviderClient {
     /// Dropping this future drops the Reqwest request/response stream, providing
     /// cancellation at the async task boundary. No retry is performed here;
     /// delivery policy owns attempts so duplicate calls remain explicit.
-    pub async fn send_buffered(
+    #[cfg(test)]
+    pub(crate) async fn send_buffered(
         &self,
         endpoint: &OpenAiEndpoint,
         body: &Value,
@@ -419,7 +420,8 @@ impl OpenAiProviderClient {
     /// The returned stream owns Reqwest's response. Dropping it cancels the
     /// transport. Aggregate size is intentionally not bounded here; callers
     /// must apply incremental line/event bounds appropriate to their protocol.
-    pub async fn send_stream(
+    #[cfg(test)]
+    pub(crate) async fn send_stream(
         &self,
         endpoint: &OpenAiEndpoint,
         body: &Value,

@@ -175,7 +175,8 @@ impl AuditLog {
     }
 
     /// Start a shared-only audit pipeline.
-    pub fn from_shared_backend(
+    #[cfg(test)]
+    pub(crate) fn from_shared_backend(
         backend: Arc<dyn StateBackend>,
         namespace: impl Into<Arc<str>>,
     ) -> Result<Self, AuditError> {

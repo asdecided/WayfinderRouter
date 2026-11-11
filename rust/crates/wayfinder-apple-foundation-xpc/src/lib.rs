@@ -10,7 +10,6 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SERVICE_NAME: &str = "com.wayfinder.FoundationModelBroker";
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_REQUEST_ID_BYTES: usize = 128;
 pub const MAX_ENCODED_REQUEST_BYTES: usize = 1_048_576;

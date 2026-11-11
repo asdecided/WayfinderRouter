@@ -98,6 +98,7 @@ pub struct RateSnapshot {
 }
 
 /// Current counters for diagnostics.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RateStats {
     /// Admitted requests in the current state window.
@@ -160,7 +161,8 @@ impl RateLimiter {
     }
 
     /// Whether either dimension is configured.
-    pub fn active(&self) -> Result<bool, RateLimitError> {
+    #[cfg(test)]
+    pub(crate) fn active(&self) -> Result<bool, RateLimitError> {
         let state = self
             .state
             .lock()
@@ -331,22 +333,6 @@ impl RateLimiter {
         Ok(())
     }
 
-    /// Apply hot-reloaded limits while retaining current-window counters.
-    pub fn reconfigure(
-        &self,
-        rpm: Option<u64>,
-        tpm: Option<u64>,
-        window_seconds: f64,
-    ) -> Result<(), RateLimitError> {
-        let configuration = validated_configuration(rpm, tpm, window_seconds)?;
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| RateLimitError::LockPoisoned)?;
-        state.configuration = configuration;
-        Ok(())
-    }
-
     /// Current RPM header fields, or `None` when RPM is disabled.
     pub fn snapshot_at(&self, now_seconds: f64) -> Result<Option<RateSnapshot>, RateLimitError> {
         validate_time(now_seconds)?;
@@ -366,7 +352,8 @@ impl RateLimiter {
     }
 
     /// Current counters without rolling the clock.
-    pub fn stats(&self) -> Result<RateStats, RateLimitError> {
+    #[cfg(test)]
+    pub(crate) fn stats(&self) -> Result<RateStats, RateLimitError> {
         let state = self
             .state
             .lock()
@@ -611,15 +598,6 @@ mod tests {
                 reset_seconds: 59,
             })
         );
-        Ok(())
-    }
-
-    #[test]
-    fn reconfigure_retains_counts_and_can_tighten_immediately() -> Result<(), RateLimitError> {
-        let limiter = RateLimiter::new(Some(5), None, 60.0)?;
-        assert!(limiter.admit_at(1.0)?.allowed());
-        limiter.reconfigure(Some(1), None, 60.0)?;
-        assert_eq!(limiter.admit_at(2.0)?.limited_by, Some(LimitKind::Requests));
         Ok(())
     }
 

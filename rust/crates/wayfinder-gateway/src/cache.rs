@@ -79,6 +79,7 @@ impl Default for CacheSettings {
 }
 
 /// Prompt-free cache metrics.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CacheStats {
     /// Retained responses.
@@ -246,29 +247,8 @@ impl ResponseCache {
         Ok(())
     }
 
-    /// Purge every retained response without resetting cumulative counters.
-    pub fn clear(&self) -> Result<(), CacheError> {
-        let mut state = self.state.lock().map_err(|_| CacheError::LockPoisoned)?;
-        state.store.clear();
-        state.bytes = 0;
-        Ok(())
-    }
-
-    /// Apply hot-reloaded settings; disabling purges bodies immediately.
-    pub fn reconfigure(&self, settings: CacheSettings) -> Result<(), CacheError> {
-        validate_settings(settings)?;
-        let mut state = self.state.lock().map_err(|_| CacheError::LockPoisoned)?;
-        state.settings = settings;
-        if !settings.enabled {
-            state.store.clear();
-            state.bytes = 0;
-        } else {
-            evict(&mut state);
-        }
-        Ok(())
-    }
-
     /// Return bounded metadata only.
+    #[cfg(test)]
     pub fn stats(&self) -> Result<CacheStats, CacheError> {
         let state = self.state.lock().map_err(|_| CacheError::LockPoisoned)?;
         Ok(CacheStats {
@@ -294,28 +274,13 @@ impl Default for ResponseCache {
     }
 }
 
-/// SHA-256 of the authenticated cache partition, public route, served upstream
-/// model, and canonical request fields.
+/// SHA-256 of the configuration/prompt-contract version, authenticated cache
+/// partition, public route, served upstream model, and canonical request
+/// fields.
 ///
 /// `partition` must identify the effective caller policy boundary. Managed
 /// surfaces use the virtual-key id so an exact request from one tenant can
 /// never replay content produced for another tenant.
-pub fn cache_key(
-    partition: &str,
-    route: &str,
-    served_model: &str,
-    body: &Value,
-) -> Result<String, CacheError> {
-    cache_key_with_version(
-        CACHE_KEY_SCHEMA_VERSION,
-        partition,
-        route,
-        served_model,
-        body,
-    )
-}
-
-/// SHA-256 cache key with an explicit configuration/prompt-contract version.
 pub fn cache_key_with_version(
     version: &str,
     partition: &str,
@@ -507,6 +472,21 @@ mod tests {
 
     use super::*;
 
+    fn cache_key(
+        partition: &str,
+        route: &str,
+        served_model: &str,
+        body: &Value,
+    ) -> Result<String, CacheError> {
+        cache_key_with_version(
+            CACHE_KEY_SCHEMA_VERSION,
+            partition,
+            route,
+            served_model,
+            body,
+        )
+    }
+
     fn entry(body: &[u8]) -> CachedResponse {
         CachedResponse {
             status: 200,
@@ -683,24 +663,6 @@ mod tests {
         assert!(cache.get_at("a", 14.999)?.is_some());
         assert!(cache.get_at("a", 15.0)?.is_none());
         assert_eq!(cache.stats()?.misses, 1);
-        Ok(())
-    }
-
-    #[test]
-    fn disabling_purges_bodies_but_retains_counters() -> Result<(), CacheError> {
-        let cache = ResponseCache::new(CacheSettings {
-            enabled: true,
-            max_entries: 10,
-            max_bytes: 100,
-            ttl_seconds: 0.0,
-        })?;
-        cache.put_at("a".to_owned(), entry(b"secret response"), 0.0)?;
-        assert!(cache.get_at("a", 0.0)?.is_some());
-        cache.reconfigure(CacheSettings::default())?;
-        let stats = cache.stats()?;
-        assert_eq!(stats.entries, 0);
-        assert_eq!(stats.bytes, 0);
-        assert_eq!(stats.hits, 1);
         Ok(())
     }
 

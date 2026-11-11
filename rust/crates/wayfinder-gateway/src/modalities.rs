@@ -8,9 +8,6 @@
 
 use serde_json::{Map, Value};
 
-/// Version of the normalized modality contract.
-pub const MODALITY_CONTRACT_VERSION: &str = "wf-modalities-v1";
-
 const MAX_SCAN_DEPTH: usize = 64;
 
 /// Validate a Chat Completions body against the currently shipped text-only

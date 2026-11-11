@@ -133,8 +133,9 @@ impl CircuitBreaker {
     }
 
     /// Whether the breaker is still cooling down for `target`.
+    #[cfg(test)]
     #[must_use]
-    pub fn is_open_at(&self, target: &str, now_seconds: f64) -> bool {
+    pub(crate) fn is_open_at(&self, target: &str, now_seconds: f64) -> bool {
         !self.allow_at(target, now_seconds)
     }
 

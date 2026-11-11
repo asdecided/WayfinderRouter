@@ -544,9 +544,10 @@ pub struct WorkspaceSavingsReport {
     pub last_observed_utc: Option<String>,
 }
 
-/// All-time counters exported to metrics.
+/// All-time ledger counters.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-pub struct SavingsTotals {
+pub(crate) struct SavingsTotals {
     /// Realized cost.
     pub realized: f64,
     /// Baseline cost.
@@ -775,8 +776,9 @@ impl SavingsLedger {
         })
     }
 
-    /// Return all-time totals for metrics.
-    pub fn totals(&self) -> Result<SavingsTotals, LedgerError> {
+    /// Return all-time totals.
+    #[cfg(test)]
+    pub(crate) fn totals(&self) -> Result<SavingsTotals, LedgerError> {
         let days = self.days.lock().map_err(|_| LedgerError::LockPoisoned)?;
         let realized = days.values().map(|day| day.realized).sum::<f64>();
         let baseline = days.values().map(|day| day.baseline).sum::<f64>();
@@ -817,8 +819,9 @@ impl SavingsLedger {
         Ok(python_round(amount, 6))
     }
 
-    /// Return sorted ISO bucket keys for diagnostics and tests.
-    pub fn day_keys(&self) -> Result<Vec<String>, LedgerError> {
+    /// Return sorted ISO bucket keys.
+    #[cfg(test)]
+    pub(crate) fn day_keys(&self) -> Result<Vec<String>, LedgerError> {
         let days = self.days.lock().map_err(|_| LedgerError::LockPoisoned)?;
         Ok(days.keys().cloned().collect())
     }

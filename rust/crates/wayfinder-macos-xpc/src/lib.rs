@@ -9,8 +9,6 @@ use std::time::Duration;
 use thiserror::Error;
 use wayfinder_providers::openai_compat::SecretValue;
 
-/// XPC service embedded in `Wayfinder.app`.
-pub const BROKER_SERVICE_NAME: &str = "com.wayfinder.CredentialBroker";
 /// Maximum accepted environment/account reference.
 pub const MAX_ACCOUNT_BYTES: usize = 256;
 /// Maximum credential reply retained in Rust.

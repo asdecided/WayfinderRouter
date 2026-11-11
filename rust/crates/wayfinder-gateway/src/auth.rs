@@ -19,13 +19,6 @@ pub fn hash_key(presented: &str) -> String {
     encoded
 }
 
-/// Constant-time verification against a 64-character SHA-256 hex digest.
-#[must_use]
-pub fn verify(presented: &str, expected_hash: &str) -> bool {
-    let actual = Sha256::digest(presented.as_bytes());
-    parse_digest(expected_hash).is_some_and(|expected| actual.as_slice().ct_eq(&expected).into())
-}
-
 /// Return the matching key id while comparing every configured digest.
 ///
 /// Iterating the complete collection avoids leaking the matching collection
@@ -103,14 +96,15 @@ mod tests {
     }
 
     #[test]
-    fn verify_accepts_case_and_surrounding_whitespace() {
+    fn match_accepts_case_and_surrounding_whitespace() {
         let digest = hash_key("secret");
-        assert!(verify(
-            "secret",
-            &format!("  {}  ", digest.to_ascii_uppercase())
-        ));
-        assert!(!verify("wrong", &digest));
-        assert!(!verify("secret", "not-a-digest"));
+        let padded = format!("  {}  ", digest.to_ascii_uppercase());
+        assert_eq!(
+            match_key(Some("secret"), [("key", padded.as_str())]),
+            Some("key".to_owned())
+        );
+        assert_eq!(match_key(Some("wrong"), [("key", digest.as_str())]), None);
+        assert_eq!(match_key(Some("secret"), [("key", "not-a-digest")]), None);
     }
 
     #[test]
