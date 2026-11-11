@@ -6,7 +6,7 @@
 
 ## Scope
 
-<!-- The single area touched: gateway, cli, tui, ui, adapter, pricing, service, calibrate, suite, … -->
+<!-- The single area touched: gateway, cli, config, providers, pricing, service, calibrate, desktop, helm, ci, docs, … -->
 
 ## Verification
 

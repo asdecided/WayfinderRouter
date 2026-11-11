@@ -34,7 +34,6 @@ Apple API reference:
 - [`WF-ROADMAP-0014-rust-gateway-migration.md`](../roadmaps/WF-ROADMAP-0014-rust-gateway-migration.md)
 - [`WF-DESIGN-0016-signed-rust-helper-integration.md`](../designs/WF-DESIGN-0016-signed-rust-helper-integration.md)
 - [`rust-migration-capability-matrix.md`](rust-migration-capability-matrix.md)
-- [`rust-rewrite-remaining-work.md`](rust-rewrite-remaining-work.md)
 - `macos/WayfinderMac/Package.swift`
 - `macos/WayfinderMac/Sources/WayfinderCredentialBroker/main.swift`
 - `rust/crates/wayfinder-macos-xpc/`
