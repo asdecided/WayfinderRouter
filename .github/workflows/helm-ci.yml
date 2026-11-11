@@ -63,6 +63,20 @@ jobs:
           grep -q -- '--appendfsync' "$RUNNER_TEMP/wayfinder-bundled.yaml"
           grep -q 'volumeClaimTemplates:' "$RUNNER_TEMP/wayfinder-bundled.yaml"
           grep -q 'kind: NetworkPolicy' "$RUNNER_TEMP/wayfinder-bundled.yaml"
+      - name: Bundled Redis listens on its configured port
+        shell: bash
+        run: |
+          set -euo pipefail
+          helm template wayfinder deploy/helm/wayfinder-router \
+            --namespace wayfinder --set image.tag=ci-test --set redis.port=6380 \
+            > "$RUNNER_TEMP/wayfinder-redis-port.yaml"
+          grep -A2 -- '- redis-server' "$RUNNER_TEMP/wayfinder-redis-port.yaml" | grep -q -- '- "6380"'
+          grep -q 'containerPort: 6380' "$RUNNER_TEMP/wayfinder-redis-port.yaml"
+          grep -q ':6380' "$RUNNER_TEMP/wayfinder-redis-port.yaml"
+          if grep -q '6379' "$RUNNER_TEMP/wayfinder-redis-port.yaml"; then
+            echo "::error::bundled Redis still references the default port"
+            exit 1
+          fi
       - name: Render external configuration and ingress form
         shell: bash
         run: |
