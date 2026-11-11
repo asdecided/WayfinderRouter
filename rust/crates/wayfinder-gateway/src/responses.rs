@@ -24,8 +24,6 @@ use wayfinder_providers::sse::{SseDecoder, SseEvent};
 
 use crate::{AppState, chat_completions, new_request_id};
 
-/// Stable contract version for the compatibility surface.
-pub const RESPONSES_CONTRACT_VERSION: &str = "wf-responses-v1";
 /// Maximum number of input items retained in one request.
 pub const MAX_INPUT_ITEMS: usize = 64;
 /// Maximum number of model-visible tools after namespace expansion.

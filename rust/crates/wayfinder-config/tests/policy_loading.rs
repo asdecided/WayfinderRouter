@@ -1,8 +1,6 @@
 use std::{error::Error, fs, path::PathBuf};
-use wayfinder_config::{
-    PolicyLoadState, TierOrderPolicy, load_routing_config, load_routing_config_with_state,
-    read_config_source,
-};
+use wayfinder_config::{ConfigError, TierOrderPolicy, load_routing_config, read_config_source};
+use wayfinder_routing_core::{DEFAULT_THRESHOLD, RoutingConfig};
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Result<Self, Box<dyn Error>> {
@@ -30,14 +28,13 @@ fn explicit_missing_policy_never_becomes_defaults() -> Result<(), Box<dyn Error>
     let f = Fixture::new()?;
     assert!(read_config_source(&f.0, None)?.is_none());
     assert_eq!(
-        load_routing_config_with_state(&f.0, None, None, TierOrderPolicy::StrictInput)?.0,
-        PolicyLoadState::Absent
+        load_routing_config(&f.0, None, None, TierOrderPolicy::StrictInput)?,
+        RoutingConfig::binary(DEFAULT_THRESHOLD)
     );
     let err = load_routing_config(&f.0, Some(&f.config()), None, TierOrderPolicy::StrictInput)
         .err()
         .ok_or("expected missing error")?;
-    assert_eq!(err.load_state(), PolicyLoadState::Absent);
-    assert!(load_routing_config(&f.0, None, None, TierOrderPolicy::StrictInput).is_ok());
+    assert!(matches!(err, ConfigError::Missing { .. }));
     Ok(())
 }
 
@@ -48,14 +45,17 @@ fn invalid_and_unreadable_are_distinct_and_errors_omit_source() -> Result<(), Bo
     let err = load_routing_config(&f.0, None, None, TierOrderPolicy::StrictInput)
         .err()
         .ok_or("expected invalid")?;
-    assert_eq!(err.load_state(), PolicyLoadState::Invalid);
+    assert!(matches!(
+        err,
+        ConfigError::InvalidToml { .. } | ConfigError::InvalidValue { .. }
+    ));
     assert!(!err.to_string().contains("secret-private-value"));
     fs::remove_file(f.config())?;
     fs::create_dir(f.config())?;
     let err = load_routing_config(&f.0, None, None, TierOrderPolicy::StrictInput)
         .err()
         .ok_or("expected unreadable")?;
-    assert_eq!(err.load_state(), PolicyLoadState::Unreadable);
+    assert!(matches!(err, ConfigError::Read { .. }));
     Ok(())
 }
 
@@ -70,7 +70,7 @@ fn broken_nearest_symlink_blocks_parent_fallback() -> Result<(), Box<dyn Error>>
     let err = load_routing_config(&child, None, None, TierOrderPolicy::StrictInput)
         .err()
         .ok_or("expected unreadable")?;
-    assert_eq!(err.load_state(), PolicyLoadState::Unreadable);
+    assert!(matches!(err, ConfigError::Read { .. }));
     Ok(())
 }
 
@@ -78,9 +78,9 @@ fn broken_nearest_symlink_blocks_parent_fallback() -> Result<(), Box<dyn Error>>
 fn subsequent_load_observes_policy_change_or_removal() -> Result<(), Box<dyn Error>> {
     let f = Fixture::new()?;
     fs::write(f.config(), "[routing]\nthreshold = 0.9")?;
-    assert_eq!(
-        load_routing_config_with_state(&f.0, None, None, TierOrderPolicy::StrictInput)?.0,
-        PolicyLoadState::Loaded
+    assert_ne!(
+        load_routing_config(&f.0, None, None, TierOrderPolicy::StrictInput)?,
+        RoutingConfig::binary(DEFAULT_THRESHOLD)
     );
     let before = load_routing_config(&f.0, Some(&f.config()), None, TierOrderPolicy::StrictInput)?;
     fs::write(f.config(), "[routing]\nthreshold = 0.1")?;

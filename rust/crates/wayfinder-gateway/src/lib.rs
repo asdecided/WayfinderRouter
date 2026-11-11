@@ -968,8 +968,9 @@ impl AppState {
     }
 
     /// Set the maximum request bytes made available to buffering extractors.
+    #[cfg(test)]
     #[must_use]
-    pub const fn with_request_body_limit(mut self, request_body_limit: usize) -> Self {
+    pub(crate) const fn with_request_body_limit(mut self, request_body_limit: usize) -> Self {
         self.request_body_limit = request_body_limit;
         self
     }
@@ -994,23 +995,10 @@ impl AppState {
     }
 
     /// Attach caller-owned admission state for deterministic tests.
+    #[cfg(test)]
     #[must_use]
-    pub fn with_admission_policy(mut self, policy: AdmissionPolicy) -> Self {
+    pub(crate) fn with_admission_policy(mut self, policy: AdmissionPolicy) -> Self {
         self.admission_policy = Arc::new(policy);
-        self
-    }
-
-    /// Use a caller-owned recent-route ring, for lifecycle sharing and tests.
-    #[must_use]
-    pub fn with_recent(mut self, recent: Arc<RecentRoutes>) -> Self {
-        self.recent = recent;
-        self
-    }
-
-    /// Use a caller-owned metrics collector, for lifecycle sharing and tests.
-    #[must_use]
-    pub fn with_metrics(mut self, metrics: Arc<GatewayMetrics>) -> Self {
-        self.metrics = metrics;
         self
     }
 
@@ -1022,8 +1010,9 @@ impl AppState {
     }
 
     /// Attach a streaming-only provider implementation.
+    #[cfg(test)]
     #[must_use]
-    pub fn with_streaming_delivery(mut self, delivery: Arc<dyn StreamingDelivery>) -> Self {
+    pub(crate) fn with_streaming_delivery(mut self, delivery: Arc<dyn StreamingDelivery>) -> Self {
         self.streaming_delivery = Some(delivery);
         self
     }
@@ -1143,7 +1132,8 @@ impl AppState {
     }
 
     /// Attach reliability state with deterministic time and jitter sources.
-    pub fn with_gateway_reliability_sources(
+    #[cfg(test)]
+    pub(crate) fn with_gateway_reliability_sources(
         mut self,
         config: &wayfinder_config::gateway::GatewayConfig,
         clock: impl Fn() -> f64 + Send + Sync + 'static,
@@ -1172,19 +1162,6 @@ impl AppState {
         }));
         self.shadow_store.set_active(shadow.enabled);
         self.shadow_config = Arc::new(shadow);
-        self.shadow_slots = Arc::new(tokio::sync::Semaphore::new(slots));
-        Ok(self)
-    }
-
-    /// Replace shadow policy while retaining an existing record store.
-    pub fn with_shadow_config(mut self, config: ShadowConfig) -> Result<Self, String> {
-        let slots = usize::try_from(config.max_in_flight)
-            .map_err(|_| "gateway.shadow.max_in_flight is too large".to_owned())?;
-        if slots == 0 {
-            return Err("gateway.shadow.max_in_flight must be positive".to_owned());
-        }
-        self.shadow_config = Arc::new(config);
-        self.shadow_store.set_active(self.shadow_config.enabled);
         self.shadow_slots = Arc::new(tokio::sync::Semaphore::new(slots));
         Ok(self)
     }
@@ -1321,8 +1298,8 @@ impl AppState {
     /// `serve` entry point does this), at most once per
     /// [`savings_persistence::SAVINGS_PERSIST_INTERVAL`], with a final write
     /// from [`Self::shutdown_savings_persister`]. Without a started persister,
-    /// the owner must call [`Self::persist_savings`] or
-    /// [`Self::shutdown_savings_persister`] to write recorded turns.
+    /// the owner must call [`Self::shutdown_savings_persister`] to write
+    /// recorded turns.
     #[must_use]
     pub fn with_savings_path(mut self, path: std::path::PathBuf) -> Self {
         self.savings_path = Some(Arc::new(path));
@@ -1333,12 +1310,12 @@ impl AppState {
 
     /// Synchronously write the current ledger when persistence is configured.
     ///
-    /// This writes even when nothing is marked dirty, blocks the calling
-    /// thread on file I/O, and is intended for tests, embedders without a
-    /// background persister, and startup. A failure is logged, counted in
+    /// This writes even when nothing is marked dirty and blocks the calling
+    /// thread on file I/O. A failure is logged, counted in
     /// `wayfinder_router_savings_persist_failures_total`, and leaves the
     /// ledger dirty for a running persister to retry.
-    pub fn persist_savings(&self) -> Result<(), wayfinder_service::pricing::LedgerError> {
+    #[cfg(test)]
+    pub(crate) fn persist_savings(&self) -> Result<(), wayfinder_service::pricing::LedgerError> {
         self.savings_target().map_or(Ok(()), |target| {
             self.savings_persistence.save_now(&target, true).map(|_| ())
         })
@@ -1371,9 +1348,10 @@ impl AppState {
         }
     }
 
-    /// Process-lifetime savings persistence state, for diagnostics and tests.
+    /// Process-lifetime savings persistence state, for tests.
+    #[cfg(test)]
     #[must_use]
-    pub fn savings_persistence(&self) -> &savings_persistence::SavingsPersistence {
+    pub(crate) fn savings_persistence(&self) -> &savings_persistence::SavingsPersistence {
         &self.savings_persistence
     }
 
@@ -1804,9 +1782,10 @@ impl AppState {
         &self.reliability_policy
     }
 
-    /// Shared exact-response cache.
+    /// Shared exact-response cache, for tests.
+    #[cfg(test)]
     #[must_use]
-    pub fn response_cache(&self) -> &ResponseCache {
+    pub(crate) fn response_cache(&self) -> &ResponseCache {
         &self.response_cache
     }
 

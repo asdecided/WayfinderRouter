@@ -287,14 +287,8 @@ pub struct Weights {
 impl Weights {
     /// Construct from values aligned with [`FEATURE_ORDER`].
     #[must_use]
-    pub const fn from_feature_order(values: [f64; 11]) -> Self {
+    pub(crate) const fn from_feature_order(values: [f64; 11]) -> Self {
         Self { values }
-    }
-
-    /// Values aligned with [`FEATURE_ORDER`].
-    #[must_use]
-    pub const fn as_feature_order(&self) -> &[f64; 11] {
-        &self.values
     }
 
     /// Read a weight by compatibility name.
@@ -443,7 +437,7 @@ impl ClassifierModel {
 
     /// Linear logits in stable model order.
     #[must_use]
-    pub fn logits(&self, features: &Features) -> Vec<f64> {
+    pub(crate) fn logits(&self, features: &Features) -> Vec<f64> {
         let normalized = normalized_features(features);
         self.intercepts
             .iter()
@@ -569,7 +563,7 @@ pub fn binary_tiers(threshold: f64) -> Vec<Tier> {
 
 /// Strip a leading YAML-style frontmatter block with Python's exact split-by-`\n` semantics.
 #[must_use]
-pub fn strip_frontmatter(text: &str) -> &str {
+pub(crate) fn strip_frontmatter(text: &str) -> &str {
     let first_end = text.find('\n').unwrap_or(text.len());
     let Some(first_line) = text.get(..first_end) else {
         return text;
@@ -606,7 +600,8 @@ pub fn strip_frontmatter(text: &str) -> &str {
 }
 
 /// Extract raw structural and lexical features with the built-in lexicon.
-pub fn extract_features(text: &str) -> Result<Features, CoreError> {
+#[cfg(test)]
+fn extract_features(text: &str) -> Result<Features, CoreError> {
     extract_features_with_lexicon(text, &Lexicon::default())
 }
 
@@ -683,7 +678,7 @@ pub fn extract_features_with_lexicon(text: &str, lexicon: &Lexicon) -> Result<Fe
 
 /// Saturate each raw feature into `0.0..=1.0` in [`FEATURE_ORDER`].
 #[must_use]
-pub fn normalized_features(features: &Features) -> [f64; 11] {
+pub(crate) fn normalized_features(features: &Features) -> [f64; 11] {
     let mut output = [0.0; 11];
     for (index, saturation) in SATURATION.iter().copied().enumerate() {
         let raw = features.get(index).unwrap_or(0) as f64;
@@ -696,7 +691,7 @@ pub fn normalized_features(features: &Features) -> [f64; 11] {
 
 /// Compute Python-compatible rounded scalar score.
 #[must_use]
-pub fn scalar_score(features: &Features, weights: &Weights) -> f64 {
+pub(crate) fn scalar_score(features: &Features, weights: &Weights) -> f64 {
     let normalized = normalized_features(features);
     let mut total_weight = 0.0;
     for index in WEIGHT_SUM_ORDER {

@@ -457,8 +457,9 @@ impl PolicyLifecycle {
     }
 
     /// Clone the holder used by a request path that never calls the controller.
+    #[cfg(test)]
     #[must_use]
-    pub fn runtime_holder(&self) -> Arc<LastGood<AppState, String>> {
+    pub(crate) fn runtime_holder(&self) -> Arc<LastGood<AppState, String>> {
         Arc::clone(&self.holder)
     }
 

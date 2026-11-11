@@ -495,7 +495,8 @@ impl MessagesStreamTranslator {
     }
 
     /// Construct a translator with explicit parser and accumulator bounds.
-    pub fn with_limits(
+    #[cfg(test)]
+    pub(crate) fn with_limits(
         model: impl Into<String>,
         message_id: impl Into<String>,
         input_tokens: u64,
@@ -568,8 +569,9 @@ impl MessagesStreamTranslator {
     }
 
     /// Whether `[DONE]`, an upstream error, or transport completion terminated the stream.
+    #[cfg(test)]
     #[must_use]
-    pub const fn is_finished(&self) -> bool {
+    pub(crate) const fn is_finished(&self) -> bool {
         self.terminal
     }
 
@@ -801,7 +803,8 @@ impl MessagesStreamTranslator {
 }
 
 /// Translate a finite iterable of arbitrarily fragmented OpenAI SSE bytes.
-pub fn translate_openai_sse_fragments<I, B>(
+#[cfg(test)]
+fn translate_openai_sse_fragments<I, B>(
     fragments: I,
     model: &str,
     message_id: &str,

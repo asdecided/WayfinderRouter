@@ -1,7 +1,6 @@
 //! Loopback server lifecycle and bounded graceful shutdown.
 
 use std::future::{Future, IntoFuture};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use axum::Router;
@@ -9,10 +8,6 @@ use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
-/// Python-compatible default gateway port.
-pub const DEFAULT_PORT: u16 = 8_088;
-/// Default loopback-only bind address.
-pub const DEFAULT_BIND: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT);
 /// Maximum connection drain after shutdown begins.
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -100,18 +95,13 @@ pub async fn shutdown_signal() -> Result<(), ServerError> {
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
+    use std::net::Ipv4Addr;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use axum::routing::get;
 
     use super::*;
-
-    #[tokio::test]
-    async fn default_bind_is_loopback_and_python_port() {
-        assert!(DEFAULT_BIND.ip().is_loopback());
-        assert_eq!(DEFAULT_BIND.port(), 8_088);
-    }
 
     #[tokio::test]
     async fn immediate_shutdown_completes_without_a_socket_leak() -> Result<(), ServerError> {

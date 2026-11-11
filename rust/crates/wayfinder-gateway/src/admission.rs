@@ -60,6 +60,7 @@ pub struct AdmissionPolicy {
     in_flight: Arc<Semaphore>,
     queue: Arc<Semaphore>,
     max_in_flight: usize,
+    #[cfg(test)]
     max_queued: usize,
     queue_timeout: Duration,
 }
@@ -84,6 +85,7 @@ impl AdmissionPolicy {
             in_flight: Arc::new(Semaphore::new(max_in_flight)),
             queue: Arc::new(Semaphore::new(max_queued)),
             max_in_flight,
+            #[cfg(test)]
             max_queued,
             queue_timeout,
         })
@@ -121,12 +123,6 @@ impl AdmissionPolicy {
         self.max_in_flight
     }
 
-    /// Configured bounded waiter count.
-    #[must_use]
-    pub const fn max_queued(&self) -> usize {
-        self.max_queued
-    }
-
     /// Maximum bounded queue wait.
     #[must_use]
     pub const fn queue_timeout(&self) -> Duration {
@@ -134,15 +130,17 @@ impl AdmissionPolicy {
     }
 
     /// Current delivery count, sampled without blocking.
+    #[cfg(test)]
     #[must_use]
-    pub fn in_flight(&self) -> usize {
+    pub(crate) fn in_flight(&self) -> usize {
         self.max_in_flight
             .saturating_sub(self.in_flight.available_permits())
     }
 
     /// Current bounded waiter count, sampled without blocking.
+    #[cfg(test)]
     #[must_use]
-    pub fn queued(&self) -> usize {
+    pub(crate) fn queued(&self) -> usize {
         self.max_queued
             .saturating_sub(self.queue.available_permits())
     }
@@ -154,6 +152,7 @@ impl Default for AdmissionPolicy {
             in_flight: Arc::new(Semaphore::new(DEFAULT_MAX_IN_FLIGHT)),
             queue: Arc::new(Semaphore::new(DEFAULT_MAX_QUEUED)),
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
+            #[cfg(test)]
             max_queued: DEFAULT_MAX_QUEUED,
             queue_timeout: DEFAULT_QUEUE_TIMEOUT,
         }

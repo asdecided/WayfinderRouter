@@ -12,7 +12,6 @@
 //! never started by constructing [`crate::AppState`], so tests and embedders
 //! without a runtime-owned background task keep working. Without a running
 //! worker, recorded turns stay in memory until the owner calls
-//! [`crate::AppState::persist_savings`] or
 //! [`crate::AppState::shutdown_savings_persister`].
 
 #![forbid(unsafe_code)]
@@ -96,13 +95,15 @@ impl SavingsPersistence {
     }
 
     /// Number of successful ledger writes made through this persister.
+    #[cfg(test)]
     #[must_use]
-    pub fn completed_saves(&self) -> u64 {
+    pub(crate) fn completed_saves(&self) -> u64 {
         self.saves.load(Ordering::Acquire)
     }
 
     /// Whether a background worker is currently running.
-    pub fn is_running(&self) -> Result<bool, SavingsPersistError> {
+    #[cfg(test)]
+    pub(crate) fn is_running(&self) -> Result<bool, SavingsPersistError> {
         self.worker
             .lock()
             .map(|slot| slot.join.is_some())

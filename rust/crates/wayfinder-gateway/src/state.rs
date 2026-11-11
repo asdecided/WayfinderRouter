@@ -245,15 +245,6 @@ pub trait StateBackend: Send + Sync {
         now_seconds: f64,
     ) -> StateFuture<'a, RateResult>;
 
-    /// Atomically reserve one request and a conservative token budget.
-    fn reserve<'a>(
-        &'a self,
-        key: &'a str,
-        config: StateLimitConfig,
-        tokens: u64,
-        now_seconds: f64,
-    ) -> StateFuture<'a, ReservationResult>;
-
     /// Reserve only tokens after the request dimension was admitted earlier.
     fn reserve_tokens<'a>(
         &'a self,
@@ -488,25 +479,6 @@ impl StateBackend for MemoryStateBackend {
             let limiter = limiter_for(&mut limiters, key, config)?;
             limiter
                 .admit_at(now_seconds)
-                .map_err(|_| StateBackendError::Unavailable)
-        })
-    }
-
-    fn reserve<'a>(
-        &'a self,
-        key: &'a str,
-        config: StateLimitConfig,
-        tokens: u64,
-        now_seconds: f64,
-    ) -> StateFuture<'a, ReservationResult> {
-        Box::pin(async move {
-            let config = config.validate()?;
-            let mut limiters = self
-                .limiters
-                .lock()
-                .map_err(|_| StateBackendError::LockPoisoned)?;
-            limiter_for(&mut limiters, key, config)?
-                .reserve_at(tokens, now_seconds)
                 .map_err(|_| StateBackendError::Unavailable)
         })
     }
@@ -1460,34 +1432,6 @@ impl StateBackend for RedisStateBackend {
         })
     }
 
-    fn reserve<'a>(
-        &'a self,
-        key: &'a str,
-        config: StateLimitConfig,
-        tokens: u64,
-        _now_seconds: f64,
-    ) -> StateFuture<'a, ReservationResult> {
-        Box::pin(async move {
-            let config = config.validate()?;
-            let window_ms = (config.window_seconds * 1_000.0).ceil().max(1.0) as u64;
-            let mut connection = self.connection.clone();
-            let value: Result<(i64, i64, i64, i64), _> = Script::new(RESERVE_SCRIPT)
-                .key(self.key(key))
-                .arg(window_ms)
-                .arg(config.rpm.unwrap_or(0))
-                .arg(config.tpm.unwrap_or(0))
-                .arg(tokens)
-                .arg(1)
-                .invoke_async(&mut connection)
-                .await;
-            self.mark(
-                value
-                    .map_err(|_| StateBackendError::Unavailable)
-                    .and_then(|value| redis_reservation_result(value, tokens, true)),
-            )
-        })
-    }
-
     fn reserve_tokens<'a>(
         &'a self,
         key: &'a str,
@@ -2290,14 +2234,15 @@ mod tests {
             tpm: Some(100),
             window_seconds: 60.0,
         };
+        assert!(backend.admit("prod", config, 1.0).await?.allowed());
         let reservation = backend
-            .reserve("prod", config, 80, 1.0)
+            .reserve_tokens("prod", config, 80, 1.0)
             .await?
             .reservation
             .ok_or(StateBackendError::Unavailable)?;
         assert_eq!(
             backend
-                .reserve("prod", config, 21, 2.0)
+                .reserve_tokens("prod", config, 21, 2.0)
                 .await?
                 .rate
                 .limited_by,
@@ -2309,7 +2254,7 @@ mod tests {
                 .await?
         );
         let next = backend
-            .reserve("prod", config, 80, 60.0)
+            .reserve_tokens("prod", config, 80, 60.0)
             .await?
             .reservation
             .ok_or(StateBackendError::Unavailable)?;

@@ -65,20 +65,9 @@ pub fn detect_platform(platform: Option<&str>) -> ServicePlatform {
 /// Render a launchd LaunchAgent plist with Python-compatible defaults.
 ///
 /// `log_dir` is expanded before rendering because launchd does not expand a
-/// leading tilde in `StandardOutPath` or `StandardErrorPath`.
-#[must_use]
-pub fn launchd_plist(
-    program_args: &[String],
-    label: Option<&str>,
-    log_dir: Option<&str>,
-) -> String {
-    launchd_plist_with_home(program_args, label, log_dir, None)
-}
-
-/// Render a launchd plist while supplying an explicit home directory.
-///
-/// The explicit-home form makes packaging and golden tests independent of the
-/// invoking process environment.
+/// leading tilde in `StandardOutPath` or `StandardErrorPath`. The explicit
+/// `home` makes packaging and golden tests independent of the invoking process
+/// environment.
 #[must_use]
 pub fn launchd_plist_with_home(
     program_args: &[String],

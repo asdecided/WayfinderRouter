@@ -73,24 +73,7 @@ pub enum ConfigError {
     },
 }
 
-/// Observable policy state. Invalid and unreadable policy never imply defaults.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PolicyLoadState {
-    Loaded,
-    Absent,
-    Invalid,
-    Unreadable,
-}
-
 impl ConfigError {
-    pub fn load_state(&self) -> PolicyLoadState {
-        match self {
-            Self::Missing { .. } => PolicyLoadState::Absent,
-            Self::Read { .. } => PolicyLoadState::Unreadable,
-            Self::InvalidToml { .. } | Self::InvalidValue { .. } => PolicyLoadState::Invalid,
-        }
-    }
-
     /// Runtime diagnostics must not include parser excerpts or configured values.
     pub fn redacted(self) -> Self {
         match self {
@@ -183,27 +166,18 @@ pub fn read_config_source(
 }
 
 /// Load routing configuration from discovery or return the binary defaults.
+///
+/// Only optional absence returns built-in defaults; a missing explicit
+/// selection, invalid policy, or unreadable policy is an error.
 pub fn load_routing_config(
     start_dir: &Path,
     explicit: Option<&Path>,
     threshold_environment: Option<&str>,
     tier_order: TierOrderPolicy,
 ) -> Result<RoutingConfig, ConfigError> {
-    load_routing_config_with_state(start_dir, explicit, threshold_environment, tier_order)
-        .map(|(_, config)| config)
-}
-
-/// Load with an explicit success state; failures expose their state through
-/// ConfigError::load_state. Only optional absence returns built-in defaults.
-pub fn load_routing_config_with_state(
-    start_dir: &Path,
-    explicit: Option<&Path>,
-    threshold_environment: Option<&str>,
-    tier_order: TierOrderPolicy,
-) -> Result<(PolicyLoadState, RoutingConfig), ConfigError> {
     let Some((path, text)) = read_config_source(start_dir, explicit)? else {
         let threshold = parse_environment_threshold(threshold_environment, DEFAULT_THRESHOLD)?;
-        return Ok((PolicyLoadState::Absent, RoutingConfig::binary(threshold)));
+        return Ok(RoutingConfig::binary(threshold));
     };
     routing_config_from_toml(
         &text,
@@ -211,7 +185,6 @@ pub fn load_routing_config_with_state(
         threshold_environment,
         tier_order,
     )
-    .map(|config| (PolicyLoadState::Loaded, config))
     .map_err(ConfigError::redacted)
 }
 
@@ -385,64 +358,6 @@ pub fn dump_routing_toml(config: &RoutingConfig) -> String {
         blocks.push(tiers);
     }
     format!("{}\n", blocks.join("\n\n"))
-}
-
-/// Line-preserving boolean edit used by the whitelisted config seam.
-///
-/// Every existing line outside the selected assignment survives byte-for-byte.
-/// A missing key is inserted immediately after an existing top-level table;
-/// a missing table is appended.
-#[must_use]
-pub fn set_toml_bool(text: &str, table: &str, key: &str, value: bool) -> String {
-    let rendered = if value { "true" } else { "false" };
-    let mut lines: Vec<String> = text.split_inclusive('\n').map(str::to_owned).collect();
-    if !text.is_empty() && !text.ends_with('\n') {
-        let captured: usize = lines.iter().map(String::len).sum();
-        if captured < text.len() {
-            if let Some(tail) = text.get(captured..) {
-                lines.push(tail.to_owned());
-            }
-        }
-    }
-    let mut section = String::new();
-    let mut header_index = None;
-    for (index, line) in lines.iter_mut().enumerate() {
-        let stripped = line.trim();
-        if stripped.starts_with('[') && stripped.ends_with(']') {
-            section = stripped
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .trim()
-                .to_owned();
-            if section == table {
-                header_index = Some(index);
-            }
-            continue;
-        }
-        if section == table && !stripped.starts_with('#') {
-            let Some((name, _)) = stripped.split_once('=') else {
-                continue;
-            };
-            if name.trim() == key {
-                let indentation: String = line
-                    .chars()
-                    .take_while(|character| character.is_whitespace() && *character != '\n')
-                    .collect();
-                *line = format!("{indentation}{key} = {rendered}\n");
-                return lines.concat();
-            }
-        }
-    }
-    if let Some(index) = header_index {
-        lines.insert(index.saturating_add(1), format!("{key} = {rendered}\n"));
-        return lines.concat();
-    }
-    let tail = if text.is_empty() || text.ends_with('\n') {
-        ""
-    } else {
-        "\n"
-    };
-    format!("{text}{tail}\n[{table}]\n{key} = {rendered}\n")
 }
 
 /// Validate and apply a complete routing fragment while preserving every
@@ -1038,17 +953,6 @@ mod tests {
         )?;
         assert_eq!(again, config);
         Ok(())
-    }
-
-    #[test]
-    fn bool_edit_preserves_unrelated_lines() {
-        let source = concat!(
-            "# keep\n[gateway]\n# note\noffline = false # old\n\n",
-            "[gateway.models.local]\nmodel = \"x\"\n",
-        );
-        let edited = set_toml_bool(source, "gateway", "offline", true);
-        assert!(edited.contains("# keep\n[gateway]\n# note\noffline = true\n"));
-        assert!(edited.contains("[gateway.models.local]\nmodel = \"x\"\n"));
     }
 
     #[test]

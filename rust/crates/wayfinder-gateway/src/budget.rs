@@ -96,23 +96,11 @@ impl BudgetPolicy {
         scopes
     }
 
-    /// Evaluate realized spend for the global cap and the authenticated key's cap.
+    /// Evaluate global, workspace, and key caps for one authenticated request.
     ///
     /// A hard online block wins over a degrade. Offline requests soften every
     /// hard block to a degrade because cheapest/local delivery incurs no dearer
     /// network spend. Unpriced relative-unit tables bypass dollar budgets.
-    pub fn evaluate(
-        &self,
-        ledger: &SavingsLedger,
-        priced: bool,
-        key_id: Option<&str>,
-        today: UtcDate,
-        offline: bool,
-    ) -> Result<BudgetDecision, LedgerError> {
-        self.evaluate_for(ledger, priced, None, key_id, today, offline)
-    }
-
-    /// Evaluate global, workspace, and key caps for one authenticated request.
     pub fn evaluate_for(
         &self,
         ledger: &SavingsLedger,
@@ -165,24 +153,12 @@ impl BudgetPolicy {
         })
     }
 
-    /// Evaluate against the fleet-wide realized-cost ledger.
+    /// Evaluate shared global, workspace, and key caps against the fleet-wide
+    /// realized-cost ledger.
     ///
     /// This path is used only when the configured state backend can provide
     /// shared accounting. Callers retain the local-ledger fallback when the
     /// backend is unavailable.
-    pub async fn evaluate_shared(
-        &self,
-        backend: &dyn StateBackend,
-        priced: bool,
-        key_id: Option<&str>,
-        today: UtcDate,
-        offline: bool,
-    ) -> Result<BudgetDecision, StateBackendError> {
-        self.evaluate_shared_for(backend, priced, None, key_id, today, offline)
-            .await
-    }
-
-    /// Evaluate shared global, workspace, and key caps for one request.
     pub async fn evaluate_shared_for(
         &self,
         backend: &dyn StateBackend,
@@ -272,16 +248,8 @@ fn evaluate_one(
     today: UtcDate,
     offline: bool,
 ) -> Result<BudgetDecision, LedgerError> {
-    if ledger.spent(&budget.window, scope, today)? < budget.limit {
-        return Ok(BudgetDecision::Allow);
-    }
-    if budget.on_breach == "block" && !offline {
-        return Ok(BudgetDecision::Block {
-            window: budget.window.clone(),
-            limit: budget.limit,
-        });
-    }
-    Ok(BudgetDecision::Degrade)
+    let spent = ledger.spent(&budget.window, scope, today)?;
+    Ok(evaluate_spent(spent, budget, offline))
 }
 
 /// Choose the route a budget degrade switches to, or `None` when the budget
@@ -388,14 +356,14 @@ mod tests {
         );
         let policy = BudgetPolicy::from_gateway_config(&config);
         assert_eq!(
-            policy.evaluate(&ledger, true, Some("team-a"), today, false)?,
+            policy.evaluate_for(&ledger, true, None, Some("team-a"), today, false)?,
             BudgetDecision::Block {
                 window: "day".to_owned(),
                 limit: 1.0
             }
         );
         assert_eq!(
-            policy.evaluate(&ledger, true, Some("team-a"), today, true)?,
+            policy.evaluate_for(&ledger, true, None, Some("team-a"), today, true)?,
             BudgetDecision::Degrade
         );
         Ok(())
@@ -418,11 +386,11 @@ mod tests {
         );
         let policy = BudgetPolicy::from_gateway_config(&config);
         assert_eq!(
-            policy.evaluate(&ledger, true, Some("team-a"), today, false)?,
+            policy.evaluate_for(&ledger, true, None, Some("team-a"), today, false)?,
             BudgetDecision::Allow
         );
         assert_eq!(
-            policy.evaluate(&ledger, false, Some("team-b"), today, false)?,
+            policy.evaluate_for(&ledger, false, None, Some("team-b"), today, false)?,
             BudgetDecision::Allow
         );
         assert_eq!(format_limit(2.0), "2.0");

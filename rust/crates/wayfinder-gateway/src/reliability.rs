@@ -194,11 +194,6 @@ impl ReliabilityPolicy {
         ))
     }
 
-    /// Whether one concrete target is currently outside its circuit cooldown.
-    pub fn target_available(&self, target: &str) -> Result<bool, ReliabilityError> {
-        Ok(!self.delivery_plan(target, &[], |_| true)?.is_empty())
-    }
-
     /// Acquire one target-level lease, including single-flight half-open state.
     pub fn begin_attempt(
         &self,
@@ -220,17 +215,6 @@ impl ReliabilityPolicy {
             state,
             completed: false,
         }))
-    }
-
-    /// Fold one target-level outcome into the shared breaker.
-    pub fn record(&self, target: &str, succeeded: bool) -> Result<(), ReliabilityError> {
-        let mut breaker = self
-            .breaker
-            .lock()
-            .map_err(|_| ReliabilityError::LockPoisoned)?;
-        let now = self.now()?;
-        breaker.record_at(target, succeeded, now);
-        Ok(())
     }
 
     fn now(&self) -> Result<f64, ReliabilityError> {
@@ -309,6 +293,14 @@ mod tests {
 
     use super::*;
 
+    /// Trip `target` through the same lease path production delivery uses.
+    fn fail_attempt(policy: &ReliabilityPolicy, target: &str) -> Result<(), ReliabilityError> {
+        policy
+            .begin_attempt(target)?
+            .ok_or(ReliabilityError::InvalidTime)?
+            .complete(false)
+    }
+
     #[test]
     fn configuration_header_and_shared_breaker_are_deterministic() -> Result<(), ReliabilityError> {
         let config = GatewayConfig {
@@ -332,8 +324,7 @@ mod tests {
             policy.delivery_plan("cloud", &["local".to_owned()], |_| true)?,
             ["cloud", "local"]
         );
-        policy.record("cloud", false)?;
-        assert!(!policy.target_available("cloud")?);
+        fail_attempt(&policy, "cloud")?;
         assert_eq!(
             policy.delivery_plan("cloud", &["local".to_owned()], |_| true)?,
             ["local"]
@@ -352,10 +343,10 @@ mod tests {
             policy.delivery_plan("local", &[], |_| true),
             Err(ReliabilityError::InvalidTime)
         );
-        assert_eq!(
-            policy.record("local", true),
+        assert!(matches!(
+            policy.begin_attempt("local"),
             Err(ReliabilityError::InvalidTime)
-        );
+        ));
         Ok(())
     }
 
@@ -374,7 +365,7 @@ mod tests {
             || 0.0,
         )?;
 
-        policy.record("cloud", false)?;
+        fail_attempt(&policy, "cloud")?;
         now.store(10, Ordering::SeqCst);
         let probe = policy
             .begin_attempt("cloud")?
@@ -388,7 +379,7 @@ mod tests {
         assert!(!closed.is_half_open());
         drop(closed);
 
-        policy.record("cloud", false)?;
+        fail_attempt(&policy, "cloud")?;
         now.store(20, Ordering::SeqCst);
         policy
             .begin_attempt("cloud")?
@@ -419,7 +410,7 @@ mod tests {
             move || clock.load(Ordering::SeqCst) as f64,
             || 0.0,
         )?);
-        policy.record("cloud", false)?;
+        fail_attempt(&policy, "cloud")?;
         now.store(10, Ordering::SeqCst);
         let start = Arc::new(Barrier::new(3));
         let finish = Arc::new(Barrier::new(3));
