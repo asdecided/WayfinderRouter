@@ -35,6 +35,8 @@ spec:
           imagePullPolicy: {{ .Values.redis.image.pullPolicy }}
           args:
             - redis-server
+            - --port
+            - {{ .Values.redis.port | quote }}
             - --save
             - ""
             - --appendonly
@@ -62,6 +64,8 @@ spec:
             exec:
               command:
                 - redis-cli
+                - -p
+                - {{ .Values.redis.port | quote }}
                 - ping
             periodSeconds: 5
             timeoutSeconds: 3
@@ -69,6 +73,8 @@ spec:
             exec:
               command:
                 - redis-cli
+                - -p
+                - {{ .Values.redis.port | quote }}
                 - ping
             periodSeconds: 10
             timeoutSeconds: 3
