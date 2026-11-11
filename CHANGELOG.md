@@ -55,6 +55,15 @@ details, release history over commit history.
   than the working directory, which a launchd or systemd service does not
   control. A ledger already in the working directory keeps being used, and
   `WAYFINDER_ROUTER_SAVINGS_FILE` still overrides both.
+- Non-streaming requests now treat a fatal provider fault the same way streaming
+  does: it counts against the circuit breaker, while account, quota and request
+  faults do not. Previously no fatal fault on a non-streaming request counted.
+- A failed rate-limit token reconcile no longer drops the cost metrics and the
+  recent-decision record for a turn whose spend was already recorded.
+- Responses served by a failover target are no longer written to the response
+  cache under a key that no lookup computes.
+- `/v1/messages` now forwards the canary identity, canary cohort and shadow
+  provider-consent headers, as `/v1/responses` already did.
 - A streaming request to a model with several pooled deployments no longer calls
   every deployment. Previously each remaining deployment was also sent the
   request after a stream was already open, and the last one to answer was served.

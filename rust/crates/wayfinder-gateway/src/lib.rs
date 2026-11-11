@@ -466,7 +466,10 @@ const PRIVACY_POSTURE_HEADER: &str = "x-wayfinder-privacy-posture";
 const ROUTER_PRIVACY_POSTURE_HEADER: &str = "x-wayfinder-router-privacy-posture";
 const DEBUG_HEADER: &str = "x-wayfinder-debug";
 const ROUTE_PRESET_PREFIX: &str = "@route/";
-const CHAT_CONTROL_HEADERS: [&str; 8] = [
+const CHAT_CONTROL_HEADERS: [&str; 11] = [
+    CANARY_IDENTITY_HEADER,
+    CANARY_COHORT_HEADER,
+    wayfinder_config::gateway::SHADOW_PROVIDER_CONSENT_HEADER,
     OFFLINE_HEADER,
     FAILOVER_HEADER,
     PRIVACY_POSTURE_HEADER,
@@ -3489,10 +3492,14 @@ pub(crate) async fn chat_completions(
             Value::Null
         };
         if is_storable(status.as_u16(), &response_content_type, &response_value) {
+            // The lookup key is built from the planned destination. A response
+            // that came from a failover target would be stored under a key no
+            // lookup ever computes, so it is not stored at all.
             if let Some(served_target) = state
                 .models()
                 .iter()
                 .find(|model| model.name() == served_by)
+                .filter(|_| served_by == delivery_name)
             {
                 if served_target.provider() != ProviderKind::CodexAppServer {
                     if let Ok(key) = cache_key_with_version(
@@ -4904,7 +4911,14 @@ async fn deliver_with_reliability(
                         let _ = state.metrics().observe_upstream_error(&target_id);
                         if !matches!(error, DeliveryError::Provider(ProviderError::Transport)) {
                             if let Some(attempt) = reliability_attempt.take() {
-                                attempt.release_in_background();
+                                // Same rule as the streaming path: a fatal
+                                // provider fault counts against the breaker;
+                                // account, quota and request faults do not.
+                                if stream_failure_affects_reliability(&error) {
+                                    let _ = attempt.complete_in_background(false);
+                                } else {
+                                    attempt.release_in_background();
+                                }
                             }
                             return Err(ReliableDeliveryFailure::Fatal(error));
                         }
@@ -5805,8 +5819,12 @@ async fn record_accounted_usage(
     let tokens = cost.prompt_tokens.saturating_add(cost.completion_tokens);
     if let Some(reservation) = token_reservation {
         if !estimated {
-            let policy = state.access_policy()?;
-            policy.reconcile_tokens(reservation, tokens).await.ok()?;
+            // Spend is already recorded above. A failed reconcile leaves the
+            // conservative reservation in place; it must not also drop the
+            // cost metrics and the recent-decision record for this turn.
+            if let Some(policy) = state.access_policy() {
+                let _ = policy.reconcile_tokens(reservation, tokens).await;
+            }
         }
     } else if let (Some(policy), Some(grant)) = (state.access_policy(), access_grant) {
         let _ = policy.add_tokens(grant, tokens);
