@@ -193,6 +193,24 @@ async fn replicated_accounting_admission_and_health_are_atomic() -> TestResult {
         second.record_cost(observation).await,
         "record duplicate"
     )?);
+    // The idempotency set is scoped to the current wall-clock day and
+    // expires, so it cannot grow without bound under traffic.
+    let epoch_day = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs()
+        / 86_400;
+    let seen_key = format!(
+        "wayfinder:v1:{}:ledger-seen:{epoch_day}",
+        URL_SAFE_NO_PAD.encode(namespace.as_bytes())
+    );
+    let seen_ttl: i64 = redis::cmd("TTL")
+        .arg(&seen_key)
+        .query_async(&mut admin)
+        .await?;
+    assert!(
+        (1..=2 * 24 * 60 * 60).contains(&seen_ttl),
+        "idempotency set must expire within two days, ttl={seen_ttl}"
+    );
     assert!(
         !redis_step(
             first

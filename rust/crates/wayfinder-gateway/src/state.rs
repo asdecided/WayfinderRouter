@@ -27,7 +27,11 @@ const SHARED_QUALITY_SCALE: f64 = 1_000_000.0;
 type CanaryRedisSnapshot = (i64, i64, i64, i64, i64, i64, i64, i64, i64, String);
 const SHARED_LEDGER_DAY_TTL_SECONDS: u64 = 400 * 24 * 60 * 60;
 const SHARED_LEDGER_MONTH_TTL_SECONDS: u64 = 5 * 365 * 24 * 60 * 60;
-const SHARED_LEDGER_IDEMPOTENCY_TTL_SECONDS: u64 = 5 * 365 * 24 * 60 * 60;
+/// Request ids are remembered in one set per wall-clock day, and a new
+/// observation is checked against today's and yesterday's sets. A duplicate is
+/// therefore rejected for at least 24 hours, including across a UTC ledger
+/// boundary, while each set expires instead of one set growing forever.
+const SHARED_LEDGER_IDEMPOTENCY_TTL_SECONDS: u64 = 2 * 24 * 60 * 60;
 const SHARED_BUDGET_RESERVATION_TTL_MS: u64 = 6 * 60 * 60 * 1_000;
 
 fn encode_redis_component(value: &str) -> String {
@@ -894,8 +898,9 @@ return 1
 "#;
 
 const RECORD_COST_SCRIPT: &str = r#"
--- KEYS[1] is the idempotency set. Remaining keys are the day/month/all
--- aggregate hashes for each requested accounting scope.
+-- KEYS[1] and KEYS[2] are today's and yesterday's idempotency sets. Remaining
+-- keys are the day/month/all aggregate hashes for each requested scope.
+if redis.call('SISMEMBER', KEYS[2], ARGV[1]) == 1 then return 0 end
 if redis.call('SADD', KEYS[1], ARGV[1]) == 0 then return 0 end
 local realized = ARGV[2]
 local baseline = ARGV[3]
@@ -903,7 +908,7 @@ local savings = ARGV[4]
 local prompt = ARGV[5]
 local completion = ARGV[6]
 local estimated = ARGV[7]
-for index = 2, #KEYS do
+for index = 3, #KEYS do
   redis.call('HINCRBY', KEYS[index], 'requests', 1)
   redis.call('HINCRBY', KEYS[index], 'estimated_requests', estimated)
   redis.call('HINCRBY', KEYS[index], 'prompt_tokens', prompt)
@@ -911,7 +916,7 @@ for index = 2, #KEYS do
   redis.call('HINCRBY', KEYS[index], 'realized_micros', realized)
   redis.call('HINCRBY', KEYS[index], 'baseline_micros', baseline)
   redis.call('HINCRBY', KEYS[index], 'savings_micros', savings)
-  local period_offset = (index - 2) % 3
+  local period_offset = (index - 3) % 3
   if period_offset == 0 then
     redis.call('PEXPIRE', KEYS[index], tonumber(ARGV[8]) * 1000)
   elseif period_offset == 1 then
@@ -1257,8 +1262,11 @@ impl RedisKeyNamespace {
         )
     }
 
-    fn ledger_seen(&self) -> String {
-        format!("{REDIS_KEY_ROOT}:{}:ledger-seen", self.encoded_namespace)
+    fn ledger_seen(&self, epoch_day: u64) -> String {
+        format!(
+            "{REDIS_KEY_ROOT}:{}:ledger-seen:{epoch_day}",
+            self.encoded_namespace
+        )
     }
 
     fn budget_reservations(&self, period: &str, scope: &str) -> String {
@@ -1620,7 +1628,15 @@ impl StateBackend for RedisStateBackend {
             let completion = i64::try_from(observation.completion_tokens)
                 .map_err(|_| StateBackendError::Unavailable)?;
             let estimated = i64::from(observation.estimated);
-            let mut keys = vec![self.keys.ledger_seen()];
+            let epoch_day = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| StateBackendError::Unavailable)?
+                .as_secs()
+                / 86_400;
+            let mut keys = vec![
+                self.keys.ledger_seen(epoch_day),
+                self.keys.ledger_seen(epoch_day.saturating_sub(1)),
+            ];
             for scope in scopes {
                 keys.push(self.keys.ledger(&format!("day:{date}"), &scope));
                 keys.push(self.keys.ledger(&format!("month:{}", &date[..7]), &scope));
