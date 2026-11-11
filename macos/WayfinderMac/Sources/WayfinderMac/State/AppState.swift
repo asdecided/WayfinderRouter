@@ -2,9 +2,6 @@ import Foundation
 
 @MainActor
 public final class AppState: ObservableObject {
-    @Published public var prompt = ""
-    @Published public private(set) var analysis: PromptAnalysisState = .idle
-    @Published public var statsRange: StatsRange = .today
     @Published public private(set) var routingStats: RoutingStats
     @Published public private(set) var gatewayOverview: GatewayOverview
     @Published public private(set) var isRefreshingStats = false
@@ -46,10 +43,6 @@ public final class AppState: ObservableObject {
         }
     }
 
-    public var canAnalyse: Bool {
-        !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !analysis.isAnalysing
-    }
-
     public var canSendMessage: Bool {
         guard !isSendingMessage, let submission = resolvedChatSubmission else {
             return false
@@ -66,32 +59,6 @@ public final class AppState: ObservableObject {
             return false
         }
         return retryDestination(for: failedTurn.prompt).isAvailable
-    }
-
-    public func analyse() {
-        let input = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !input.isEmpty, !analysis.isAnalysing else {
-            return
-        }
-
-        analysis = .analysing
-        Task {
-            do {
-                let decision = try await client.route(prompt: input)
-                await MainActor.run {
-                    self.analysis = .result(decision)
-                }
-            } catch {
-                await MainActor.run {
-                    self.analysis = .failed(error.localizedDescription)
-                }
-            }
-        }
-    }
-
-    public func clear() {
-        prompt = ""
-        analysis = .idle
     }
 
     public func refreshStats() {
@@ -128,11 +95,6 @@ public final class AppState: ObservableObject {
             let assessment = await setupService.assess()
             await MainActor.run { self.setupAssessment = assessment }
         }
-    }
-
-    public func selectStatsRange(_ range: StatsRange) {
-        statsRange = range
-        refreshStats()
     }
 
     public func sendChatDraft() {
@@ -536,7 +498,6 @@ private extension RoutingStats {
             hasSavings: false,
             savedTodayDisplay: "Today: Not yet available",
             savedLast30DaysDisplay: "Last 30 days: Not yet available",
-            averageRoutingTimeMilliseconds: 0,
             updatedAt: Date(),
             isRunning: false
         )

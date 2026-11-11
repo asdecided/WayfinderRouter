@@ -296,24 +296,6 @@ private struct InlineGatewayMessage: View {
     }
 }
 
-private struct GatewayDiagnosticsDivider: View {
-    var body: some View {
-        HStack(spacing: 8) {
-            Rectangle()
-                .fill(WayfinderTheme.hairline)
-                .frame(height: 1)
-            Text("Diagnostics")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-            Rectangle()
-                .fill(WayfinderTheme.hairline)
-                .frame(height: 1)
-        }
-        .padding(.horizontal, 12)
-        .frame(height: 28)
-    }
-}
-
 private struct GatewayRouteNamesRow: View {
     let names: [String]
     let detail: String
@@ -436,68 +418,6 @@ private struct GatewayValueRow: View {
         .frame(minHeight: 44)
         .padding(.horizontal, 12)
         .padding(.vertical, 5)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(WayfinderTheme.hairline)
-                .frame(height: 1)
-        }
-    }
-}
-
-private struct GatewayExplainerSection: View {
-    var body: some View {
-        VStack(spacing: 0) {
-                GatewayExplainerRow(
-                    title: "Connect",
-                    value: "Point each app at the URL matching its API shape.",
-                    symbolName: "link"
-                )
-                GatewayExplainerRow(
-                    title: "Choose",
-                    value: "Use model=\"auto\" to let Wayfinder choose for each request.",
-                    symbolName: "arrow.triangle.branch"
-                )
-                GatewayExplainerRow(
-                    title: "Pin",
-                    value: "Use prefer-local, prefer-hosted, or a configured route name when an app needs a stable path.",
-                    symbolName: "mappin.and.ellipse"
-                )
-                GatewayExplainerRow(
-                    title: "Share",
-                    value: "One gateway can serve many apps without running separate services.",
-                    symbolName: "point.3.connected.trianglepath.dotted"
-                )
-        }
-    }
-}
-
-private struct GatewayExplainerRow: View {
-    let title: String
-    let value: String
-    let symbolName: String
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Image(systemName: symbolName)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 20)
-
-            Text(title)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .frame(width: 126, alignment: .leading)
-
-            Text(value)
-                .font(.callout)
-                .foregroundStyle(.primary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Spacer(minLength: 12)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .frame(minHeight: 44)
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(WayfinderTheme.hairline)

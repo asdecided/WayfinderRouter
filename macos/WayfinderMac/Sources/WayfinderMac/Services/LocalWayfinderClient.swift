@@ -22,7 +22,6 @@ public struct LocalWayfinderClient: WayfinderClient {
             savedLast30Days: Decimal(string: "0.01") ?? 0,
             cloudSpendToday: Decimal(string: "0.00") ?? 0,
             percentVsAlwaysCloud: 0.29,
-            averageRoutingTimeMilliseconds: 0.82,
             updatedAt: Date(),
             isRunning: true
         )

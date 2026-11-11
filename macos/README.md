@@ -57,7 +57,7 @@ deferred. `Packaging/RELEASE.md` defines the physical-Mac release and rollback e
   Settings, service controls, routing configuration, provider-key management through the Keychain
   boundary, privacy, Help, About, and focused Chat through the bundled gateway.
 - The compact popover has one enabled Chat row that opens a retained, reusable native window.
-- Settings window: native sidebar, Keys screen, provider picker/form, existing key status row, Keychain info box.
+- Settings window: native sidebar, Connections screen with service picker and provider form, existing key status row, Keychain info box.
 - Service boundary: `WayfinderClient` supports `route(prompt:)`, `loadStats(range:)`, and `loadOverview()`. The app entrypoint uses `GatewayWayfinderClient` for live status/stat rendering; `MockWayfinderClient` remains available for previews and tests.
 
 ## Chat boundary

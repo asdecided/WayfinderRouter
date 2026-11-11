@@ -217,7 +217,6 @@ final class PopoverPresentationTests: XCTestCase {
             percentVsAlwaysCloud: 0.29,
             isPriced: false,
             hasSavings: false,
-            averageRoutingTimeMilliseconds: 0,
             updatedAt: Date(timeIntervalSince1970: 0),
             isRunning: true
         )

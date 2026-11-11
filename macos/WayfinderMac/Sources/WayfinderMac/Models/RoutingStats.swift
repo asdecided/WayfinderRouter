@@ -22,7 +22,6 @@ public struct RoutingStats: Codable, Equatable, Sendable {
     public let hasSavings: Bool
     public let savedTodayDisplay: String
     public let savedLast30DaysDisplay: String
-    public let averageRoutingTimeMilliseconds: Double
     public let updatedAt: Date
     public let isRunning: Bool
 
@@ -40,7 +39,6 @@ public struct RoutingStats: Codable, Equatable, Sendable {
         hasSavings: Bool = true,
         savedTodayDisplay: String? = nil,
         savedLast30DaysDisplay: String? = nil,
-        averageRoutingTimeMilliseconds: Double,
         updatedAt: Date,
         isRunning: Bool
     ) {
@@ -57,7 +55,6 @@ public struct RoutingStats: Codable, Equatable, Sendable {
         self.hasSavings = hasSavings
         self.savedTodayDisplay = savedTodayDisplay ?? savedToday.currencyText
         self.savedLast30DaysDisplay = savedLast30DaysDisplay ?? savedLast30Days.currencyText
-        self.averageRoutingTimeMilliseconds = averageRoutingTimeMilliseconds
         self.updatedAt = updatedAt
         self.isRunning = isRunning
     }
