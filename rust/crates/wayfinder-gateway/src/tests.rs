@@ -800,6 +800,48 @@ fn anthropic_surface_forwards_canary_and_shadow_consent_headers() {
     assert!(!forwarded.contains_key("x-unrelated"));
 }
 
+#[test]
+fn reloadable_router_is_built_once_per_snapshot() -> TestResult {
+    let state = || AppState::new(RoutingConfig::binary(0.5), Vec::new(), false, "test");
+    let holder = Arc::new(crate::reload::LastGood::new(state(), 1_u64));
+    let dispatch = crate::ReloadableDispatch::new(Arc::clone(&holder));
+    let builds = AtomicUsize::new(0);
+    let build = |state: AppState| {
+        builds.fetch_add(1, Ordering::SeqCst);
+        Ok::<_, std::convert::Infallible>(build_router(state))
+    };
+
+    let first = holder.current()?;
+    for _ in 0..5 {
+        assert!(dispatch.router_for(&first, build).is_ok());
+    }
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        1,
+        "one build for one snapshot"
+    );
+
+    // A reload installs a different snapshot, which gets its own router.
+    let _ = holder.refresh(2_u64, || Ok::<_, std::convert::Infallible>(state()))?;
+    let second = holder.current()?;
+    assert!(!Arc::ptr_eq(&first, &second));
+    for _ in 0..5 {
+        assert!(dispatch.router_for(&second, build).is_ok());
+    }
+    assert_eq!(builds.load(Ordering::SeqCst), 2);
+
+    // A failed build is reported and never cached.
+    let _ = holder.refresh(3_u64, || Ok::<_, std::convert::Infallible>(state()))?;
+    let third = holder.current()?;
+    assert!(matches!(
+        dispatch.router_for(&third, |_| Err::<axum::Router, _>("not ready")),
+        Err(Some("not ready"))
+    ));
+    assert!(dispatch.router_for(&third, build).is_ok());
+    assert_eq!(builds.load(Ordering::SeqCst), 3);
+    Ok(())
+}
+
 const EXACT_USAGE_BODY: &[u8] =
     br#"{"object":"chat.completion","usage":{"prompt_tokens":1000,"completion_tokens":25},"choices":[{"message":{"content":"ok"}}]}"#;
 
