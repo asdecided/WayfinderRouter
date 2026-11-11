@@ -324,7 +324,6 @@ final class ChatDestinationMentionTests: XCTestCase {
                 savedLast30Days: 0,
                 cloudSpendToday: 0,
                 percentVsAlwaysCloud: 0,
-                averageRoutingTimeMilliseconds: 0,
                 updatedAt: Date(),
                 isRunning: true
             ),

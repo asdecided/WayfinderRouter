@@ -394,7 +394,6 @@ public struct GatewayWayfinderClient: WayfinderClient {
             hasSavings: hasSavings,
             savedTodayDisplay: savingsToday?.displayLine(period: "Today") ?? "Today: Not yet available",
             savedLast30DaysDisplay: savingsThirtyDays?.displayLine(period: "Last 30 days") ?? "Last 30 days: Not yet available",
-            averageRoutingTimeMilliseconds: 0,
             updatedAt: updatedAt,
             isRunning: gateway.isRunning
         )

@@ -758,7 +758,6 @@ private extension RoutingStats {
             savedLast30Days: 0,
             cloudSpendToday: 0,
             percentVsAlwaysCloud: 0,
-            averageRoutingTimeMilliseconds: 0,
             updatedAt: Date(),
             isRunning: true
         )
@@ -801,7 +800,6 @@ private struct ScriptedChatClient: WayfinderClient {
             savedLast30Days: 0,
             cloudSpendToday: 0,
             percentVsAlwaysCloud: 1,
-            averageRoutingTimeMilliseconds: 0,
             updatedAt: Date(),
             isRunning: true
         )

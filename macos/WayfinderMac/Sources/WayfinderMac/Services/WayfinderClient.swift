@@ -39,10 +39,6 @@ public extension WayfinderClient {
         }
     }
 
-    func analyse(prompt: String) async throws -> RoutingDecision {
-        try await route(prompt: prompt)
-    }
-
     func loadOverview() async throws -> GatewayOverview {
         let stats = try await loadStats(range: .today)
         return GatewayOverview(
