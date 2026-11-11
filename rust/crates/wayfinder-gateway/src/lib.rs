@@ -2045,6 +2045,44 @@ pub fn build_data_plane_router(state: AppState) -> Result<Router, DataPlaneError
         .with_state(state))
 }
 
+/// Routes one snapshot at a time, building its router once per snapshot.
+///
+/// The router for a configuration snapshot only depends on that snapshot, so
+/// it is built when the snapshot is first served and reused until a reload
+/// installs a different one. Building it for every request repeated the whole
+/// route table and a deep clone of the state on the hot path.
+struct ReloadableDispatch<V> {
+    holder: Arc<LastGood<AppState, V>>,
+    built: Mutex<Option<(Arc<AppState>, Router)>>,
+}
+
+impl<V> ReloadableDispatch<V> {
+    fn new(holder: Arc<LastGood<AppState, V>>) -> Arc<Self> {
+        Arc::new(Self {
+            holder,
+            built: Mutex::new(None),
+        })
+    }
+
+    /// Return the router for `snapshot`, building it only when the snapshot
+    /// changed. A build failure is returned and never cached.
+    fn router_for<E>(
+        &self,
+        snapshot: &Arc<AppState>,
+        build: impl FnOnce(AppState) -> Result<Router, E>,
+    ) -> Result<Router, Option<E>> {
+        let mut built = self.built.lock().map_err(|_| None)?;
+        if let Some((cached_for, router)) = built.as_ref() {
+            if Arc::ptr_eq(cached_for, snapshot) {
+                return Ok(router.clone());
+            }
+        }
+        let router = build((**snapshot).clone()).map_err(Some)?;
+        *built = Some((Arc::clone(snapshot), router.clone()));
+        Ok(router)
+    }
+}
+
 /// Build a router that selects one immutable last-good state per request.
 ///
 /// Reload installation is deliberately owned by the process boundary. A
@@ -2056,7 +2094,7 @@ where
 {
     Router::new()
         .fallback(reloadable_dispatch::<V>)
-        .with_state(holder)
+        .with_state(ReloadableDispatch::new(holder))
 }
 
 /// Build a managed data plane over immutable last-good configuration snapshots.
@@ -2066,40 +2104,44 @@ where
 {
     Router::new()
         .fallback(reloadable_data_plane_dispatch::<V>)
-        .with_state(holder)
+        .with_state(ReloadableDispatch::new(holder))
 }
 
 async fn reloadable_dispatch<V>(
-    State(holder): State<Arc<LastGood<AppState, V>>>,
+    State(dispatch): State<Arc<ReloadableDispatch<V>>>,
     request: Request<Body>,
 ) -> Response
 where
     V: Clone + Eq + Send + Sync + 'static,
 {
-    let state = match holder.current() {
-        Ok(state) => state,
-        Err(_) => return internal_error_response(),
+    let Ok(snapshot) = dispatch.holder.current() else {
+        return internal_error_response();
     };
-    match build_router((*state).clone()).oneshot(request).await {
+    let Ok(application) =
+        dispatch.router_for(&snapshot, |state| Ok::<_, Infallible>(build_router(state)))
+    else {
+        return internal_error_response();
+    };
+    match application.oneshot(request).await {
         Ok(response) => response,
         Err(error) => match error {},
     }
 }
 
 async fn reloadable_data_plane_dispatch<V>(
-    State(holder): State<Arc<LastGood<AppState, V>>>,
+    State(dispatch): State<Arc<ReloadableDispatch<V>>>,
     request: Request<Body>,
 ) -> Response
 where
     V: Clone + Eq + Send + Sync + 'static,
 {
-    let state = match holder.current() {
-        Ok(state) => state,
-        Err(_) => return internal_error_response(),
+    let Ok(snapshot) = dispatch.holder.current() else {
+        return internal_error_response();
     };
-    let application = match build_data_plane_router((*state).clone()) {
+    let application = match dispatch.router_for(&snapshot, build_data_plane_router) {
         Ok(application) => application,
-        Err(_) => return data_plane_unavailable_response(),
+        Err(Some(_)) => return data_plane_unavailable_response(),
+        Err(None) => return internal_error_response(),
     };
     match application.oneshot(request).await {
         Ok(response) => response,
