@@ -59,9 +59,8 @@ own traffic's difficulty lives in its vocabulary. See [lexical-routing.md](lexic
 
 ## How fast is the decision?
 
-It's a pure-Python text scan on one core, so the number is machine- and prompt-length dependent — run
-`python -m benchmarks.run` to measure it on your hardware. Roughly tens of microseconds on short/medium
-prompts, up to ~200µs on very long ones, always sub-millisecond. Latency grows with prompt length (it
+It's a text scan on one core, so the number is machine- and prompt-length dependent. Roughly tens of
+microseconds on short/medium prompts, up to ~200µs on very long ones, always sub-millisecond. Latency grows with prompt length (it
 scans the text), so cap or sample if you have pathological inputs. The point isn't a throughput record:
 the decision is negligible next to the inference it gates, it's CPU-only, and there's no network in the
 path — so it never becomes the bottleneck, a dependency, or an outage surface.
@@ -119,11 +118,12 @@ Wayfinder is the deterministic, free, offline option for the serving path.
 
 Yes — but offline, at calibration time, never on the live request. Calling several models to compare
 them *is* a model call, which by [WF-ADR-0001](../decisions/WF-ADR-0001-standalone-deterministic-router.md)
-can't enter the routing decision. So Wayfinder runs that compare-and-grade loop *once, out of band*:
-`wayfinder-router judge` ([WF-ADR-0037](../decisions/WF-ADR-0037-automated-sufficiency-judge.md)) sends a
-sample of your prompts through both tiers, has an automated **sufficiency judge** decide whether the cheap
-tier's answer was good enough, and mints `{text, label}` rows behind trust gates. `calibrate` then bakes
-those labels into the deterministic cut. The heuristic — *which prompts actually need the big model* — is
+can't enter the routing decision. So that compare-and-grade loop runs *once, out of band*: send a sample
+of your prompts through both tiers, decide for each whether the cheap tier's answer was good enough, and
+record the result as `{text, label}` rows ([WF-ADR-0037](../decisions/WF-ADR-0037-automated-sufficiency-judge.md)
+describes the automated sufficiency judge the retired package shipped for this; the current
+`wayfinder-router` binary has no `judge` command, so the rows come from your own run).
+`wayfinder-router calibrate` then bakes those labels into the deterministic cut. The heuristic — *which prompts actually need the big model* — is
 learned from real outcomes, then frozen into a free, offline decision; the comparison happens once, not on
 every request.
 
@@ -139,15 +139,14 @@ Yes — the decision is decoupled from the proxy by design, and that separation 
 [WF-ADR-0001](../decisions/WF-ADR-0001-standalone-deterministic-router.md). The entire decision is a pure
 function:
 
-```python
-from wayfinder_router import score_complexity, RoutingConfig
-
-result = score_complexity(prompt, config=RoutingConfig.binary(threshold=0.7))
-# result.score -> 0–1 float; result.recommendation -> the chosen model. No proxy, no key, no socket.
+```sh
+printf '%s' "$PROMPT" | wayfinder-router route --json --threshold 0.7 -
+# Prints the 0–1 score and the recommended model. No proxy, no key, no socket.
 ```
 
-You dispatch however you like. The HTTP gateway is just one consumer of that function — you can call the
-router in-process and route yourself, vendor it as a library, or put your own transport (a queue, a gRPC
+You dispatch however you like. The HTTP gateway is just one consumer of that function — in Rust it is
+`score_complexity` in the `wayfinder-routing-core` crate, so you can call the router in-process and route
+yourself, vendor it as a library, or put your own transport (a queue, a gRPC
 service, an SSH-tunnelled call) in front of it. The OpenAI-compatible proxy is a convenience for HTTP
 traffic, not a requirement for routing.
 
@@ -248,9 +247,7 @@ case (a first message that's short but hard), where the deterministic answer is 
 signals** — raise the lexical feature weights so difficulty *vocabulary* (`prove`, `theorem`, `∑`)
 scores, with the caveats in [lexical-routing.md](lexical-routing.md) — or an explicit pin (the `model`
 field `auto` / `prefer-local` / `prefer-hosted`, or `X-Wayfinder-Threshold`; see
-[integrations.md](integrations.md)). The demo's **Advanced** settings let
-you turn the lexical signals on, tune feature weights, edit the trigger words live, and export the
-result as config ([WF-ADR-0023](../decisions/WF-ADR-0023-in-demo-scoring-overrides.md)).
+[integrations.md](integrations.md)).
 
 ## Is it production-ready? Who maintains it? What are the dependencies?
 
