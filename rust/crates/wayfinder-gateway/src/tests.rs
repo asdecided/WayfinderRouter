@@ -669,6 +669,137 @@ async fn canary_cache_hit_is_not_recorded_as_a_canary_failure() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn buffered_fatal_fault_follows_the_streaming_breaker_classification() -> TestResult {
+    let config = GatewayConfig {
+        retries: 0,
+        breaker_threshold: 1,
+        breaker_cooldown: 60.0,
+        ..GatewayConfig::default()
+    };
+    let body = json!({
+        "model": "chatgpt",
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+    // A provider fault opens the breaker; an account-state fault does not.
+    for (error, opens) in [
+        (crate::delivery::CodexDeliveryError::Unavailable, true),
+        (crate::delivery::CodexDeliveryError::Busy, false),
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = AppState::new(
+            RoutingConfig::binary(0.5),
+            vec![
+                ConfiguredModel::new("chatgpt", "", "shared-provider-model", None, true)
+                    .with_provider(ProviderKind::CodexAppServer, None),
+            ],
+            false,
+            "test",
+        )
+        .with_gateway_reliability(&config)?
+        .with_delivery(Arc::new(CodexFailureDelivery {
+            calls: Arc::clone(&calls),
+            error,
+        }));
+        let _ = post_json(&state, "/v1/chat/completions", &body, &[]).await?;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        let _ = post_json(&state, "/v1/chat/completions", &body, &[]).await?;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            if opens { 1 } else { 2 },
+            "{error:?}: second request reaches the provider only if the breaker stayed closed"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn failover_served_response_is_not_stored_in_the_cache() -> TestResult {
+    let config = GatewayConfig {
+        retries: 0,
+        ..GatewayConfig::default()
+    };
+    let outcomes = BTreeMap::from([
+        (
+            "cloud".to_owned(),
+            VecDeque::from([ScriptedOutcome::Transport]),
+        ),
+        (
+            "cloud-backup".to_owned(),
+            VecDeque::from([ScriptedOutcome::Response(StatusCode::OK, EXACT_USAGE_BODY)]),
+        ),
+    ]);
+    let (state, seen) = reliability_live_state(&config, Vec::new(), outcomes)?;
+    let state = state
+        .with_route_presets(IndexMap::from([(
+            "hosted".to_owned(),
+            RoutePreset {
+                models: vec!["cloud".to_owned(), "cloud-backup".to_owned()],
+            },
+        )]))
+        .with_cache_and_clock(
+            CacheSettings {
+                enabled: true,
+                ttl_seconds: 300.0,
+                max_entries: 16,
+                max_bytes: 1024 * 1024,
+            },
+            || 1_000.0,
+        )?;
+
+    let response = post_json(
+        &state,
+        "/v1/chat/completions",
+        &json!({
+            "model": "@route/hosted",
+            "messages": [{"role": "user", "content": "served by the fallback"}]
+        }),
+        &[],
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-wayfinder-router-served-by")
+            .and_then(|value| value.to_str().ok()),
+        Some("cloud-backup")
+    );
+    let _ = to_bytes(response.into_body(), usize::MAX).await?;
+    assert_eq!(
+        seen.lock()
+            .map_err(|_| std::io::Error::other("seen lock poisoned"))?
+            .as_slice(),
+        ["cloud", "cloud-backup"]
+    );
+    assert_eq!(
+        state.response_cache().stats()?.entries,
+        0,
+        "a failover response would be stored under a key no lookup computes"
+    );
+    Ok(())
+}
+
+#[test]
+fn anthropic_surface_forwards_canary_and_shadow_consent_headers() {
+    let mut source = axum::http::HeaderMap::new();
+    for name in [
+        crate::canary::CANARY_IDENTITY_HEADER,
+        crate::canary::CANARY_COHORT_HEADER,
+        wayfinder_config::gateway::SHADOW_PROVIDER_CONSENT_HEADER,
+        "x-unrelated",
+    ] {
+        source.insert(name, axum::http::HeaderValue::from_static("value"));
+    }
+    let forwarded = crate::chat_control_headers(&source);
+    assert!(forwarded.contains_key(crate::canary::CANARY_IDENTITY_HEADER));
+    assert!(forwarded.contains_key(crate::canary::CANARY_COHORT_HEADER));
+    assert!(forwarded.contains_key(wayfinder_config::gateway::SHADOW_PROVIDER_CONSENT_HEADER));
+    assert!(!forwarded.contains_key("x-unrelated"));
+}
+
 const EXACT_USAGE_BODY: &[u8] =
     br#"{"object":"chat.completion","usage":{"prompt_tokens":1000,"completion_tokens":25},"choices":[{"message":{"content":"ok"}}]}"#;
 
