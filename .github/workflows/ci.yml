@@ -41,10 +41,15 @@ jobs:
             echo "::error::runtime, container, or CI still invokes the retired Python gateway"
             exit 1
           fi
-      - name: Install the Rust toolchain and required components
-        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - name: Install the Rust toolchains
+        # Tests run on current stable. Formatting and Clippy run on the pinned
+        # 1.85.0 toolchain, the same one the Desktop release preflight uses, so
+        # a change cannot pass here and then fail at release time.
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup toolchain install 1.85.0 --profile minimal --component rustfmt,clippy
       - name: Rust formatting
-        run: cargo +stable fmt --manifest-path rust/Cargo.toml --all -- --check
+        run: cargo +1.85.0 fmt --manifest-path rust/Cargo.toml --all -- --check
       - name: Rust workspace tests
         run: cargo +stable test --manifest-path rust/Cargo.toml --workspace --all-features --locked
       - name: Build the default Router executable
@@ -61,7 +66,7 @@ jobs:
         run: cargo +stable test --manifest-path rust/Cargo.toml --doc --workspace --locked
       - name: Rust warning-denied Clippy
         run: >-
-          cargo +stable clippy --manifest-path rust/Cargo.toml --workspace --all-targets
+          cargo +1.85.0 clippy --manifest-path rust/Cargo.toml --workspace --all-targets
           --all-features --locked -- -D warnings
 
   supply-chain:

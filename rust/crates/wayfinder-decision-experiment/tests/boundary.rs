@@ -49,7 +49,7 @@ impl DecisionEngine for Spy {
     fn identity(&self) -> EngineIdentity {
         double(Ok(answer())).identity()
     }
-    fn decide<'a>(&'a self, request: DisclosedRequest) -> EngineFuture<'a> {
+    fn decide(&self, request: DisclosedRequest) -> EngineFuture<'_> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
             assert_eq!(request.context.len(), 1);

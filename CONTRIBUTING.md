@@ -17,9 +17,9 @@ toolchain documented by the desktop package.
 ## Required verification
 
 ```sh
-cargo fmt --manifest-path rust/Cargo.toml --all -- --check
+cargo +1.85.0 fmt --manifest-path rust/Cargo.toml --all -- --check
 cargo test --manifest-path rust/Cargo.toml --workspace --all-features --locked
-cargo clippy --manifest-path rust/Cargo.toml \
+cargo +1.85.0 clippy --manifest-path rust/Cargo.toml \
   --workspace --all-targets --all-features --locked -- -D warnings
 ```
 

@@ -674,8 +674,14 @@ fn profile_sha256(value: &str) -> String {
 }
 
 fn sha256(value: &[u8]) -> String {
+    use std::fmt::Write as _;
     let digest = Sha256::digest(value);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        // Writing to a `String` cannot fail.
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 fn write_project_atomically(

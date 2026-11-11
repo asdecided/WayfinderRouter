@@ -500,9 +500,9 @@ impl Setup {
                     );
                 }
                 let response = request(&self.client, &format!("{}/v1/chat/completions", self.endpoint), Some("wayfinder-local"), Some(json!({"model":"openai","messages":[{"role":"user","content":format!("Reply with the single word connected. Test ID: {}", Uuid::new_v4())}],"max_completion_tokens":256,"stream":false}))).await?;
-                if !response["choices"][0]["message"]["content"]
+                if response["choices"][0]["message"]["content"]
                     .as_str()
-                    .is_some_and(|s| !s.trim().is_empty())
+                    .is_none_or(|s| s.trim().is_empty())
                 {
                     return Err(
                         "The model returned no text within the test limit. Choose another chat model or retry.",
