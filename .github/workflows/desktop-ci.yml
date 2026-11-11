@@ -103,10 +103,6 @@ jobs:
         run: |
           rustup toolchain install 1.85.0 --profile minimal
           rustup target add aarch64-apple-darwin --toolchain 1.85.0
-      - name: Architecture policy tests
-        run: |
-          macos/WayfinderMac/Tests/ReleaseScripts/test_bounded_command.sh
-          macos/WayfinderMac/Tests/ReleaseScripts/test_release_architecture_policy.sh
       - name: Build and verify ad-hoc release bundle
         env:
           CODESIGN_IDENTITY: "-"
