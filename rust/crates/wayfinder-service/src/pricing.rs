@@ -944,6 +944,7 @@ impl SavingsLedger {
 
     /// Load persisted state, recovering a corrupt primary from the last-good
     /// file without deleting the corrupt evidence. Missing state starts empty.
+    /// A corrupt primary with no last-good file is an error on every call.
     pub fn load_resilient(
         path: &Path,
         max_days: usize,
@@ -955,15 +956,20 @@ impl SavingsLedger {
         match Self::load(path) {
             Ok(ledger) => Ok((ledger, LedgerLoad::Primary)),
             Err(primary_error) => {
+                // Without a last-good snapshot there is nothing to recover
+                // from. Leave the corrupt file where it is so every start
+                // fails the same way: moving it aside made the next start
+                // find no file and silently begin from an empty ledger,
+                // resetting recorded spend.
+                let backup = backup_path(path);
+                if !backup.exists() {
+                    return Err(primary_error);
+                }
                 let quarantine = quarantine_path(path);
                 fs::rename(path, &quarantine).map_err(|source| LedgerError::Io {
                     path: quarantine.clone(),
                     source,
                 })?;
-                let backup = backup_path(path);
-                if !backup.exists() {
-                    return Err(primary_error);
-                }
                 let ledger = Self::load(&backup)?;
                 fs::copy(&backup, path).map_err(|source| LedgerError::Io {
                     path: path.to_path_buf(),
@@ -1489,6 +1495,27 @@ mod tests {
         assert!(quarantine.exists());
         assert_eq!(recovered.period(None, day)?.requests, 1);
         assert_eq!(SavingsLedger::load(&path)?.period(None, day)?.requests, 1);
+        let _ = fs::remove_dir_all(directory);
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_ledger_without_a_backup_fails_on_every_load()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = std::env::temp_dir().join(format!(
+            "wayfinder-ledger-no-backup-{}-{}",
+            std::process::id(),
+            UtcDate::new(2026, 7, 13)?.ordinal()
+        ));
+        fs::create_dir_all(&directory)?;
+        let path = directory.join("savings.json");
+        fs::write(&path, b"{not-json")?;
+
+        // The second load must not find the file gone and start empty.
+        for _ in 0..2 {
+            assert!(SavingsLedger::load_resilient(&path, 400, true).is_err());
+            assert!(path.exists(), "the corrupt file stays as the evidence");
+        }
         let _ = fs::remove_dir_all(directory);
         Ok(())
     }
